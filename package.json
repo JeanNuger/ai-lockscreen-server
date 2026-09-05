@@ -1,0 +1,19 @@
+{
+  "name": "ai-lockscreen-server",
+  "version": "1.0.0",
+  "description": "Backend for AI Lock Screen — collects lightweight device/survey context and returns AI-generated phrase+style batches for the live wallpaper client.",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "express-session": "^1.18.0",
+    "openai": "^4.68.0"
+  }
+}
