@@ -3,6 +3,7 @@ const db = require('../db');
 const { WINDOWS } = require('../constants');
 const { generateBatch } = require('../contentGenerator');
 const { consumePendingMessages } = require('../adminMessages');
+const { parseDeviceSignals } = require('../deviceSignals');
 
 const router = express.Router();
 
@@ -19,7 +20,11 @@ const insertBatchStatement = db.prepare(`
   VALUES (?, ?, ?, ?, ?)
 `);
 
-// GET /api/v1/batch?device_id=...&window=morning|day|evening
+// GET /api/v1/batch?device_id=...&window=morning|day|evening|night
+// Optional device-signal params (see src/deviceSignals.js): battery_level,
+// ambient_light, screen_on_duration_seconds, steps_since_last_batch — all
+// independently optional, malformed values are ignored rather than
+// rejecting the request (see deviceSignals.js for why).
 // Returns { phrases: [{ text, style_id }, ...] } — see PRODUCT_REBUILD_PLAN.md §4.1.
 // No geodata is accepted or used, by design (§4.1 "без геоданных").
 //
@@ -38,14 +43,12 @@ router.get('/batch', async (req, res, next) => {
       return res.status(400).json({ error: `window must be one of: ${WINDOWS.join(', ')}` });
     }
 
-    // Unregistered device_id is not an error — the client's local fallback
-    // (StaticPhraseProvider) covers this on first run before /register has
-    // been called; here we still return a real (if less personalized) batch
-    // rather than forcing every unregistered device through the client fallback.
+    const signals = parseDeviceSignals(req.query);
+
     const device = getDeviceStatement.get(device_id) || { device_id };
     insertStubDeviceStatement.run(device_id);
 
-    const { phrases, source, context } = await generateBatch(device, window);
+    const { phrases, source, context } = await generateBatch(device, window, signals);
     const adminPhrases = consumePendingMessages(device_id);
     const combinedPhrases = [...phrases, ...adminPhrases];
 

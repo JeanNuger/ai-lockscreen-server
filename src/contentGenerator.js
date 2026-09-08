@@ -1,11 +1,5 @@
 const { STYLE_IDS, BATCH_SIZE } = require('./constants');
 
-// Local fallback phrases — used when OPENAI_API_KEY isn't set yet, or if the
-// OpenAI call fails. Mirrors the client-side StaticPhraseProvider's role: the
-// system should never hand back an empty batch. Server-side fallback exists
-// mainly for development before a key is available; the client has its own
-// independent fallback (StaticPhraseProvider) for when the network/server is
-// unreachable at all — this is a *different* safety net, not a duplicate.
 const FALLBACK_PHRASES = [
   'Хороший день начинается с тебя',
   'Ты справляешься лучше, чем думаешь',
@@ -34,7 +28,16 @@ function buildFallbackBatch() {
 // Builds the user-context prompt sent to the model. Deliberately excludes
 // anything not already agreed in PRODUCT_REBUILD_PLAN.md §5.1 — no location,
 // no notification/app data (see the plan's data-source list).
-function buildContextPrompt(device, window) {
+//
+// `signals` (optional) holds whichever device signals the client sent with
+// this /batch request — see src/deviceSignals.js. Each is appended only if
+// present; a device that didn't send a signal (older client, permission not
+// granted, sensor unavailable) simply doesn't get that line, same as the
+// existing survey fields above. Phrased descriptively, not as raw numbers
+// handed to the model, so the model reads them as loose context rather than
+// literal instructions — consistent with the system prompt's "не будь
+// слишком буквальным" guidance below.
+function buildContextPrompt(device, window, signals) {
   const parts = [];
   if (device.gender) parts.push(`пол: ${device.gender}`);
   if (device.birth_date) parts.push(`дата рождения: ${device.birth_date}`);
@@ -52,6 +55,22 @@ function buildContextPrompt(device, window) {
   if (device.tone) parts.push(`тон общения: ${device.tone}`);
   if (device.timezone) parts.push(`часовой пояс: ${device.timezone}`);
   parts.push(`время суток: ${window}`);
+
+  if (signals) {
+    if (signals.battery_level !== undefined) {
+      parts.push(`заряд батареи телефона: ${signals.battery_level}%`);
+    }
+    if (signals.ambient_light !== undefined) {
+      parts.push(`освещённость вокруг: ${signals.ambient_light} люкс`);
+    }
+    if (signals.screen_on_duration_seconds !== undefined) {
+      parts.push(`последний раз экран был включён: ${signals.screen_on_duration_seconds} сек`);
+    }
+    if (signals.steps_since_last_batch !== undefined) {
+      parts.push(`шагов с прошлого окна: ${signals.steps_since_last_batch}`);
+    }
+  }
+
   return parts.join('; ');
 }
 
@@ -68,11 +87,14 @@ const SYSTEM_PROMPT = `Ты — генератор коротких фраз д�
  * OpenAI call fails for any reason — the endpoint should never 500 just
  * because content generation had a bad day.
  *
+ * @param {object} device - row from the devices table (or a stub {device_id})
+ * @param {string} window - 'morning' | 'day' | 'evening' | 'night'
+ * @param {object} [signals] - optional device signals from deviceSignals.js
  * @returns {Promise<{phrases: Array<{text: string, style_id: string}>, source: 'openai'|'fallback'}>}
  */
-async function generateBatch(device, window) {
+async function generateBatch(device, window, signals) {
   const apiKey = process.env.OPENAI_API_KEY;
-  const context = buildContextPrompt(device, window);
+  const context = buildContextPrompt(device, window, signals);
 
   if (!apiKey) {
     return { phrases: buildFallbackBatch(), source: 'fallback', context };

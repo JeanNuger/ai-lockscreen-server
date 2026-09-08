@@ -1,7 +1,7 @@
 # AI Lock Screen — Server
 
 Минимальный backend для AI Lock Screen: собирает короткую анкету устройства,
-раз в окно доставки (утро/день/вечер) отдаёт батч из 10 фраз + стилей,
+раз в окно доставки (утро/день/вечер/ночь) отдаёт батч из 10 фраз + стилей,
 опционально сгенерированных через OpenAI (или локальный fallback, если ключ
 ещё не настроен).
 
@@ -82,9 +82,9 @@ node scripts/hash-password.js "твой-пароль"
 ```json
 {
   "device_id": "уникальный UUID, сгенерированный на телефоне при первом запуске",
-  "gender": "male | female",
+  "gender": "любая строка, без enum-валидации на сервере (например non_binary уже поддерживается)",
   "birth_date": "YYYY-MM-DD",
-  "interests": ["sport", "work", "family", "self_development"],
+  "interests": ["sport", "work", "family", "self_development", "mindfulness", "creative_arts"],
   "personal_goal": "строка из заранее заданных вариантов на клиенте",
   "tone": "формально | дружески | с юмором",
   "timezone": "Asia/Almaty"
@@ -93,7 +93,7 @@ node scripts/hash-password.js "твой-пароль"
 Все поля кроме `device_id` опциональны. Повторный вызов с тем же `device_id`
 обновляет уже сохранённые данные (upsert), не создаёт дубликат.
 
-### `GET /api/v1/batch?device_id=...&window=morning|day|evening`
+### `GET /api/v1/batch?device_id=...&window=morning|day|evening|night`
 
 ```json
 {

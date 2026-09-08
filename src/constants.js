@@ -11,7 +11,7 @@ const STYLE_IDS = [
   'SOFT_SAND',
 ];
 
-const WINDOWS = ['morning', 'day', 'evening'];
+const WINDOWS = ['morning', 'day', 'evening', 'night'];
 
 // How many phrases go out in one batch — matches PRODUCT_REBUILD_PLAN.md §4.1
 // ("10-12 фраз + идентификаторы стилей за раз").
