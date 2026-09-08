@@ -15,10 +15,17 @@ const SIGNAL_SPECS = [
   { key: 'unlocks_since_last_batch', min: 0, max: null, integer: true },
 ];
 
+// system_language/region are short ISO codes (ISO 639-1 language, ISO 3166-1 alpha-2
+// country), not numbers — validated by pattern/length instead of the numeric min/max above.
+const STRING_SIGNAL_SPECS = [
+  { key: 'system_language', maxLength: 10, pattern: /^[A-Za-z-]+$/ },
+  { key: 'region', maxLength: 10, pattern: /^[A-Za-z-]+$/ },
+];
+
 /**
  * @param {object} query - req.query
  * @returns {object} only the signals that were present and valid, e.g.
- *   { battery_level: 42, steps_since_last_batch: 1230 }
+ *   { battery_level: 42, steps_since_last_batch: 1230, system_language: 'ru' }
  */
 function parseDeviceSignals(query) {
   const signals = {};
@@ -37,6 +44,17 @@ function parseDeviceSignals(query) {
       continue;
     }
     signals[spec.key] = value;
+  }
+  for (const spec of STRING_SIGNAL_SPECS) {
+    const raw = query[spec.key];
+    if (raw === undefined) {
+      continue;
+    }
+    if (typeof raw !== 'string' || raw.length === 0 || raw.length > spec.maxLength || !spec.pattern.test(raw)) {
+      console.warn(`Ignoring invalid ${spec.key}=${raw} in /batch request`);
+      continue;
+    }
+    signals[spec.key] = raw;
   }
   return signals;
 }

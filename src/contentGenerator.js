@@ -31,6 +31,39 @@ function isValidRussianText(text) {
   return /[а-яА-ЯёЁ]/.test(text) && !/[a-zA-Z]/.test(text);
 }
 
+// Date/day-of-week is deliberately NOT a client-sent signal (see
+// PRODUCT_REBUILD_PLAN.md server contract docs) — the server already has the
+// device's IANA timezone (e.g. "Asia/Almaty") from /register
+// (TimeZone.getDefault().getID() on the Android side), so it can compute the
+// device's local date/weekday itself rather than trusting/parsing a second
+// client-sent value that would just have to agree with the timezone anyway.
+// Returns null if there's no timezone on file yet, or it's not a timezone
+// Intl recognizes (Intl.DateTimeFormat throws RangeError on an invalid one).
+function getLocalDateContext(timezone) {
+  if (!timezone) {
+    return null;
+  }
+  try {
+    const formatter = new Intl.DateTimeFormat('ru-RU', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      weekday: 'long',
+    });
+    const parts = formatter.formatToParts(new Date());
+    const get = (type) => parts.find((p) => p.type === type)?.value;
+    const date = `${get('year')}-${get('month')}-${get('day')}`;
+    const weekday = get('weekday');
+    if (!weekday) {
+      return null;
+    }
+    return { date, weekday };
+  } catch (err) {
+    return null;
+  }
+}
+
 function buildFallbackBatch() {
   const shuffled = [...FALLBACK_PHRASES].sort(() => Math.random() - 0.5);
   return shuffled.slice(0, BATCH_SIZE).map((text) => ({
@@ -67,7 +100,13 @@ function buildContextPrompt(device, window, signals, weather) {
   }
   if (device.personal_goal) parts.push(`личная цель: ${device.personal_goal}`);
   if (device.tone) parts.push(`тон общения: ${device.tone}`);
-  if (device.timezone) parts.push(`часовой пояс: ${device.timezone}`);
+  if (device.timezone) {
+    parts.push(`часовой пояс: ${device.timezone}`);
+    const dateContext = getLocalDateContext(device.timezone);
+    if (dateContext) {
+      parts.push(`локальная дата устройства: ${dateContext.date} (${dateContext.weekday})`);
+    }
+  }
   parts.push(`время суток: ${window}`);
 
   if (signals) {
@@ -85,6 +124,12 @@ function buildContextPrompt(device, window, signals, weather) {
     }
     if (signals.unlocks_since_last_batch !== undefined) {
       parts.push(`разблокировок с прошлого окна: ${signals.unlocks_since_last_batch}`);
+    }
+    if (signals.system_language !== undefined) {
+      parts.push(`язык системы устройства: ${signals.system_language}`);
+    }
+    if (signals.region !== undefined) {
+      parts.push(`регион устройства: ${signals.region}`);
     }
   }
 
