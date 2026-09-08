@@ -83,6 +83,9 @@ function buildContextPrompt(device, window, signals, weather) {
     if (signals.steps_since_last_batch !== undefined) {
       parts.push(`шагов с прошлого окна: ${signals.steps_since_last_batch}`);
     }
+    if (signals.unlocks_since_last_batch !== undefined) {
+      parts.push(`разблокировок с прошлого окна: ${signals.unlocks_since_last_batch}`);
+    }
   }
 
   if (weather) {
