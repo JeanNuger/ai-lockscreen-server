@@ -4,6 +4,7 @@ const { WINDOWS } = require('../constants');
 const { generateBatch } = require('../contentGenerator');
 const { consumePendingMessages } = require('../adminMessages');
 const { parseDeviceSignals } = require('../deviceSignals');
+const { resolveWeather } = require('../weather');
 
 const router = express.Router();
 
@@ -26,7 +27,10 @@ const insertBatchStatement = db.prepare(`
 // independently optional, malformed values are ignored rather than
 // rejecting the request (see deviceSignals.js for why).
 // Returns { phrases: [{ text, style_id }, ...] } — see PRODUCT_REBUILD_PLAN.md §4.1.
-// No geodata is accepted or used, by design (§4.1 "без геоданных").
+// No client-supplied geodata is accepted or used, by design (§4.1 "без геоданных").
+// Weather is the one exception, and it's resolved server-side from the request's
+// own IP address (src/weather.js) — never a client-sent location — per §5.1's
+// "вычисляется сервером" decision.
 //
 // Any pending admin messages (targeted at this device, or broadcast to all
 // devices) are appended to the normal AI/fallback batch, not substituted for
@@ -44,11 +48,12 @@ router.get('/batch', async (req, res, next) => {
     }
 
     const signals = parseDeviceSignals(req.query);
+    const weather = await resolveWeather(req.ip);
 
     const device = getDeviceStatement.get(device_id) || { device_id };
     insertStubDeviceStatement.run(device_id);
 
-    const { phrases, source, context } = await generateBatch(device, window, signals);
+    const { phrases, source, context } = await generateBatch(device, window, signals, weather);
     const adminPhrases = consumePendingMessages(device_id);
     const combinedPhrases = [...phrases, ...adminPhrases];
 

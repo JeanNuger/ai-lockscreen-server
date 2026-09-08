@@ -37,7 +37,7 @@ function buildFallbackBatch() {
 // handed to the model, so the model reads them as loose context rather than
 // literal instructions — consistent with the system prompt's "не будь
 // слишком буквальным" guidance below.
-function buildContextPrompt(device, window, signals) {
+function buildContextPrompt(device, window, signals, weather) {
   const parts = [];
   if (device.gender) parts.push(`пол: ${device.gender}`);
   if (device.birth_date) parts.push(`дата рождения: ${device.birth_date}`);
@@ -71,6 +71,14 @@ function buildContextPrompt(device, window, signals) {
     }
   }
 
+  if (weather) {
+    const weatherBits = [];
+    if (weather.city) weatherBits.push(weather.city);
+    weatherBits.push(`${Math.round(weather.temperatureC)}°C`);
+    if (weather.description) weatherBits.push(weather.description);
+    parts.push(`погода: ${weatherBits.join(', ')}`);
+  }
+
   return parts.join('; ');
 }
 
@@ -90,11 +98,12 @@ const SYSTEM_PROMPT = `Ты — генератор коротких фраз д�
  * @param {object} device - row from the devices table (or a stub {device_id})
  * @param {string} window - 'morning' | 'day' | 'evening' | 'night'
  * @param {object} [signals] - optional device signals from deviceSignals.js
+ * @param {object} [weather] - optional weather from weather.js (resolveWeather)
  * @returns {Promise<{phrases: Array<{text: string, style_id: string}>, source: 'openai'|'fallback'}>}
  */
-async function generateBatch(device, window, signals) {
+async function generateBatch(device, window, signals, weather) {
   const apiKey = process.env.OPENAI_API_KEY;
-  const context = buildContextPrompt(device, window, signals);
+  const context = buildContextPrompt(device, window, signals, weather);
 
   if (!apiKey) {
     return { phrases: buildFallbackBatch(), source: 'fallback', context };

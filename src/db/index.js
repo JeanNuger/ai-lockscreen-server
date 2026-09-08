@@ -36,7 +36,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS content_batches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     device_id TEXT NOT NULL,
-    window TEXT NOT NULL,       -- 'morning' | 'day' | 'evening'
+    window TEXT NOT NULL,       -- 'morning' | 'day' | 'evening' | 'night'
     phrases TEXT NOT NULL,      -- JSON array of {text, style_id}
     source TEXT NOT NULL,       -- 'openai' | 'fallback'
     context TEXT,               -- JSON: what was sent to OpenAI as context (for admin monitoring)
