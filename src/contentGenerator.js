@@ -17,6 +17,20 @@ function pickRandomStyle() {
   return STYLE_IDS[Math.floor(Math.random() * STYLE_IDS.length)];
 }
 
+function pickRandomFallbackPhrase() {
+  return FALLBACK_PHRASES[Math.floor(Math.random() * FALLBACK_PHRASES.length)];
+}
+
+// Heuristic Cyrillic check for language reliability: SYSTEM_PROMPT demands
+// Russian, but gpt-4o-mini occasionally drifts into English on an individual
+// phrase within an otherwise-Russian batch (observed in practice, not
+// theoretical). Requires at least one Cyrillic letter and rejects any Latin
+// letter — short lock-screen phrases have no legitimate reason to mix in
+// Latin text (no brand names/URLs expected here per the system prompt).
+function isValidRussianText(text) {
+  return /[а-яА-ЯёЁ]/.test(text) && !/[a-zA-Z]/.test(text);
+}
+
 function buildFallbackBatch() {
   const shuffled = [...FALLBACK_PHRASES].sort(() => Math.random() - 0.5);
   return shuffled.slice(0, BATCH_SIZE).map((text) => ({
@@ -87,6 +101,7 @@ const SYSTEM_PROMPT = `Ты — генератор коротких фраз д�
 Каждый объект: {"text": "короткая фраза на русском, до 80 символов", "style_id": одно из [${STYLE_IDS.join(', ')}]}.
 Фразы должны быть тёплыми, короткими, разнообразными по теме (не повторяться), уместными для мельком увиденного экрана блокировки — не навязчивые, без рекламы, без вопросов, требующих ответа.
 Учитывай контекст пользователя, если он передан, но не будь слишком буквальным / не выдавай личные данные обратно в тексте.
+ВАЖНО: каждая фраза "text" должна быть полностью на русском языке, без единого слова или буквы на английском или любом другом языке — не переключайся на другой язык ни для отдельных слов, ни для целых фраз, даже если это кажется уместным стилистически.
 Отвечай только JSON, без пояснений.`;
 
 /**
@@ -139,7 +154,27 @@ async function generateBatch(device, window, signals, weather) {
     if (cleaned.length === 0) {
       return { phrases: buildFallbackBatch(), source: 'fallback', context };
     }
-    return { phrases: cleaned, source: 'openai', context };
+
+    // Language reliability: swap out only the individual phrases that failed
+    // the Cyrillic check for a random local fallback phrase, rather than
+    // retrying the whole OpenAI call — a full retry would double the token
+    // cost and latency of every batch that has even one bad phrase, for a
+    // failure mode this cheap per-phrase substitution already fixes. The
+    // batch is still reported as 'openai' since it's still mostly
+    // AI-generated; only the substitution count is logged for visibility.
+    let invalidCount = 0;
+    const languageChecked = cleaned.map((p) => {
+      if (isValidRussianText(p.text)) {
+        return p;
+      }
+      invalidCount += 1;
+      return { text: pickRandomFallbackPhrase(), style_id: p.style_id };
+    });
+    if (invalidCount > 0) {
+      console.warn(`Replaced ${invalidCount}/${cleaned.length} OpenAI phrase(s) that failed the Russian-language check`);
+    }
+
+    return { phrases: languageChecked, source: 'openai', context };
   } catch (err) {
     console.error('OpenAI batch generation failed, using fallback:', err.message);
     return { phrases: buildFallbackBatch(), source: 'fallback', context };
