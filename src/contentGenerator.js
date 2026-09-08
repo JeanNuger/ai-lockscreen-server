@@ -1,16 +1,16 @@
 const { STYLE_IDS, BATCH_SIZE } = require('./constants');
 
 const FALLBACK_PHRASES = [
-  'Хороший день начинается с тебя',
-  'Ты справляешься лучше, чем думаешь',
-  'Сделай глубокий вдох',
-  'Маленькие шаги ведут к большим переменам',
-  'Сегодня отличный день, чтобы попробовать что-то новое',
-  'Не забудь позвонить близким',
-  'Улыбнись — просто так',
-  'Немного воды никогда не помешает',
-  'Ты уже проделал большой путь',
-  'Дай себе немного отдыха, если нужно',
+  'A good day starts with you',
+  "You're doing better than you think",
+  'Take a deep breath',
+  'Small steps lead to big changes',
+  'Today is a great day to try something new',
+  "Don't forget to call someone you love",
+  'Smile — just because',
+  'A little water never hurts',
+  "You've already come a long way",
+  'Give yourself a little rest if you need it',
 ];
 
 function pickRandomStyle() {
@@ -21,14 +21,14 @@ function pickRandomFallbackPhrase() {
   return FALLBACK_PHRASES[Math.floor(Math.random() * FALLBACK_PHRASES.length)];
 }
 
-// Heuristic Cyrillic check for language reliability: SYSTEM_PROMPT demands
-// Russian, but gpt-4o-mini occasionally drifts into English on an individual
-// phrase within an otherwise-Russian batch (observed in practice, not
-// theoretical). Requires at least one Cyrillic letter and rejects any Latin
-// letter — short lock-screen phrases have no legitimate reason to mix in
-// Latin text (no brand names/URLs expected here per the system prompt).
-function isValidRussianText(text) {
-  return /[а-яА-ЯёЁ]/.test(text) && !/[a-zA-Z]/.test(text);
+// Heuristic Latin-script check for language reliability: SYSTEM_PROMPT demands
+// English, but gpt-4o-mini occasionally drifts into another language on an
+// individual phrase within an otherwise-English batch (observed in practice
+// for Russian, not theoretical). Requires at least one Latin letter and
+// rejects any Cyrillic letter — short lock-screen phrases have no legitimate
+// reason to mix in Cyrillic text.
+function isValidEnglishText(text) {
+  return /[a-zA-Z]/.test(text) && !/[а-яА-ЯёЁ]/.test(text);
 }
 
 // Date/day-of-week is deliberately NOT a client-sent signal (see
@@ -44,7 +44,7 @@ function getLocalDateContext(timezone) {
     return null;
   }
   try {
-    const formatter = new Intl.DateTimeFormat('ru-RU', {
+    const formatter = new Intl.DateTimeFormat('en-US', {
       timeZone: timezone,
       year: 'numeric',
       month: '2-digit',
@@ -82,54 +82,60 @@ function buildFallbackBatch() {
 // granted, sensor unavailable) simply doesn't get that line, same as the
 // existing survey fields above. Phrased descriptively, not as raw numbers
 // handed to the model, so the model reads them as loose context rather than
-// literal instructions — consistent with the system prompt's "не будь
-// слишком буквальным" guidance below.
+// literal instructions — consistent with the system prompt's "don't be too
+// literal" guidance below.
+//
+// system_language/region are personalization context only, same as every
+// other field here (gender, interests, timezone, etc.) — they do NOT select
+// the output language. Generated text is always English (see SYSTEM_PROMPT);
+// a locale-driven output language is a distinct, larger future feature, not
+// implemented by this signal.
 function buildContextPrompt(device, window, signals, weather) {
   const parts = [];
-  if (device.gender) parts.push(`пол: ${device.gender}`);
-  if (device.birth_date) parts.push(`дата рождения: ${device.birth_date}`);
+  if (device.gender) parts.push(`gender: ${device.gender}`);
+  if (device.birth_date) parts.push(`birth date: ${device.birth_date}`);
   if (device.interests) {
     try {
       const interests = JSON.parse(device.interests);
       if (Array.isArray(interests) && interests.length) {
-        parts.push(`интересы: ${interests.join(', ')}`);
+        parts.push(`interests: ${interests.join(', ')}`);
       }
     } catch (_) {
       // malformed stored JSON — skip rather than fail the whole request
     }
   }
-  if (device.personal_goal) parts.push(`личная цель: ${device.personal_goal}`);
-  if (device.tone) parts.push(`тон общения: ${device.tone}`);
+  if (device.personal_goal) parts.push(`personal goal: ${device.personal_goal}`);
+  if (device.tone) parts.push(`tone: ${device.tone}`);
   if (device.timezone) {
-    parts.push(`часовой пояс: ${device.timezone}`);
+    parts.push(`timezone: ${device.timezone}`);
     const dateContext = getLocalDateContext(device.timezone);
     if (dateContext) {
-      parts.push(`локальная дата устройства: ${dateContext.date} (${dateContext.weekday})`);
+      parts.push(`device local date: ${dateContext.date} (${dateContext.weekday})`);
     }
   }
-  parts.push(`время суток: ${window}`);
+  parts.push(`time of day: ${window}`);
 
   if (signals) {
     if (signals.battery_level !== undefined) {
-      parts.push(`заряд батареи телефона: ${signals.battery_level}%`);
+      parts.push(`phone battery level: ${signals.battery_level}%`);
     }
     if (signals.ambient_light !== undefined) {
-      parts.push(`освещённость вокруг: ${signals.ambient_light} люкс`);
+      parts.push(`ambient light: ${signals.ambient_light} lux`);
     }
     if (signals.screen_on_duration_seconds !== undefined) {
-      parts.push(`последний раз экран был включён: ${signals.screen_on_duration_seconds} сек`);
+      parts.push(`screen was last on for: ${signals.screen_on_duration_seconds} sec`);
     }
     if (signals.steps_since_last_batch !== undefined) {
-      parts.push(`шагов с прошлого окна: ${signals.steps_since_last_batch}`);
+      parts.push(`steps since last window: ${signals.steps_since_last_batch}`);
     }
     if (signals.unlocks_since_last_batch !== undefined) {
-      parts.push(`разблокировок с прошлого окна: ${signals.unlocks_since_last_batch}`);
+      parts.push(`unlocks since last window: ${signals.unlocks_since_last_batch}`);
     }
     if (signals.system_language !== undefined) {
-      parts.push(`язык системы устройства: ${signals.system_language}`);
+      parts.push(`device system language: ${signals.system_language}`);
     }
     if (signals.region !== undefined) {
-      parts.push(`регион устройства: ${signals.region}`);
+      parts.push(`device region: ${signals.region}`);
     }
   }
 
@@ -138,19 +144,19 @@ function buildContextPrompt(device, window, signals, weather) {
     if (weather.city) weatherBits.push(weather.city);
     weatherBits.push(`${Math.round(weather.temperatureC)}°C`);
     if (weather.description) weatherBits.push(weather.description);
-    parts.push(`погода: ${weatherBits.join(', ')}`);
+    parts.push(`weather: ${weatherBits.join(', ')}`);
   }
 
   return parts.join('; ');
 }
 
-const SYSTEM_PROMPT = `Ты — генератор коротких фраз для экрана блокировки телефона (живые обои).
-Верни JSON-объект с полем "phrases" — массивом ровно из ${BATCH_SIZE} объектов.
-Каждый объект: {"text": "короткая фраза на русском, до 80 символов", "style_id": одно из [${STYLE_IDS.join(', ')}]}.
-Фразы должны быть тёплыми, короткими, разнообразными по теме (не повторяться), уместными для мельком увиденного экрана блокировки — не навязчивые, без рекламы, без вопросов, требующих ответа.
-Учитывай контекст пользователя, если он передан, но не будь слишком буквальным / не выдавай личные данные обратно в тексте.
-ВАЖНО: каждая фраза "text" должна быть полностью на русском языке, без единого слова или буквы на английском или любом другом языке — не переключайся на другой язык ни для отдельных слов, ни для целых фраз, даже если это кажется уместным стилистически.
-Отвечай только JSON, без пояснений.`;
+const SYSTEM_PROMPT = `You are a generator of short phrases for a phone lock screen (live wallpaper).
+Return a JSON object with a "phrases" field — an array of exactly ${BATCH_SIZE} objects.
+Each object: {"text": "a short phrase in English, up to 80 characters", "style_id": one of [${STYLE_IDS.join(', ')}]}.
+Phrases should be warm, short, varied in topic (no repeats), suitable for a brief glance at a lock screen — not pushy, no ads, no questions that require an answer.
+Take the user's context into account if it's provided, but don't be too literal / don't echo personal data back in the text.
+IMPORTANT: every phrase "text" must be entirely in English, without a single word or letter in Russian or any other language — do not switch to another language for individual words or whole phrases, even if it seems stylistically fitting.
+Respond with JSON only, no explanations.`;
 
 /**
  * Generates a batch of {text, style_id} phrases for a device.
@@ -204,7 +210,7 @@ async function generateBatch(device, window, signals, weather) {
     }
 
     // Language reliability: swap out only the individual phrases that failed
-    // the Cyrillic check for a random local fallback phrase, rather than
+    // the Latin-script check for a random local fallback phrase, rather than
     // retrying the whole OpenAI call — a full retry would double the token
     // cost and latency of every batch that has even one bad phrase, for a
     // failure mode this cheap per-phrase substitution already fixes. The
@@ -212,14 +218,14 @@ async function generateBatch(device, window, signals, weather) {
     // AI-generated; only the substitution count is logged for visibility.
     let invalidCount = 0;
     const languageChecked = cleaned.map((p) => {
-      if (isValidRussianText(p.text)) {
+      if (isValidEnglishText(p.text)) {
         return p;
       }
       invalidCount += 1;
       return { text: pickRandomFallbackPhrase(), style_id: p.style_id };
     });
     if (invalidCount > 0) {
-      console.warn(`Replaced ${invalidCount}/${cleaned.length} OpenAI phrase(s) that failed the Russian-language check`);
+      console.warn(`Replaced ${invalidCount}/${cleaned.length} OpenAI phrase(s) that failed the English-language check`);
     }
 
     return { phrases: languageChecked, source: 'openai', context };
