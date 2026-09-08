@@ -14,6 +14,16 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const app = express();
+
+// Render (and most hosting platforms) put the app behind a single reverse
+// proxy hop, so req.ip would otherwise report the proxy's own address for
+// every request — trust proxy=1 makes Express read the real client IP from
+// X-Forwarded-For instead. Needed for express-rate-limit (src/routes/admin.js)
+// to actually rate-limit per real client rather than treating every request
+// as coming from the same address; express-rate-limit also refuses to start
+// without this once it sees X-Forwarded-For on an untrusted proxy setup.
+app.set('trust proxy', 1);
+
 app.use(express.json());
 
 // Session cookie for the admin panel only (see src/adminAuth.js). Uses the

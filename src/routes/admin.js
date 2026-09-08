@@ -1,6 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const path = require('path');
+const rateLimit = require('express-rate-limit');
 const db = require('../db');
 const { requireAdminAuth } = require('../adminAuth');
 const { STYLE_IDS } = require('../constants');
@@ -9,11 +10,25 @@ const router = express.Router();
 
 // --- Login / logout ---
 
+// The admin panel is publicly reachable (no network-level restriction), so a
+// login endpoint without any limit is brute-forceable regardless of how
+// strong bcrypt makes each individual guess — 5 attempts per 15 minutes per
+// IP is enough for a real login mistake, not enough for a meaningful
+// password-guessing run. Only /login is limited, not the rest of /admin —
+// everything past it already requires requireAdminAuth (a valid session).
+const loginRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'too many login attempts, try again later' },
+});
+
 router.get('/login', (req, res) => {
   res.sendFile(path.join(__dirname, '..', '..', 'public', 'admin', 'login.html'));
 });
 
-router.post('/login', (req, res) => {
+router.post('/login', loginRateLimiter, (req, res) => {
   const { username, password } = req.body || {};
   const expectedUsername = process.env.ADMIN_USERNAME;
   const expectedHash = process.env.ADMIN_PASSWORD_HASH;
