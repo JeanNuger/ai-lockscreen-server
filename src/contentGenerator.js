@@ -115,6 +115,79 @@ function getLocalDateContext(timezone) {
   }
 }
 
+// Formats `instant` as the calendar date (YYYY-MM-DD) it falls on within
+// `timezone` — the building block both getLocalDateContext (today's date)
+// and getDaysSinceInstall (below) use, so "what calendar day is this" is
+// computed the same way in both places, consistently in the device's own
+// timezone rather than server UTC. Returns null if timezone is missing/not
+// recognized by Intl (same convention as getLocalDateContext).
+function getLocalCalendarDate(instant, timezone) {
+  if (!timezone) {
+    return null;
+  }
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    const parts = formatter.formatToParts(instant);
+    const get = (type) => parts.find((p) => p.type === type)?.value;
+    return `${get('year')}-${get('month')}-${get('day')}`;
+  } catch (err) {
+    return null;
+  }
+}
+
+// Days elapsed between a device's first appearance in the system
+// (devices.created_at — set once at row creation by db/index.js's
+// DEFAULT (datetime('now')), never touched again by register.js's
+// ON CONFLICT update) and now, counted in the device's own local calendar
+// days (see PRODUCT_REBUILD_PLAN.md §5.1) — not server UTC days, so the
+// count doesn't roll over an hour or two before/after the user's actual
+// local midnight, and not raw elapsed hours/24h periods either.
+//
+// The day of registration itself is day 0, not day 1 — a device that
+// registered 10 minutes ago should read as "just installed" in the prompt,
+// not "1 day in". Implemented by converting both createdAtUtc and "now" to
+// calendar-date strings in the device's timezone (getLocalCalendarDate
+// above) and diffing those as UTC midnights: since both are already
+// timezone-adjusted calendar dates at that point, the ms difference divides
+// out to an exact whole-day count with no further DST/offset arithmetic
+// needed.
+//
+// Returns null (same "not enough info yet" convention as
+// getLocalDateContext) if there's no timezone on file, or createdAtUtc is
+// missing/unparseable — e.g. the very first /batch call for a brand-new
+// device, made with the pre-insert `device` stub from routes/batch.js that
+// has no created_at yet.
+function getDaysSinceInstall(createdAtUtc, timezone) {
+  if (!createdAtUtc || !timezone) {
+    return null;
+  }
+  // SQLite's datetime('now') stores 'YYYY-MM-DD HH:MM:SS' as UTC but with no
+  // 'Z'/offset suffix — append one explicitly so Date parses it as UTC
+  // rather than as local server time.
+  const installInstant = new Date(`${createdAtUtc.replace(' ', 'T')}Z`);
+  if (Number.isNaN(installInstant.getTime())) {
+    return null;
+  }
+  const installDate = getLocalCalendarDate(installInstant, timezone);
+  const nowDate = getLocalCalendarDate(new Date(), timezone);
+  if (!installDate || !nowDate) {
+    return null;
+  }
+  const daysDiff = Math.round(
+    (Date.parse(`${nowDate}T00:00:00Z`) - Date.parse(`${installDate}T00:00:00Z`)) / 86400000
+  );
+  // Floored at 0 defensively (should not go negative in practice — both
+  // dates come from the same device's own timezone conversion — but a
+  // negative "days since install" would be a confusing thing to hand the
+  // model if clock skew or an edge case ever produced one).
+  return daysDiff >= 0 ? daysDiff : 0;
+}
+
 function buildFallbackBatch() {
   const shuffled = [...FALLBACK_PHRASES].sort(() => Math.random() - 0.5);
   return shuffled.slice(0, BATCH_SIZE).map((text) => ({
@@ -164,6 +237,14 @@ function buildContextPrompt(device, window, signals, weather) {
     const dateContext = getLocalDateContext(device.timezone);
     if (dateContext) {
       parts.push(`device local date: ${dateContext.date} (${dateContext.weekday})`);
+    }
+    // Placed here (not in the `signals` block below) because it's derived
+    // from device.created_at + device.timezone, the same devices-table
+    // fields the two lines above already use — not a per-request signal the
+    // client sends, like battery_level/ambient_light/etc. are.
+    const daysSinceInstall = getDaysSinceInstall(device.created_at, device.timezone);
+    if (daysSinceInstall !== null) {
+      parts.push(`days since install: ${daysSinceInstall}`);
     }
   }
   parts.push(`time of day: ${window}`);
