@@ -1,5 +1,15 @@
 const { STYLE_IDS, BATCH_SIZE } = require('./constants');
 
+// FALLBACK_PHRASES stay English-only — this is the offline/failure path (no
+// OPENAI_API_KEY configured, the OpenAI call itself fails, or an individual
+// phrase fails its language check below), not the primary path being
+// localized here. Translating this list into all 10 supported languages is
+// a deliberate scope cut, not an oversight — see PRODUCT_REBUILD_PLAN.md's
+// note on this exact tradeoff. Known consequence: a device whose language
+// isn't English will see English fallback text (for the whole batch, on a
+// full OpenAI outage; or for just the substituted phrase(s), on a
+// language-check failure) rather than no content — this is intentionally
+// the "some content, wrong language" degradation, not "no content".
 const FALLBACK_PHRASES = [
   'A good day starts with you',
   "You're doing better than you think",
@@ -13,6 +23,42 @@ const FALLBACK_PHRASES = [
   'Give yourself a little rest if you need it',
 ];
 
+// The 10 languages product/DoD calls for (locale-driven generation task).
+// Each entry names the language for the SYSTEM_PROMPT and a scriptCheck
+// regex used to catch full-phrase language drift (see isValidLanguageText
+// below) — not a translation-quality check, just "does this phrase contain
+// at least one character from the script this language is expected to use".
+// Latin-script languages (en/fr/es/pt/de/it) share one scriptCheck: this
+// mirrors the previous English-only heuristic, which could only ever tell
+// "Latin vs. not-Latin" apart too — distinguishing e.g. French from Italian
+// text is not attempted, same scope boundary as before.
+const SUPPORTED_LANGUAGES = {
+  en: { name: 'English', scriptCheck: /\p{Script=Latin}/u },
+  fr: { name: 'French', scriptCheck: /\p{Script=Latin}/u },
+  es: { name: 'Spanish', scriptCheck: /\p{Script=Latin}/u },
+  pt: { name: 'Portuguese', scriptCheck: /\p{Script=Latin}/u },
+  de: { name: 'German', scriptCheck: /\p{Script=Latin}/u },
+  ru: { name: 'Russian', scriptCheck: /\p{Script=Cyrillic}/u },
+  zh: { name: 'Chinese', scriptCheck: /\p{Script=Han}/u },
+  ja: { name: 'Japanese', scriptCheck: /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u },
+  ko: { name: 'Korean', scriptCheck: /\p{Script=Hangul}/u },
+  it: { name: 'Italian', scriptCheck: /\p{Script=Latin}/u },
+};
+const DEFAULT_LANGUAGE_CODE = 'en';
+
+// Resolves the target generation language from the client's system_language
+// signal (see deviceSignals.js — already an ISO 639-1 code like "ru", "zh",
+// validated there against /^[A-Za-z-]+$/). Anything missing or not in
+// SUPPORTED_LANGUAGES falls back to English, per DoD point 2 — this covers
+// both "client didn't send the signal" (older app version) and "client sent
+// a real language we don't support yet" (e.g. Arabic) the same way.
+function resolveTargetLanguageCode(signals) {
+  const raw = signals && typeof signals.system_language === 'string'
+    ? signals.system_language.toLowerCase()
+    : null;
+  return raw && SUPPORTED_LANGUAGES[raw] ? raw : DEFAULT_LANGUAGE_CODE;
+}
+
 function pickRandomStyle() {
   return STYLE_IDS[Math.floor(Math.random() * STYLE_IDS.length)];
 }
@@ -21,14 +67,19 @@ function pickRandomFallbackPhrase() {
   return FALLBACK_PHRASES[Math.floor(Math.random() * FALLBACK_PHRASES.length)];
 }
 
-// Heuristic Latin-script check for language reliability: SYSTEM_PROMPT demands
-// English, but gpt-4o-mini occasionally drifts into another language on an
-// individual phrase within an otherwise-English batch (observed in practice
-// for Russian, not theoretical). Requires at least one Latin letter and
-// rejects any Cyrillic letter — short lock-screen phrases have no legitimate
-// reason to mix in Cyrillic text.
-function isValidEnglishText(text) {
-  return /[a-zA-Z]/.test(text) && !/[а-яА-ЯёЁ]/.test(text);
+// Generalizes the old isValidEnglishText heuristic to any of the 10
+// supported languages: SYSTEM_PROMPT demands a specific target language, but
+// gpt-4o-mini occasionally drifts into another language on an individual
+// phrase within an otherwise-correct batch (observed in practice for
+// Russian, not theoretical). Checks only for "at least one character in the
+// expected script" — a full-phrase drift into a different script family
+// (e.g. Chinese requested, English-only text came back) has none, so it's
+// caught; it does not try to catch drift between languages that share a
+// script (e.g. French text when Italian was requested), same limitation the
+// original English/Cyrillic-only check had.
+function isValidLanguageText(text, languageCode) {
+  const language = SUPPORTED_LANGUAGES[languageCode] || SUPPORTED_LANGUAGES[DEFAULT_LANGUAGE_CODE];
+  return language.scriptCheck.test(text);
 }
 
 // Date/day-of-week is deliberately NOT a client-sent signal (see
@@ -85,11 +136,13 @@ function buildFallbackBatch() {
 // literal instructions — consistent with the system prompt's "don't be too
 // literal" guidance below.
 //
-// system_language/region are personalization context only, same as every
-// other field here (gender, interests, timezone, etc.) — they do NOT select
-// the output language. Generated text is always English (see SYSTEM_PROMPT);
-// a locale-driven output language is a distinct, larger future feature, not
-// implemented by this signal.
+// region is personalization context only, same as gender/interests/timezone
+// above — it does not select the output language. system_language, by
+// contrast, now ALSO drives the output language directly (see
+// resolveTargetLanguageCode/buildSystemPrompt below) — it's still included
+// here as a context line too, redundant with the system prompt's own
+// language instruction, but harmless and consistent with how every other
+// signal is surfaced to the model.
 function buildContextPrompt(device, window, signals, weather) {
   const parts = [];
   if (device.gender) parts.push(`gender: ${device.gender}`);
@@ -150,13 +203,21 @@ function buildContextPrompt(device, window, signals, weather) {
   return parts.join('; ');
 }
 
-const SYSTEM_PROMPT = `You are a generator of short phrases for a phone lock screen (live wallpaper).
+// Builds the SYSTEM_PROMPT for a specific target language. Was a fixed
+// English-only template constant before this task; now a function of
+// languageCode so each request's prompt names its own resolved target
+// language (see resolveTargetLanguageCode) instead of always saying
+// "English" regardless of who's asking.
+function buildSystemPrompt(languageCode) {
+  const languageName = SUPPORTED_LANGUAGES[languageCode].name;
+  return `You are a generator of short phrases for a phone lock screen (live wallpaper).
 Return a JSON object with a "phrases" field — an array of exactly ${BATCH_SIZE} objects.
-Each object: {"text": "a short phrase in English, up to 80 characters", "style_id": one of [${STYLE_IDS.join(', ')}]}.
+Each object: {"text": "a short phrase in ${languageName}, up to 80 characters", "style_id": one of [${STYLE_IDS.join(', ')}]}.
 Phrases should be warm, short, varied in topic (no repeats), suitable for a brief glance at a lock screen — not pushy, no ads, no questions that require an answer.
 Take the user's context into account if it's provided, but don't be too literal / don't echo personal data back in the text.
-IMPORTANT: every phrase "text" must be entirely in English, without a single word or letter in Russian or any other language — do not switch to another language for individual words or whole phrases, even if it seems stylistically fitting.
+IMPORTANT: every phrase "text" must be entirely in ${languageName}, without a single word or letter in any other language — do not switch to another language for individual words or whole phrases, even if it seems stylistically fitting.
 Respond with JSON only, no explanations.`;
+}
 
 /**
  * Generates a batch of {text, style_id} phrases for a device.
@@ -173,6 +234,7 @@ Respond with JSON only, no explanations.`;
 async function generateBatch(device, window, signals, weather) {
   const apiKey = process.env.OPENAI_API_KEY;
   const context = buildContextPrompt(device, window, signals, weather);
+  const languageCode = resolveTargetLanguageCode(signals);
 
   if (!apiKey) {
     return { phrases: buildFallbackBatch(), source: 'fallback', context };
@@ -188,7 +250,7 @@ async function generateBatch(device, window, signals, weather) {
       model: 'gpt-4o-mini',
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: buildSystemPrompt(languageCode) },
         { role: 'user', content: context },
       ],
     });
@@ -210,22 +272,27 @@ async function generateBatch(device, window, signals, weather) {
     }
 
     // Language reliability: swap out only the individual phrases that failed
-    // the Latin-script check for a random local fallback phrase, rather than
-    // retrying the whole OpenAI call — a full retry would double the token
+    // the target-language script check for a random local fallback phrase,
+    // rather than retrying the whole OpenAI call — a full retry would double the token
     // cost and latency of every batch that has even one bad phrase, for a
     // failure mode this cheap per-phrase substitution already fixes. The
     // batch is still reported as 'openai' since it's still mostly
     // AI-generated; only the substitution count is logged for visibility.
     let invalidCount = 0;
     const languageChecked = cleaned.map((p) => {
-      if (isValidEnglishText(p.text)) {
+      if (isValidLanguageText(p.text, languageCode)) {
         return p;
       }
       invalidCount += 1;
+      // Substituted with an English FALLBACK_PHRASES entry regardless of
+      // languageCode -- see the FALLBACK_PHRASES comment above: translating
+      // that list is an explicit, documented scope cut, so a substitution
+      // for a non-English batch will be in English, not silently wrong in a
+      // way nobody decided on.
       return { text: pickRandomFallbackPhrase(), style_id: p.style_id };
     });
     if (invalidCount > 0) {
-      console.warn(`Replaced ${invalidCount}/${cleaned.length} OpenAI phrase(s) that failed the English-language check`);
+      console.warn(`Replaced ${invalidCount}/${cleaned.length} OpenAI phrase(s) that failed the ${SUPPORTED_LANGUAGES[languageCode].name}-language check (target=${languageCode})`);
     }
 
     return { phrases: languageChecked, source: 'openai', context };
