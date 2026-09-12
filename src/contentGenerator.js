@@ -218,6 +218,7 @@ function buildFallbackBatch() {
 // signal is surfaced to the model.
 function buildContextPrompt(device, window, signals, weather) {
   const parts = [];
+  if (device.name) parts.push(`name: ${device.name}`);
   if (device.gender) parts.push(`gender: ${device.gender}`);
   if (device.birth_date) parts.push(`birth date: ${device.birth_date}`);
   if (device.interests) {
@@ -296,6 +297,7 @@ Return a JSON object with a "phrases" field — an array of exactly ${BATCH_SIZE
 Each object: {"text": "a short phrase in ${languageName}, up to 80 characters", "style_id": one of [${STYLE_IDS.join(', ')}]}.
 Phrases should be warm, short, varied in topic (no repeats), suitable for a brief glance at a lock screen — not pushy, no ads, no questions that require an answer.
 Take the user's context into account if it's provided, but don't be too literal / don't echo personal data back in the text.
+If a name is given in the context, you may address the user by it in some of the phrases for a personal touch — but not in every phrase, and never as a rule to force into all of them; most phrases should read naturally without it, so it doesn't feel repetitive or scripted.
 IMPORTANT: every phrase "text" must be entirely in ${languageName}, without a single word or letter in any other language — do not switch to another language for individual words or whole phrases, even if it seems stylistically fitting.
 Respond with JSON only, no explanations.`;
 }

@@ -23,6 +23,7 @@ db.pragma('journal_mode = WAL');
 db.exec(`
   CREATE TABLE IF NOT EXISTS devices (
     device_id TEXT PRIMARY KEY,
+    name TEXT,
     gender TEXT,
     birth_date TEXT,
     interests TEXT,        -- JSON array, e.g. ["sport","work"]
@@ -64,5 +65,19 @@ db.exec(`
     FOREIGN KEY (message_id) REFERENCES admin_messages(id)
   );
 `);
+
+// One-off migration: devices.name is new as of 2026-09-12. This project has no
+// migration framework and the CREATE TABLE IF NOT EXISTS above is a no-op
+// against a devices table that already exists (true on Render's persistent
+// disk, and on any local dev db.file created before this change) — a new
+// column there needs an explicit ALTER TABLE, not just an updated CREATE
+// statement. Guarded by checking PRAGMA table_info first so this stays a
+// harmless no-op on every subsequent server start (a second ALTER TABLE ADD
+// COLUMN of the same name would otherwise throw "duplicate column name")
+// instead of only working once.
+const deviceColumnNames = db.prepare('PRAGMA table_info(devices)').all().map((col) => col.name);
+if (!deviceColumnNames.includes('name')) {
+  db.exec('ALTER TABLE devices ADD COLUMN name TEXT');
+}
 
 module.exports = db;
