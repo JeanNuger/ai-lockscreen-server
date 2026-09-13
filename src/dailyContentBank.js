@@ -25,6 +25,21 @@ const insertBankItemStatement = db.prepare(`
   VALUES (?, ?, ?, ?)
 `);
 
+const selectBankRowsForDateStatement = db.prepare(`
+  SELECT category, content_text FROM daily_content_bank WHERE bank_date = ?
+`);
+
+const selectShownCategoriesStatement = db.prepare(`
+  SELECT category FROM device_shown_categories WHERE device_id = ? AND shown_date = ?
+`);
+
+const insertShownCategoryStatement = db.prepare(`
+  INSERT OR IGNORE INTO device_shown_categories (device_id, shown_date, category)
+  VALUES (?, ?, ?)
+`);
+
+const DEFAULT_SELECTION_COUNT = 5;
+
 // Server's own UTC calendar date -- this bank is shared across every device
 // (not personalized, see module header), so there's no single device
 // timezone to anchor it to; each /batch request's own per-device local
@@ -121,4 +136,82 @@ async function generateDailyBank() {
   }
 }
 
-module.exports = { generateDailyBank, BANK_CATEGORIES };
+// Random-but-varied-by-category selection for one device's batch context.
+// bankDate is the server's UTC calendar date the bank was generated under
+// (see getUtcDateString above); deviceLocalDate is that same device's own
+// local calendar date (the caller already computes this from device.timezone
+// for other purposes -- see contentGenerator.js's getLocalCalendarDate) and
+// is what device_shown_categories is keyed by, since "today" for repeat-
+// avoidance purposes should match the device's own day boundary, not the
+// server's UTC one.
+//
+// Picks at most one item per category so the count items offered are spread
+// across topics rather than, say, 4 quotes and 1 fact. If every category in
+// today's bank has already been shown to this device today, falls back to
+// treating the whole bank as available again rather than returning nothing
+// -- an empty selection would silently strip bank content from every
+// remaining batch that day once categories cycle out, which is worse than
+// occasionally repeating a category within the same day.
+function selectBankItemsForDevice(deviceId, bankDate, deviceLocalDate, count = DEFAULT_SELECTION_COUNT) {
+  if (!bankDate || !deviceLocalDate) {
+    return [];
+  }
+
+  const bankRows = selectBankRowsForDateStatement.all(bankDate);
+  if (bankRows.length === 0) {
+    return [];
+  }
+
+  const shownCategories = new Set(
+    selectShownCategoriesStatement.all(deviceId, deviceLocalDate).map((row) => row.category)
+  );
+  const unseen = bankRows.filter((row) => !shownCategories.has(row.category));
+  const pool = unseen.length > 0 ? unseen : bankRows;
+
+  const byCategory = new Map();
+  for (const row of pool) {
+    if (!byCategory.has(row.category)) {
+      byCategory.set(row.category, []);
+    }
+    byCategory.get(row.category).push(row);
+  }
+
+  const shuffledCategories = [...byCategory.keys()].sort(() => Math.random() - 0.5);
+  const selected = [];
+  for (const category of shuffledCategories) {
+    if (selected.length >= count) {
+      break;
+    }
+    const rowsInCategory = byCategory.get(category);
+    const pick = rowsInCategory[Math.floor(Math.random() * rowsInCategory.length)];
+    selected.push({ category: pick.category, content_text: pick.content_text });
+  }
+
+  return selected;
+}
+
+// Records which bank categories a device's batch actually drew from, keyed
+// by the device's own local calendar date (see selectBankItemsForDevice for
+// why local date, not server UTC date). INSERT OR IGNORE against the
+// (device_id, shown_date, category) primary key makes this safe to call
+// once per successful batch without needing to check for existing rows first.
+function recordShownCategories(deviceId, deviceLocalDate, categories) {
+  if (!deviceId || !deviceLocalDate || !Array.isArray(categories) || categories.length === 0) {
+    return;
+  }
+  const uniqueCategories = [...new Set(categories)];
+  const insertMany = db.transaction((cats) => {
+    for (const category of cats) {
+      insertShownCategoryStatement.run(deviceId, deviceLocalDate, category);
+    }
+  });
+  insertMany(uniqueCategories);
+}
+
+module.exports = {
+  generateDailyBank,
+  selectBankItemsForDevice,
+  recordShownCategories,
+  getUtcDateString,
+  BANK_CATEGORIES,
+};

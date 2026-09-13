@@ -1,4 +1,10 @@
 const { STYLE_IDS, BATCH_SIZE } = require('./constants');
+const {
+  selectBankItemsForDevice,
+  recordShownCategories,
+  getUtcDateString,
+  BANK_CATEGORIES,
+} = require('./dailyContentBank');
 
 // FALLBACK_PHRASES stay English-only — this is the offline/failure path (no
 // OPENAI_API_KEY configured, the OpenAI call itself fails, or an individual
@@ -216,7 +222,13 @@ function buildFallbackBatch() {
 // here as a context line too, redundant with the system prompt's own
 // language instruction, but harmless and consistent with how every other
 // signal is surfaced to the model.
-function buildContextPrompt(device, window, signals, weather) {
+// bankItems (optional): the subset of today's daily_content_bank rows chosen
+// for this device by selectBankItemsForDevice (see dailyContentBank.js) --
+// already filtered to categories the device hasn't seen yet today. Rendered
+// as its own labeled block so buildSystemPrompt's instructions can point the
+// model at it by name ("today's content ideas") without the model having to
+// guess which part of the context string that refers to.
+function buildContextPrompt(device, window, signals, weather, bankItems) {
   const parts = [];
   if (device.name) parts.push(`name: ${device.name}`);
   if (device.gender) parts.push(`gender: ${device.gender}`);
@@ -282,6 +294,11 @@ function buildContextPrompt(device, window, signals, weather) {
     parts.push(`weather: ${weatherBits.join(', ')}`);
   }
 
+  if (Array.isArray(bankItems) && bankItems.length > 0) {
+    const bankText = bankItems.map((item) => `[${item.category}] ${item.content_text}`).join('; ');
+    parts.push(`today's content ideas: ${bankText}`);
+  }
+
   return parts.join('; ');
 }
 
@@ -292,13 +309,17 @@ function buildContextPrompt(device, window, signals, weather) {
 // "English" regardless of who's asking.
 function buildSystemPrompt(languageCode) {
   const languageName = SUPPORTED_LANGUAGES[languageCode].name;
-  return `You are a generator of short phrases for a phone lock screen (live wallpaper).
+  return `You are a personal content editor curating short pieces of content for a phone lock screen (live wallpaper), not a generator of motivational phrases.
 Return a JSON object with a "phrases" field — an array of exactly ${BATCH_SIZE} objects.
-Each object: {"text": "a short phrase in ${languageName}, up to 80 characters", "style_id": one of [${STYLE_IDS.join(', ')}]}.
-Phrases should be warm, short, varied in topic (no repeats), suitable for a brief glance at a lock screen — not pushy, no ads, no questions that require an answer.
+Each object: {"text": "a short piece of content in ${languageName}, up to 80 characters", "style_id": one of [${STYLE_IDS.join(', ')}]}.
+
+The user context may include a line starting with "today's content ideas:" — a list of items tagged like [category] content, drawn from categories such as ${BANK_CATEGORIES.join(', ')}. Treat these as raw material, not a script: select the ones that fit the user's tone and interests, then adapt, shorten, rephrase, or translate them into ${languageName} rather than copying them verbatim. You don't need to use every idea offered, and you may fill in remaining slots yourself when the ideas given aren't enough for a full varied batch.
+Make the batch genuinely varied in genre — mix things like holidays/observances, interesting facts, quotes, "on this day" history, psychology insights, practical advice, humor, and idioms. Warm/motivational lines are just one genre among several here, not the default — most of the batch should be something other than a motivational phrase.
+Every phrase should still be short, warm in tone, and suitable for a brief glance at a lock screen — not pushy, no ads, no questions that require an answer.
 Take the user's context into account if it's provided, but don't be too literal / don't echo personal data back in the text.
 If a name is given in the context, you may address the user by it in some of the phrases for a personal touch — but not in every phrase, and never as a rule to force into all of them; most phrases should read naturally without it, so it doesn't feel repetitive or scripted.
 IMPORTANT: every phrase "text" must be entirely in ${languageName}, without a single word or letter in any other language — do not switch to another language for individual words or whole phrases, even if it seems stylistically fitting.
+Also include a top-level "used_categories" field — a JSON array of the category names (only from the list above, e.g. "quote" or "psychology") you actually drew inspiration from for this batch; omit categories you didn't use, and don't invent new category names.
 Respond with JSON only, no explanations.`;
 }
 
@@ -316,8 +337,19 @@ Respond with JSON only, no explanations.`;
  */
 async function generateBatch(device, window, signals, weather) {
   const apiKey = process.env.OPENAI_API_KEY;
-  const context = buildContextPrompt(device, window, signals, weather);
   const languageCode = resolveTargetLanguageCode(signals);
+
+  // Bank items are keyed by the device's own local calendar date (matches
+  // device_shown_categories' "today"), not the server's UTC bank_date --
+  // reuses the same getLocalCalendarDate this file already uses for
+  // days-since-install. Both device.timezone and today's bank can be
+  // missing/empty (new device, cron hasn't run yet) -- selectBankItemsForDevice
+  // already returns [] in that case, so bankItems degrades to "no bank
+  // content this batch" rather than failing.
+  const deviceLocalDate = getLocalCalendarDate(new Date(), device.timezone);
+  const bankItems = selectBankItemsForDevice(device.device_id, getUtcDateString(), deviceLocalDate);
+
+  const context = buildContextPrompt(device, window, signals, weather, bankItems);
 
   if (!apiKey) {
     return { phrases: buildFallbackBatch(), source: 'fallback', context };
@@ -377,6 +409,17 @@ async function generateBatch(device, window, signals, weather) {
     if (invalidCount > 0) {
       console.warn(`Replaced ${invalidCount}/${cleaned.length} OpenAI phrase(s) that failed the ${SUPPORTED_LANGUAGES[languageCode].name}-language check (target=${languageCode})`);
     }
+
+    // Record which bank categories this batch actually drew from (per the
+    // model's own "used_categories" field -- see buildSystemPrompt), so the
+    // device's next batch today doesn't get offered the same categories
+    // again (see selectBankItemsForDevice). Only categories from the fixed
+    // BANK_CATEGORIES set are trusted here; anything else is the model
+    // inventing a label and is dropped rather than stored.
+    const usedCategories = Array.isArray(parsed.used_categories)
+      ? parsed.used_categories.filter((c) => BANK_CATEGORIES.includes(c))
+      : [];
+    recordShownCategories(device.device_id, deviceLocalDate, usedCategories);
 
     return { phrases: languageChecked, source: 'openai', context };
   } catch (err) {
