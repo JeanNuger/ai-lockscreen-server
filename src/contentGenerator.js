@@ -2,6 +2,7 @@ const { STYLE_IDS, BATCH_SIZE } = require('./constants');
 const {
   selectBankItemsForDevice,
   recordShownCategories,
+  getShownCategories,
   getUtcDateString,
   BANK_CATEGORIES,
 } = require('./dailyContentBank');
@@ -202,133 +203,155 @@ function buildFallbackBatch() {
   }));
 }
 
-// Builds the user-context prompt sent to the model. Deliberately excludes
-// anything not already agreed in PRODUCT_REBUILD_PLAN.md §5.1 — no location,
-// no notification/app data (see the plan's data-source list).
+// Computes the user's age in whole years from device.birth_date (an
+// ISO-ish date string from the client, e.g. "1990-05-20"). Returns null if
+// birth_date is missing or unparseable, so callers can omit the field
+// entirely rather than send a garbage value to the model.
+function computeAge(birthDate) {
+  if (!birthDate) {
+    return null;
+  }
+  const dob = new Date(birthDate);
+  if (Number.isNaN(dob.getTime())) {
+    return null;
+  }
+  const now = new Date();
+  let age = now.getUTCFullYear() - dob.getUTCFullYear();
+  const monthDay = (now.getUTCMonth() - dob.getUTCMonth()) || (now.getUTCDate() - dob.getUTCDate());
+  if (monthDay < 0) {
+    age -= 1;
+  }
+  return age >= 0 ? age : null;
+}
+
+// Builds the compact user-context object sent to the model, JSON-stringified
+// as the user message. Deliberately excludes anything not already agreed in
+// PRODUCT_REBUILD_PLAN.md §5.1 — no location, no notification/app data (see
+// the plan's data-source list).
 //
-// `signals` (optional) holds whichever device signals the client sent with
-// this /batch request — see src/deviceSignals.js. Each is appended only if
-// present; a device that didn't send a signal (older client, permission not
-// granted, sensor unavailable) simply doesn't get that line, same as the
-// existing survey fields above. Phrased descriptively, not as raw numbers
-// handed to the model, so the model reads them as loose context rather than
-// literal instructions — consistent with the system prompt's "don't be too
-// literal" guidance below.
+// Kept as a nested object (profile/now/signals/weather/today_content/
+// already_shown) with only present fields included, rather than the old
+// long "; "-joined sentence: shorter per request (fewer tokens for signals
+// that don't apply to a given device/moment) and nothing here duplicates
+// what's already fixed in the static system prompt.
 //
-// region is personalization context only, same as gender/interests/timezone
-// above — it does not select the output language. system_language, by
-// contrast, now ALSO drives the output language directly (see
-// resolveTargetLanguageCode/buildSystemPrompt below) — it's still included
-// here as a context line too, redundant with the system prompt's own
-// language instruction, but harmless and consistent with how every other
-// signal is surfaced to the model.
+// languageCode: the already-resolved target language (resolveTargetLanguageCode's
+// output) — reported in `now.language` as a human name so the model doesn't
+// have to map an ISO code itself.
 // bankItems (optional): the subset of today's daily_content_bank rows chosen
 // for this device by selectBankItemsForDevice (see dailyContentBank.js) --
-// already filtered to categories the device hasn't seen yet today. Rendered
-// as its own labeled block so buildSystemPrompt's instructions can point the
-// model at it by name ("today's content ideas") without the model having to
-// guess which part of the context string that refers to.
-function buildContextPrompt(device, window, signals, weather, bankItems) {
-  const parts = [];
-  if (device.name) parts.push(`name: ${device.name}`);
-  if (device.gender) parts.push(`gender: ${device.gender}`);
-  if (device.birth_date) parts.push(`birth date: ${device.birth_date}`);
+// already filtered to categories the device hasn't seen yet today.
+// shownCategories (optional): category names already shown to this device
+// today (see dailyContentBank.js's getShownCategories) — listed so the model
+// avoids repeating them, without re-sending the actual past phrases.
+function buildContextPrompt(device, window, signals, weather, languageCode, bankItems, shownCategories) {
+  const profile = {};
+  if (device.name) profile.name = device.name;
+  if (device.gender) profile.gender = device.gender;
+  const age = computeAge(device.birth_date);
+  if (age !== null) profile.age = age;
   if (device.interests) {
     try {
       const interests = JSON.parse(device.interests);
       if (Array.isArray(interests) && interests.length) {
-        parts.push(`interests: ${interests.join(', ')}`);
+        profile.interests = interests;
       }
     } catch (_) {
       // malformed stored JSON — skip rather than fail the whole request
     }
   }
-  if (device.personal_goal) parts.push(`personal goal: ${device.personal_goal}`);
-  if (device.tone) parts.push(`tone: ${device.tone}`);
+  if (device.personal_goal) profile.personal_goal = device.personal_goal;
+  if (device.tone) profile.tone = device.tone;
+
+  // `language` is the resolved GENERATION target (resolveTargetLanguageCode's
+  // output, e.g. falls back to English if the device's own language isn't
+  // supported) -- not the same thing as the device's raw system_language
+  // signal, so we also surface `device_language` below whenever the two
+  // differ, otherwise the model would have no way to know a fallback
+  // happened. `timezone` itself is deliberately NOT included here (unlike
+  // the old "; "-joined context) -- the model only ever needs the derived
+  // date/weekday/days_since_install below, not the raw IANA string.
+  const now = { language: SUPPORTED_LANGUAGES[languageCode].name, window };
+  if (signals && signals.system_language && signals.system_language !== languageCode) {
+    now.device_language = signals.system_language;
+  }
+  if (signals && signals.region !== undefined) now.region = signals.region;
   if (device.timezone) {
-    parts.push(`timezone: ${device.timezone}`);
     const dateContext = getLocalDateContext(device.timezone);
     if (dateContext) {
-      parts.push(`device local date: ${dateContext.date} (${dateContext.weekday})`);
+      now.date = dateContext.date;
+      now.weekday = dateContext.weekday;
     }
-    // Placed here (not in the `signals` block below) because it's derived
-    // from device.created_at + device.timezone, the same devices-table
-    // fields the two lines above already use — not a per-request signal the
-    // client sends, like battery_level/ambient_light/etc. are.
     const daysSinceInstall = getDaysSinceInstall(device.created_at, device.timezone);
     if (daysSinceInstall !== null) {
-      parts.push(`days since install: ${daysSinceInstall}`);
+      now.days_since_install = daysSinceInstall;
     }
   }
-  parts.push(`time of day: ${window}`);
 
+  const signalsOut = {};
   if (signals) {
-    if (signals.battery_level !== undefined) {
-      parts.push(`phone battery level: ${signals.battery_level}%`);
-    }
-    if (signals.ambient_light !== undefined) {
-      parts.push(`ambient light: ${signals.ambient_light} lux`);
-    }
-    if (signals.screen_on_duration_seconds !== undefined) {
-      parts.push(`screen was last on for: ${signals.screen_on_duration_seconds} sec`);
-    }
-    if (signals.steps_since_last_batch !== undefined) {
-      parts.push(`steps since last window: ${signals.steps_since_last_batch}`);
-    }
-    if (signals.unlocks_since_last_batch !== undefined) {
-      parts.push(`unlocks since last window: ${signals.unlocks_since_last_batch}`);
-    }
-    if (signals.system_language !== undefined) {
-      parts.push(`device system language: ${signals.system_language}`);
-    }
-    if (signals.region !== undefined) {
-      parts.push(`device region: ${signals.region}`);
-    }
+    if (signals.steps_since_last_batch !== undefined) signalsOut.steps = signals.steps_since_last_batch;
+    if (signals.unlocks_since_last_batch !== undefined) signalsOut.unlocks = signals.unlocks_since_last_batch;
+    if (signals.battery_level !== undefined) signalsOut.battery_pct = signals.battery_level;
+    if (signals.ambient_light !== undefined) signalsOut.ambient_light_lux = signals.ambient_light;
+    if (signals.screen_on_duration_seconds !== undefined) signalsOut.screen_on_duration_sec = signals.screen_on_duration_seconds;
   }
+
+  const ctx = { profile, now };
+  if (Object.keys(profile).length === 0) delete ctx.profile;
+  if (Object.keys(signalsOut).length > 0) ctx.signals = signalsOut;
 
   if (weather) {
-    const weatherBits = [];
-    if (weather.city) weatherBits.push(weather.city);
-    weatherBits.push(`${Math.round(weather.temperatureC)}°C`);
-    if (weather.description) weatherBits.push(weather.description);
-    parts.push(`weather: ${weatherBits.join(', ')}`);
+    const weatherOut = { temperature_c: Math.round(weather.temperatureC) };
+    if (weather.city) weatherOut.city = weather.city;
+    if (weather.description) weatherOut.condition = weather.description;
+    ctx.weather = weatherOut;
   }
 
   if (Array.isArray(bankItems) && bankItems.length > 0) {
-    const bankText = bankItems.map((item) => `[${item.category}] ${item.content_text}`).join('; ');
-    parts.push(`today's content ideas: ${bankText}`);
+    ctx.today_content = bankItems.map((item) => ({ category: item.category, text: item.content_text }));
   }
 
-  return parts.join('; ');
+  if (Array.isArray(shownCategories) && shownCategories.length > 0) {
+    ctx.already_shown = shownCategories;
+  }
+
+  return JSON.stringify(ctx);
 }
 
-// Builds the SYSTEM_PROMPT for a specific target language. Was a fixed
-// English-only template constant before this task; now a function of
-// languageCode so each request's prompt names its own resolved target
-// language (see resolveTargetLanguageCode) instead of always saying
-// "English" regardless of who's asking.
-// regionCode (optional): the device's region signal (ISO country code, see
-// deviceSignals.js) -- when present, enables the "occasional country fact"
-// instruction below. This path has no web search (plain chat completions,
-// unlike dailyContentBank.js's Responses API call), so the instruction is
-// deliberately conservative: general-knowledge, uncontested facts only.
-function buildSystemPrompt(languageCode, regionCode) {
+// Builds the SYSTEM_PROMPT for a specific target language. Function of
+// languageCode only (no regionCode) so the static prefix is byte-identical
+// across every request in the same language regardless of which device's
+// region happens to be set -- regionCode now travels only in the per-request
+// context (buildContextPrompt's `now.region`), which lets an OpenAI-side
+// prompt cache match this whole prefix across users of the same language
+// instead of missing on the old regionCode-conditional branch.
+//
+// The "occasional country fact" instruction is therefore now unconditional
+// static text (previously only appended when a region was present) -- it's
+// a no-op on a request with no region in context, and still deliberately
+// conservative (general-knowledge, uncontested facts only) since this path
+// has no web search, unlike dailyContentBank.js's Responses API call.
+//
+// Shape of the output (exactly BATCH_SIZE {text, style_id} objects plus
+// used_categories) is enforced via the Structured Outputs json_schema passed
+// to the API call in generateBatch, not described in this text -- see the
+// call site for why.
+function buildSystemPrompt(languageCode) {
   const languageName = SUPPORTED_LANGUAGES[languageCode].name;
-  const countryFactInstruction = regionCode
-    ? `\nThe context may include a device region (ISO country code). You have no web search here, so only rely on your own general knowledge -- occasionally (not in every batch, not as a rule) you may include one interesting fact about that country, but only if it's well-known and uncontested: no disputed history, no politics, no statistics you're not confident are still accurate. When in doubt, skip it rather than risk stating something wrong or sensitive.\n`
-    : '';
-  return `You are a personal content editor curating short pieces of content for a phone lock screen (live wallpaper), not a generator of motivational phrases.
-Return a JSON object with a "phrases" field — an array of exactly ${BATCH_SIZE} objects.
-Each object: {"text": "a short piece of content in ${languageName}, up to 80 characters", "style_id": one of [${STYLE_IDS.join(', ')}]}.
+  return `You are a personal content editor curating content for a phone lock screen (live wallpaper) -- not a generator of motivational phrases.
+Your job each time: create exactly ${BATCH_SIZE} very short pieces of content, in ${languageName}, for the user's next several screen unlocks.
 
-The user context may include a line starting with "today's content ideas:" — a list of items tagged like [category] content, drawn from categories such as ${BANK_CATEGORIES.join(', ')}. Treat these as raw material, not a script: select the ones that fit the user's tone and interests, then adapt, shorten, rephrase, or translate them into ${languageName} rather than copying them verbatim. You don't need to use every idea offered, and you may fill in remaining slots yourself when the ideas given aren't enough for a full varied batch.
-Make the batch genuinely varied in genre — mix things like holidays/observances, interesting facts, quotes, "on this day" history, psychology insights, practical advice, humor, and idioms. Warm/motivational lines are just one genre among several here, not the default — most of the batch should be something other than a motivational phrase.
-Every phrase should still be short, warm in tone, and suitable for a brief glance at a lock screen — not pushy, no ads, no questions that require an answer.
-Take the user's context into account if it's provided, but don't be too literal / don't echo personal data back in the text.
-If a name is given in the context, you may address the user by it in some of the phrases for a personal touch — but not in every phrase, and never as a rule to force into all of them; most phrases should read naturally without it, so it doesn't feel repetitive or scripted.
-${countryFactInstruction}IMPORTANT: every phrase "text" must be entirely in ${languageName}, without a single word or letter in any other language — do not switch to another language for individual words or whole phrases, even if it seems stylistically fitting.
-Also include a top-level "used_categories" field — a JSON array of the category names (only from the list above, e.g. "quote" or "psychology") you actually drew inspiration from for this batch; omit categories you didn't use, and don't invent new category names.
-Respond with JSON only, no explanations.`;
+Every single piece must earn its place for at least one reason: it's interesting, useful, funny, surprising, insightful, or personal to this user. Nothing filler.
+You choose the mix of genres for this batch -- there's no fixed template -- but a batch must never be variations on the same idea. Allowed formats: humor, facts, practical advice, sharp observations, thought-provoking questions, tiny challenges, language/history/culture/psychology tidbits, the user's own interests, real items from today's content ideas when given, and -- occasionally, not as a rule -- one well-known, uncontested general-knowledge fact about the user's country (skip it rather than risk something wrong, disputed, or political; you have no web search here).
+Warm/motivational lines are one rare genre among these, never the default. Explicitly avoid AI cliches such as "believe in yourself", "you've got this", "seize the moment" (and equivalents in any language).
+The context may include today's content ideas and personal signals (interests, goal, tone, steps, battery, weather, etc.) -- use them only when they genuinely raise relevance. Don't turn telemetry into a status report, and don't force it into every phrase; most phrases can ignore it entirely.
+Never reuse a topic or category listed as already shown today for this user.
+Never invent facts beyond what today's content ideas actually say.
+Use the user's name only rarely, and their gender only when it clearly improves relevance -- never as a rule applied to every phrase.
+Match the given time-of-day window -- never a morning greeting in a day/evening/night batch, or vice versa.
+Every phrase's text must be entirely in ${languageName}, with no words or letters from any other language, even for a single word.
+Do not explain your reasoning or return any analysis -- only the structured result the API call asks for.`;
 }
 
 /**
@@ -356,8 +379,9 @@ async function generateBatch(device, window, signals, weather) {
   // content this batch" rather than failing.
   const deviceLocalDate = getLocalCalendarDate(new Date(), device.timezone);
   const bankItems = selectBankItemsForDevice(device.device_id, getUtcDateString(), deviceLocalDate, device.gender);
+  const shownCategories = getShownCategories(device.device_id, deviceLocalDate);
 
-  const context = buildContextPrompt(device, window, signals, weather, bankItems);
+  const context = buildContextPrompt(device, window, signals, weather, languageCode, bankItems, shownCategories);
 
   if (!apiKey) {
     return { phrases: buildFallbackBatch(), source: 'fallback', context };
@@ -371,9 +395,38 @@ async function generateBatch(device, window, signals, weather) {
 
     const response = await client.chat.completions.create({
       model: 'gpt-4o-mini',
-      response_format: { type: 'json_object' },
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'lock_screen_batch',
+          strict: true,
+          schema: {
+            type: 'object',
+            properties: {
+              phrases: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    text: { type: 'string' },
+                    style_id: { type: 'string', enum: STYLE_IDS },
+                  },
+                  required: ['text', 'style_id'],
+                  additionalProperties: false,
+                },
+              },
+              used_categories: {
+                type: 'array',
+                items: { type: 'string', enum: BANK_CATEGORIES },
+              },
+            },
+            required: ['phrases', 'used_categories'],
+            additionalProperties: false,
+          },
+        },
+      },
       messages: [
-        { role: 'system', content: buildSystemPrompt(languageCode, signals && signals.region) },
+        { role: 'system', content: buildSystemPrompt(languageCode) },
         { role: 'user', content: context },
       ],
     });

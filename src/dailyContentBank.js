@@ -245,8 +245,21 @@ function recordShownCategories(deviceId, deviceLocalDate, categories) {
   insertMany(uniqueCategories);
 }
 
+// Returns the list of category names already shown to this device today
+// (device_shown_categories for deviceId/deviceLocalDate) -- used by
+// contentGenerator.js to tell the model which categories/topics to avoid
+// repeating, separately from selectBankItemsForDevice's own (silent) use of
+// the same table to filter which bank rows it offers.
+function getShownCategories(deviceId, deviceLocalDate) {
+  if (!deviceId || !deviceLocalDate) {
+    return [];
+  }
+  return selectShownCategoriesStatement.all(deviceId, deviceLocalDate).map((row) => row.category);
+}
+
 module.exports = {
   generateDailyBank,
+  getShownCategories,
   selectBankItemsForDevice,
   recordShownCategories,
   getUtcDateString,
