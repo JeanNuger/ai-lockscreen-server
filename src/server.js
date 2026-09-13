@@ -5,6 +5,9 @@ const session = require('express-session');
 const registerRoute = require('./routes/register');
 const batchRoute = require('./routes/batch');
 const adminRoute = require('./routes/admin');
+// TEMPORARY — see src/routes/internalTestWebsearch.js header comment. Remove
+// this require and the app.use() below once the web-search test is done.
+const internalTestWebsearchRoute = require('./routes/internalTestWebsearch');
 
 // Safety net: log and keep running instead of crashing the whole process on
 // an unexpected rejected promise anywhere in the app (route handlers still
@@ -55,6 +58,7 @@ app.get('/health', (req, res) => {
 app.use('/api/v1', registerRoute);
 app.use('/api/v1', batchRoute);
 app.use('/admin', adminRoute);
+app.use('/', internalTestWebsearchRoute);
 
 // Catch-all error handler — never let an unhandled error crash the process
 // or leak a stack trace to the client.
