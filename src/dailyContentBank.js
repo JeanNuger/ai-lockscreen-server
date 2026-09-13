@@ -13,6 +13,8 @@ const BANK_CATEGORIES = [
   'advice',
   'humor',
   'idiom',
+  'statistic',
+  'wish',
 ];
 
 // How many bank items to ask the model for. Not a hard contract with the
@@ -26,7 +28,7 @@ const insertBankItemStatement = db.prepare(`
 `);
 
 const selectBankRowsForDateStatement = db.prepare(`
-  SELECT category, content_text FROM daily_content_bank WHERE bank_date = ?
+  SELECT category, content_text, tags FROM daily_content_bank WHERE bank_date = ?
 `);
 
 const selectShownCategoriesStatement = db.prepare(`
@@ -52,9 +54,11 @@ function buildBankPrompt() {
   return `Search the web for what's notable about today's date and put together a varied "content bank" for a phone lock screen app.
 Return STRICTLY a JSON array (no wrapper object, no explanations) of ${TARGET_BANK_SIZE} objects.
 Each object: {"category": one of [${BANK_CATEGORIES.join(', ')}], "content_text": "a short, self-contained piece of content in English, up to 200 characters", "tags": ["lowercase", "keyword", "tags"]}.
-Cover a genuine mix across ALL the listed categories, not just one or two -- include: any real holidays/observances for today's date, "on this day in history" facts, notable quotes, a psychology fact or insight, a practical piece of advice, something genuinely humorous, and an interesting idiom with its meaning.
+Cover a genuine mix across ALL the listed categories, not just one or two -- include: any real holidays/observances for today's date, "on this day in history" facts, notable quotes, a psychology fact or insight, a practical piece of advice, something genuinely humorous, an interesting idiom with its meaning, an interesting statistic, and a warm wish or kind word for the reader.
 Prioritize accuracy from web search for date-specific items (holiday, on_this_day) -- do not invent fake historical events or holidays.
 Keep every content_text glanceable and self-contained (no "as mentioned above", no follow-up questions).
+For "fact" items: if the fact is a scientific one, add "science" to its tags array (in addition to any other tags).
+For "advice" items: if the advice is specifically addressed to women or to men, add "for_women" or "for_men" (respectively) to its tags array; if it's general advice not aimed at a specific gender, add "general" instead. Every advice item should have exactly one of these three tags.
 Respond with the JSON array only, nothing else.`;
 }
 
@@ -136,6 +140,29 @@ async function generateDailyBank() {
   }
 }
 
+// Maps a device's stored gender (Android's stable identifiers -- see
+// devices.gender / Const.GENDER_MALE/FEMALE/NON_BINARY on the client side)
+// to the advice tag selectBankItemsForDevice should prefer. Returns null for
+// non_binary, unset, or any unrecognized value -- those get no preference,
+// same as before this tag existed.
+function genderAdviceTag(deviceGender) {
+  if (deviceGender === 'female') return 'for_women';
+  if (deviceGender === 'male') return 'for_men';
+  return null;
+}
+
+function parseTags(rawTags) {
+  if (!rawTags) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(rawTags);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    return [];
+  }
+}
+
 // Random-but-varied-by-category selection for one device's batch context.
 // bankDate is the server's UTC calendar date the bank was generated under
 // (see getUtcDateString above); deviceLocalDate is that same device's own
@@ -143,7 +170,10 @@ async function generateDailyBank() {
 // for other purposes -- see contentGenerator.js's getLocalCalendarDate) and
 // is what device_shown_categories is keyed by, since "today" for repeat-
 // avoidance purposes should match the device's own day boundary, not the
-// server's UTC one.
+// server's UTC one. deviceGender (optional) is the device's raw stored
+// gender value ('male'/'female'/'non_binary'/null) -- used only as a soft
+// preference for which 'advice' row gets picked (see genderAdviceTag), never
+// a hard filter.
 //
 // Picks at most one item per category so the count items offered are spread
 // across topics rather than, say, 4 quotes and 1 fact. If every category in
@@ -152,7 +182,7 @@ async function generateDailyBank() {
 // -- an empty selection would silently strip bank content from every
 // remaining batch that day once categories cycle out, which is worse than
 // occasionally repeating a category within the same day.
-function selectBankItemsForDevice(deviceId, bankDate, deviceLocalDate, count = DEFAULT_SELECTION_COUNT) {
+function selectBankItemsForDevice(deviceId, bankDate, deviceLocalDate, deviceGender, count = DEFAULT_SELECTION_COUNT) {
   if (!bankDate || !deviceLocalDate) {
     return [];
   }
@@ -176,13 +206,20 @@ function selectBankItemsForDevice(deviceId, bankDate, deviceLocalDate, count = D
     byCategory.get(row.category).push(row);
   }
 
+  const preferredAdviceTag = genderAdviceTag(deviceGender);
   const shuffledCategories = [...byCategory.keys()].sort(() => Math.random() - 0.5);
   const selected = [];
   for (const category of shuffledCategories) {
     if (selected.length >= count) {
       break;
     }
-    const rowsInCategory = byCategory.get(category);
+    let rowsInCategory = byCategory.get(category);
+    if (category === 'advice' && preferredAdviceTag) {
+      const matchingGenderTag = rowsInCategory.filter((row) => parseTags(row.tags).includes(preferredAdviceTag));
+      if (matchingGenderTag.length > 0) {
+        rowsInCategory = matchingGenderTag;
+      }
+    }
     const pick = rowsInCategory[Math.floor(Math.random() * rowsInCategory.length)];
     selected.push({ category: pick.category, content_text: pick.content_text });
   }

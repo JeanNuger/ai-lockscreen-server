@@ -307,8 +307,16 @@ function buildContextPrompt(device, window, signals, weather, bankItems) {
 // languageCode so each request's prompt names its own resolved target
 // language (see resolveTargetLanguageCode) instead of always saying
 // "English" regardless of who's asking.
-function buildSystemPrompt(languageCode) {
+// regionCode (optional): the device's region signal (ISO country code, see
+// deviceSignals.js) -- when present, enables the "occasional country fact"
+// instruction below. This path has no web search (plain chat completions,
+// unlike dailyContentBank.js's Responses API call), so the instruction is
+// deliberately conservative: general-knowledge, uncontested facts only.
+function buildSystemPrompt(languageCode, regionCode) {
   const languageName = SUPPORTED_LANGUAGES[languageCode].name;
+  const countryFactInstruction = regionCode
+    ? `\nThe context may include a device region (ISO country code). You have no web search here, so only rely on your own general knowledge -- occasionally (not in every batch, not as a rule) you may include one interesting fact about that country, but only if it's well-known and uncontested: no disputed history, no politics, no statistics you're not confident are still accurate. When in doubt, skip it rather than risk stating something wrong or sensitive.\n`
+    : '';
   return `You are a personal content editor curating short pieces of content for a phone lock screen (live wallpaper), not a generator of motivational phrases.
 Return a JSON object with a "phrases" field — an array of exactly ${BATCH_SIZE} objects.
 Each object: {"text": "a short piece of content in ${languageName}, up to 80 characters", "style_id": one of [${STYLE_IDS.join(', ')}]}.
@@ -318,7 +326,7 @@ Make the batch genuinely varied in genre — mix things like holidays/observance
 Every phrase should still be short, warm in tone, and suitable for a brief glance at a lock screen — not pushy, no ads, no questions that require an answer.
 Take the user's context into account if it's provided, but don't be too literal / don't echo personal data back in the text.
 If a name is given in the context, you may address the user by it in some of the phrases for a personal touch — but not in every phrase, and never as a rule to force into all of them; most phrases should read naturally without it, so it doesn't feel repetitive or scripted.
-IMPORTANT: every phrase "text" must be entirely in ${languageName}, without a single word or letter in any other language — do not switch to another language for individual words or whole phrases, even if it seems stylistically fitting.
+${countryFactInstruction}IMPORTANT: every phrase "text" must be entirely in ${languageName}, without a single word or letter in any other language — do not switch to another language for individual words or whole phrases, even if it seems stylistically fitting.
 Also include a top-level "used_categories" field — a JSON array of the category names (only from the list above, e.g. "quote" or "psychology") you actually drew inspiration from for this batch; omit categories you didn't use, and don't invent new category names.
 Respond with JSON only, no explanations.`;
 }
@@ -347,7 +355,7 @@ async function generateBatch(device, window, signals, weather) {
   // already returns [] in that case, so bankItems degrades to "no bank
   // content this batch" rather than failing.
   const deviceLocalDate = getLocalCalendarDate(new Date(), device.timezone);
-  const bankItems = selectBankItemsForDevice(device.device_id, getUtcDateString(), deviceLocalDate);
+  const bankItems = selectBankItemsForDevice(device.device_id, getUtcDateString(), deviceLocalDate, device.gender);
 
   const context = buildContextPrompt(device, window, signals, weather, bankItems);
 
@@ -365,7 +373,7 @@ async function generateBatch(device, window, signals, weather) {
       model: 'gpt-4o-mini',
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: buildSystemPrompt(languageCode) },
+        { role: 'system', content: buildSystemPrompt(languageCode, signals && signals.region) },
         { role: 'user', content: context },
       ],
     });
