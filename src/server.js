@@ -5,6 +5,7 @@ const session = require('express-session');
 const registerRoute = require('./routes/register');
 const batchRoute = require('./routes/batch');
 const adminRoute = require('./routes/admin');
+const internalGenerateBankRoute = require('./routes/internalGenerateBank');
 
 // Safety net: log and keep running instead of crashing the whole process on
 // an unexpected rejected promise anywhere in the app (route handlers still
@@ -55,6 +56,7 @@ app.get('/health', (req, res) => {
 app.use('/api/v1', registerRoute);
 app.use('/api/v1', batchRoute);
 app.use('/admin', adminRoute);
+app.use('/', internalGenerateBankRoute);
 
 // Catch-all error handler — never let an unhandled error crash the process
 // or leak a stack trace to the client.

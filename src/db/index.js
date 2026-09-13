@@ -64,6 +64,34 @@ db.exec(`
     PRIMARY KEY (message_id, device_id),
     FOREIGN KEY (message_id) REFERENCES admin_messages(id)
   );
+
+  -- daily_content_bank: the shared, non-personalized "content of the day"
+  -- collected once per day via a web-search-enabled OpenAI call (see
+  -- src/dailyContentBank.js) -- holidays, "on this day" facts, quotes, etc.
+  -- bank_date is the server's own UTC calendar date (not per-device local
+  -- date) since this bank is shared across every device, not per-user.
+  CREATE TABLE IF NOT EXISTS daily_content_bank (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bank_date TEXT NOT NULL,
+    category TEXT NOT NULL,
+    content_text TEXT NOT NULL,
+    tags TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_daily_content_bank_date ON daily_content_bank(bank_date);
+
+  -- device_shown_categories: which daily_content_bank categories a device has
+  -- already seen on a given day, so the per-window personalization step
+  -- (added separately) can avoid repeating the same category to the same
+  -- device within one day.
+  CREATE TABLE IF NOT EXISTS device_shown_categories (
+    device_id TEXT NOT NULL,
+    shown_date TEXT NOT NULL,
+    category TEXT NOT NULL,
+    PRIMARY KEY (device_id, shown_date, category),
+    FOREIGN KEY (device_id) REFERENCES devices(device_id)
+  );
 `);
 
 // One-off migration: devices.name is new as of 2026-09-12. This project has no
