@@ -443,6 +443,27 @@ async function generateBatch(device, window, signals, weather) {
         style_id: STYLE_IDS.includes(p.style_id) ? p.style_id : pickRandomStyle(),
       }));
 
+    // TEMPORARY diagnostic-only logging (DEBUG_LOG_BATCH_COUNTS env var, no-op unless set) --
+    // investigating the owner's real-usage report of only 2-5 distinct phrases/backgrounds
+    // reaching the device per batch instead of the expected BATCH_SIZE (10). Logs the raw count
+    // straight from the model's response, counts before/after the text-emptiness filter above,
+    // the dropped items themselves (with their style_id, since the working hypothesis is items
+    // with a style_id outside the new 27-code STYLE_IDS set silently disappearing -- note this
+    // filter does NOT actually drop on style_id, it only substitutes pickRandomStyle() for an
+    // invalid one, so this logging is also how we confirm/refute that hypothesis rather than
+    // assume it), and used_categories for completeness. Not fixing anything here -- remove this
+    // block in a separate commit once the real numbers are collected. See TASK "diagnostics:
+    // batch phrase count" report.
+    if (process.env.DEBUG_LOG_BATCH_COUNTS) {
+      console.log(`DEBUG_LOG_BATCH_COUNTS raw=${Array.isArray(parsed.phrases) ? parsed.phrases.length : 'not-array'}`);
+      console.log(`DEBUG_LOG_BATCH_COUNTS phrases.length=${phrases.length} cleaned.length=${cleaned.length}`);
+      if (phrases.length !== cleaned.length) {
+        const dropped = phrases.filter((p) => !(p && typeof p.text === 'string' && p.text.trim().length > 0));
+        console.log(`DEBUG_LOG_BATCH_COUNTS dropped=${JSON.stringify(dropped)}`);
+      }
+      console.log(`DEBUG_LOG_BATCH_COUNTS used_categories=${JSON.stringify(parsed.used_categories)}`);
+    }
+
     if (cleaned.length === 0) {
       return { phrases: buildFallbackBatch(), source: 'fallback', context };
     }
