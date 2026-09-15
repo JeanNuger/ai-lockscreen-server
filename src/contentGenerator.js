@@ -7,28 +7,161 @@ const {
   BANK_CATEGORIES,
 } = require('./dailyContentBank');
 
-// FALLBACK_PHRASES stay English-only — this is the offline/failure path (no
-// OPENAI_API_KEY configured, the OpenAI call itself fails, or an individual
-// phrase fails its language check below), not the primary path being
-// localized here. Translating this list into all 10 supported languages is
-// a deliberate scope cut, not an oversight — see PRODUCT_REBUILD_PLAN.md's
-// note on this exact tradeoff. Known consequence: a device whose language
-// isn't English will see English fallback text (for the whole batch, on a
-// full OpenAI outage; or for just the substituted phrase(s), on a
-// language-check failure) rather than no content — this is intentionally
-// the "some content, wrong language" degradation, not "no content".
-const FALLBACK_PHRASES = [
-  'A good day starts with you',
-  "You're doing better than you think",
-  'Take a deep breath',
-  'Small steps lead to big changes',
-  'Today is a great day to try something new',
-  "Don't forget to call someone you love",
-  'Smile — just because',
-  'A little water never hurts',
-  "You've already come a long way",
-  'Give yourself a little rest if you need it',
-];
+// FALLBACK_PHRASES: the offline/failure path (no OPENAI_API_KEY configured,
+// the OpenAI call itself fails, the whole batch comes back empty, or an
+// individual phrase fails its language check below). Translated into all 10
+// supported languages so this path degrades in the device's own language
+// instead of always falling back to English — same phrases, same warm/
+// short/glanceable tone, translated by hand per language rather than
+// machine-generated at request time (this list must work with zero API
+// calls). Keyed by the same language codes as SUPPORTED_LANGUAGES; callers
+// select a language's array by indexing FALLBACK_PHRASES[languageCode] (see
+// pickRandomFallbackPhrase/buildFallbackBatch below). 12 phrases per
+// language, matching BATCH_SIZE -- buildFallbackBatch's slice(0, BATCH_SIZE)
+// would otherwise silently cap below BATCH_SIZE if a language's list were
+// shorter.
+const FALLBACK_PHRASES = {
+  en: [
+    'A good day starts with you',
+    "You're doing better than you think",
+    'Take a deep breath',
+    'Small steps lead to big changes',
+    'Today is a great day to try something new',
+    "Don't forget to call someone you love",
+    'Smile — just because',
+    'A little water never hurts',
+    "You've already come a long way",
+    'Give yourself a little rest if you need it',
+    'One thing at a time is still progress',
+    'A quiet moment counts too',
+  ],
+  fr: [
+    'Une bonne journée commence avec vous',
+    'Vous vous en sortez mieux que vous ne le pensez',
+    'Respirez profondément',
+    'Les petits pas mènent aux grands changements',
+    "Aujourd'hui est un bon jour pour essayer quelque chose de nouveau",
+    "N'oubliez pas d'appeler quelqu'un que vous aimez",
+    'Souriez — juste parce que',
+    'Un peu d\'eau ne fait jamais de mal',
+    'Vous avez déjà parcouru beaucoup de chemin',
+    'Accordez-vous un peu de repos si vous en avez besoin',
+    'Un pas à la fois, c\'est déjà avancer',
+    'Un moment de calme compte aussi',
+  ],
+  es: [
+    'Un buen día empieza contigo',
+    'Lo estás haciendo mejor de lo que crees',
+    'Respira profundamente',
+    'Los pequeños pasos llevan a grandes cambios',
+    'Hoy es un gran día para probar algo nuevo',
+    'No olvides llamar a alguien que quieres',
+    'Sonríe — solo porque sí',
+    'Un poco de agua nunca hace daño',
+    'Ya has recorrido un largo camino',
+    'Date un pequeño descanso si lo necesitas',
+    'Un paso a la vez también es progreso',
+    'Un momento de calma también cuenta',
+  ],
+  pt: [
+    'Um bom dia começa com você',
+    'Você está indo melhor do que pensa',
+    'Respire fundo',
+    'Pequenos passos levam a grandes mudanças',
+    'Hoje é um ótimo dia para experimentar algo novo',
+    'Não se esqueça de ligar para alguém que você ama',
+    'Sorria — só porque sim',
+    'Um pouco de água nunca faz mal',
+    'Você já percorreu um longo caminho',
+    'Dê a si mesmo um descanso se precisar',
+    'Um passo de cada vez também é progresso',
+    'Um momento de calma também conta',
+  ],
+  de: [
+    'Ein guter Tag beginnt mit dir',
+    'Du machst das besser, als du denkst',
+    'Atme tief durch',
+    'Kleine Schritte führen zu großen Veränderungen',
+    'Heute ist ein guter Tag, um etwas Neues auszuprobieren',
+    'Vergiss nicht, jemanden anzurufen, den du liebst',
+    'Lächle — einfach so',
+    'Ein bisschen Wasser schadet nie',
+    'Du hast schon einen weiten Weg zurückgelegt',
+    'Gönn dir eine kleine Pause, wenn du sie brauchst',
+    'Ein Schritt nach dem anderen ist auch Fortschritt',
+    'Ein ruhiger Moment zählt auch',
+  ],
+  ru: [
+    'Хороший день начинается с тебя',
+    'У тебя получается лучше, чем ты думаешь',
+    'Сделай глубокий вдох',
+    'Маленькие шаги ведут к большим переменам',
+    'Сегодня отличный день, чтобы попробовать что-то новое',
+    'Не забудь позвонить тому, кого любишь',
+    'Улыбнись — просто так',
+    'Немного воды никогда не помешает',
+    'Ты уже прошёл долгий путь',
+    'Позволь себе немного отдохнуть, если нужно',
+    'Один шаг за раз — тоже движение вперёд',
+    'Тихая минута тоже на счету',
+  ],
+  zh: [
+    '美好的一天从你开始',
+    '你做得比想象中更好',
+    '深呼吸一下',
+    '小小的步伐带来大大的改变',
+    '今天很适合尝试一些新事物',
+    '别忘了给你爱的人打个电话',
+    '微笑吧——不为什么',
+    '喝点水总没坏处',
+    '你已经走了很长的路',
+    '如果需要,给自己一点休息时间',
+    '一次做一件事,也是进步',
+    '安静的片刻也很重要',
+  ],
+  ja: [
+    '良い一日はあなたから始まる',
+    '思っているより、うまくやれています',
+    '深呼吸してみましょう',
+    '小さな一歩が大きな変化につながる',
+    '今日は何か新しいことに挑戦するのにぴったりの日',
+    '大切な人に電話するのを忘れずに',
+    '理由なんてなくても、笑顔で',
+    '水を少し飲むのも悪くない',
+    'あなたはもうずいぶん頑張ってきました',
+    '必要なら、少し休んでもいい',
+    '一つずつでも、それは前進です',
+    '静かなひとときも大切です',
+  ],
+  ko: [
+    '좋은 하루는 당신에게서 시작됩니다',
+    '생각보다 잘하고 있어요',
+    '심호흡을 해보세요',
+    '작은 발걸음이 큰 변화를 만듭니다',
+    '오늘은 새로운 걸 시도해보기 좋은 날이에요',
+    '사랑하는 사람에게 전화하는 걸 잊지 마세요',
+    '그냥 한번 웃어보세요',
+    '물 한 잔도 나쁘지 않아요',
+    '당신은 이미 먼 길을 걸어왔어요',
+    '필요하다면 잠시 쉬어가도 괜찮아요',
+    '한 번에 하나씩도 발전이에요',
+    '조용한 순간도 소중해요',
+  ],
+  it: [
+    'Una buona giornata inizia con te',
+    'Stai andando meglio di quanto pensi',
+    'Fai un respiro profondo',
+    'I piccoli passi portano a grandi cambiamenti',
+    'Oggi è un ottimo giorno per provare qualcosa di nuovo',
+    'Non dimenticare di chiamare qualcuno che ami',
+    'Sorridi — così, senza motivo',
+    "Un po' d'acqua non fa mai male",
+    'Hai già fatto molta strada',
+    'Concediti un po\' di riposo se ne hai bisogno',
+    'Un passo alla volta è comunque un progresso',
+    'Anche un momento di calma conta',
+  ],
+};
 
 // The 10 languages product/DoD calls for (locale-driven generation task).
 // Each entry names the language for the SYSTEM_PROMPT and a scriptCheck
@@ -70,8 +203,48 @@ function pickRandomStyle() {
   return STYLE_IDS[Math.floor(Math.random() * STYLE_IDS.length)];
 }
 
-function pickRandomFallbackPhrase() {
-  return FALLBACK_PHRASES[Math.floor(Math.random() * FALLBACK_PHRASES.length)];
+// Returns `count` distinct style_ids (Fisher-Yates shuffle of the full 27-value
+// STYLE_IDS, then take the first `count`) -- used wherever a batch needs several
+// different backgrounds guaranteed with no repeats, e.g. buildFallbackBatch below.
+// count must not exceed STYLE_IDS.length (27); BATCH_SIZE (12) leaves comfortable
+// headroom.
+function pickUniqueStyles(count) {
+  const shuffled = [...STYLE_IDS];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled.slice(0, count);
+}
+
+// Reassigns any duplicate style_id within a batch to one not yet used in that
+// same batch, walked in order -- keeps each phrase's own style_id whenever it's
+// still free within the batch, only touches actual repeats. 27 style_ids vs
+// BATCH_SIZE (12) leaves comfortable headroom, so an unused one is always
+// available. This is the hard guarantee; buildSystemPrompt's "don't repeat
+// style_id" instruction above is only a soft ask to the model, not relied on
+// alone.
+function dedupeStyleIds(items) {
+  const used = new Set();
+  return items.map((item) => {
+    if (!used.has(item.style_id)) {
+      used.add(item.style_id);
+      return item;
+    }
+    const available = STYLE_IDS.filter((id) => !used.has(id));
+    const replacement = available[Math.floor(Math.random() * available.length)];
+    used.add(replacement);
+    return { ...item, style_id: replacement };
+  });
+}
+
+// languageCode is expected to already be a resolved, known key of
+// FALLBACK_PHRASES (i.e. the output of resolveTargetLanguageCode) — the
+// DEFAULT_LANGUAGE_CODE fallback here is defense in depth for a caller that
+// passes something else (e.g. undefined), not the primary resolution path.
+function pickRandomFallbackPhrase(languageCode) {
+  const phrases = FALLBACK_PHRASES[languageCode] || FALLBACK_PHRASES[DEFAULT_LANGUAGE_CODE];
+  return phrases[Math.floor(Math.random() * phrases.length)];
 }
 
 // Generalizes the old isValidEnglishText heuristic to any of the 10
@@ -195,11 +368,19 @@ function getDaysSinceInstall(createdAtUtc, timezone) {
   return daysDiff >= 0 ? daysDiff : 0;
 }
 
-function buildFallbackBatch() {
-  const shuffled = [...FALLBACK_PHRASES].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, BATCH_SIZE).map((text) => ({
+// languageCode: same contract as pickRandomFallbackPhrase — pass the
+// already-resolved target language (resolveTargetLanguageCode's output);
+// defaults to DEFAULT_LANGUAGE_CODE when omitted, so existing callers that
+// don't pass a language (e.g. tests) keep the original English behavior.
+// Uses pickUniqueStyles (not an independent pickRandomStyle() per phrase) so
+// the fallback path also never repeats a style_id within one batch.
+function buildFallbackBatch(languageCode = DEFAULT_LANGUAGE_CODE) {
+  const phrases = FALLBACK_PHRASES[languageCode] || FALLBACK_PHRASES[DEFAULT_LANGUAGE_CODE];
+  const shuffled = [...phrases].sort(() => Math.random() - 0.5);
+  const styles = pickUniqueStyles(BATCH_SIZE);
+  return shuffled.slice(0, BATCH_SIZE).map((text, i) => ({
     text,
-    style_id: pickRandomStyle(),
+    style_id: styles[i],
   }));
 }
 
@@ -341,6 +522,7 @@ function buildSystemPrompt(languageCode) {
   const languageName = SUPPORTED_LANGUAGES[languageCode].name;
   return `You are a personal content editor curating content for a phone lock screen (live wallpaper) -- not a generator of motivational phrases.
 Your job each time: create exactly ${BATCH_SIZE} very short pieces of content, in ${languageName}, for the user's next several screen unlocks.
+Give each of the ${BATCH_SIZE} phrases a different style_id from the enum -- do not reuse the same style_id twice within this batch.
 
 Every single piece must earn its place for at least one reason: it's interesting, useful, funny, surprising, insightful, or personal to this user. Nothing filler.
 You choose the mix of genres for this batch -- there's no fixed template -- but a batch must never be variations on the same idea. Allowed formats: humor, facts, practical advice, sharp observations, thought-provoking questions, tiny challenges, language/history/culture/psychology tidbits, the user's own interests, real items from today's content ideas when given, and -- occasionally, not as a rule -- one well-known, uncontested general-knowledge fact about the user's country (skip it rather than risk something wrong, disputed, or political; you have no web search here).
@@ -384,7 +566,7 @@ async function generateBatch(device, window, signals, weather) {
   const context = buildContextPrompt(device, window, signals, weather, languageCode, bankItems, shownCategories);
 
   if (!apiKey) {
-    return { phrases: buildFallbackBatch(), source: 'fallback', context };
+    return { phrases: buildFallbackBatch(languageCode), source: 'fallback', context };
   }
 
   try {
@@ -445,15 +627,14 @@ async function generateBatch(device, window, signals, weather) {
 
     // TEMPORARY diagnostic-only logging (DEBUG_LOG_BATCH_COUNTS env var, no-op unless set) --
     // investigating the owner's real-usage report of only 2-5 distinct phrases/backgrounds
-    // reaching the device per batch instead of the expected BATCH_SIZE (10). Logs the raw count
-    // straight from the model's response, counts before/after the text-emptiness filter above,
-    // the dropped items themselves (with their style_id, since the working hypothesis is items
-    // with a style_id outside the new 27-code STYLE_IDS set silently disappearing -- note this
-    // filter does NOT actually drop on style_id, it only substitutes pickRandomStyle() for an
-    // invalid one, so this logging is also how we confirm/refute that hypothesis rather than
-    // assume it), and used_categories for completeness. Not fixing anything here -- remove this
-    // block in a separate commit once the real numbers are collected. See TASK "diagnostics:
-    // batch phrase count" report.
+    // reaching the device per batch instead of the expected BATCH_SIZE (10). Logs counts
+    // before/after the text-emptiness filter above, the dropped items themselves (with their
+    // style_id, since the working hypothesis is items with a style_id outside the new 27-code
+    // STYLE_IDS set silently disappearing -- note this filter does NOT actually drop on
+    // style_id, it only substitutes pickRandomStyle() for an invalid one, so this logging is
+    // also how we confirm/refute that hypothesis rather than assume it), and used_categories
+    // for completeness. Not fixing anything here -- remove this block in a separate commit
+    // once the real numbers are collected. See TASK "diagnostics: batch phrase count" report.
     if (process.env.DEBUG_LOG_BATCH_COUNTS) {
       console.log(`DEBUG_LOG_BATCH_COUNTS raw=${Array.isArray(parsed.phrases) ? parsed.phrases.length : 'not-array'}`);
       console.log(`DEBUG_LOG_BATCH_COUNTS phrases.length=${phrases.length} cleaned.length=${cleaned.length}`);
@@ -465,8 +646,14 @@ async function generateBatch(device, window, signals, weather) {
     }
 
     if (cleaned.length === 0) {
-      return { phrases: buildFallbackBatch(), source: 'fallback', context };
+      return { phrases: buildFallbackBatch(languageCode), source: 'fallback', context };
     }
+
+    // Ensure no two phrases in this batch share the same style_id -- buildSystemPrompt
+    // asks the model not to repeat style_id, but the enum constraint alone doesn't
+    // prevent it (no uniqueItems equivalent in Structured Outputs), so this is the
+    // actual guarantee. See dedupeStyleIds above.
+    const deduped = dedupeStyleIds(cleaned);
 
     // Language reliability: swap out only the individual phrases that failed
     // the target-language script check for a random local fallback phrase,
@@ -476,17 +663,16 @@ async function generateBatch(device, window, signals, weather) {
     // batch is still reported as 'openai' since it's still mostly
     // AI-generated; only the substitution count is logged for visibility.
     let invalidCount = 0;
-    const languageChecked = cleaned.map((p) => {
+    const languageChecked = deduped.map((p) => {
       if (isValidLanguageText(p.text, languageCode)) {
         return p;
       }
       invalidCount += 1;
-      // Substituted with an English FALLBACK_PHRASES entry regardless of
-      // languageCode -- see the FALLBACK_PHRASES comment above: translating
-      // that list is an explicit, documented scope cut, so a substitution
-      // for a non-English batch will be in English, not silently wrong in a
-      // way nobody decided on.
-      return { text: pickRandomFallbackPhrase(), style_id: p.style_id };
+      // Substituted with a FALLBACK_PHRASES entry in the same resolved
+      // target language, now that the list is translated (see the
+      // FALLBACK_PHRASES comment above) — no longer an English-regardless-
+      // of-languageCode substitution.
+      return { text: pickRandomFallbackPhrase(languageCode), style_id: p.style_id };
     });
     if (invalidCount > 0) {
       console.warn(`Replaced ${invalidCount}/${cleaned.length} OpenAI phrase(s) that failed the ${SUPPORTED_LANGUAGES[languageCode].name}-language check (target=${languageCode})`);
@@ -506,7 +692,7 @@ async function generateBatch(device, window, signals, weather) {
     return { phrases: languageChecked, source: 'openai', context };
   } catch (err) {
     console.error('OpenAI batch generation failed, using fallback:', err.message);
-    return { phrases: buildFallbackBatch(), source: 'fallback', context };
+    return { phrases: buildFallbackBatch(languageCode), source: 'fallback', context };
   }
 }
 

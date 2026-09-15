@@ -19,7 +19,8 @@ const STYLE_IDS = [
 const WINDOWS = ['morning', 'day', 'evening', 'night'];
 
 // How many phrases go out in one batch — matches PRODUCT_REBUILD_PLAN.md §4.1
-// ("10-12 фраз + идентификаторы стилей за раз").
-const BATCH_SIZE = 10;
+// ("10-12 фраз + идентификаторы стилей за раз"). Fixed at the top of that
+// range (12), not left as a loose 10-12 window, per explicit product decision.
+const BATCH_SIZE = 12;
 
 module.exports = { STYLE_IDS, WINDOWS, BATCH_SIZE };
