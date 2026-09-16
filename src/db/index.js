@@ -68,8 +68,8 @@ db.exec(`
   -- daily_content_bank: the shared, non-personalized "content of the day"
   -- collected once per day via a web-search-enabled OpenAI call (see
   -- src/dailyContentBank.js) -- holidays, "on this day" facts, quotes, etc.
-  -- bank_date is the server's own UTC calendar date (not per-device local
-  -- date) since this bank is shared across every device, not per-user.
+  -- bank_date is the shared Asia/Almaty product-day date (not per-device
+  -- local date) since this bank is shared across every device, not per-user.
   CREATE TABLE IF NOT EXISTS daily_content_bank (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     bank_date TEXT NOT NULL,

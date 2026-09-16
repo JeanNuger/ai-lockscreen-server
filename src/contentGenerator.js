@@ -3,7 +3,7 @@ const {
   selectBankItemsForDevice,
   recordShownCategories,
   getShownCategories,
-  getUtcDateString,
+  getBankDateString,
   BANK_CATEGORIES,
 } = require('./dailyContentBank');
 
@@ -500,7 +500,19 @@ function buildContextPrompt(device, window, signals, weather, languageCode, bank
   if (signals && signals.system_language && signals.system_language !== languageCode) {
     now.device_language = signals.system_language;
   }
-  if (signals && signals.region !== undefined) now.region = signals.region;
+  const ipCountryCode = weather && typeof weather.countryCode === 'string' && weather.countryCode
+    ? weather.countryCode
+    : null;
+  if (ipCountryCode) {
+    now.country = ipCountryCode;
+    now.country_source = 'ip_approximate';
+    if (signals && signals.region !== undefined && signals.region !== ipCountryCode) {
+      now.device_region = signals.region;
+    }
+  } else if (signals && signals.region !== undefined) {
+    now.country = signals.region;
+    now.country_source = 'device_locale';
+  }
   if (device.timezone) {
     const dateContext = getLocalDateContext(device.timezone);
     if (dateContext) {
@@ -526,7 +538,7 @@ function buildContextPrompt(device, window, signals, weather, languageCode, bank
   if (Object.keys(profile).length === 0) delete ctx.profile;
   if (Object.keys(signalsOut).length > 0) ctx.signals = signalsOut;
 
-  if (weather) {
+  if (weather && typeof weather.temperatureC === 'number') {
     const weatherOut = { temperature_c: Math.round(weather.temperatureC) };
     if (weather.city) weatherOut.city = weather.city;
     if (weather.description) weatherOut.condition = weather.description;
@@ -545,10 +557,10 @@ function buildContextPrompt(device, window, signals, weather, languageCode, bank
 }
 
 // Builds the SYSTEM_PROMPT for a specific target language. Function of
-// languageCode only (no regionCode) so the static prefix is byte-identical
+// languageCode only (no country code) so the static prefix is byte-identical
 // across every request in the same language regardless of which device's
-// region happens to be set -- regionCode now travels only in the per-request
-// context (buildContextPrompt's `now.region`), which lets an OpenAI-side
+// country happens to be set -- country code now travels only in the per-request
+// context (buildContextPrompt's `now.country`), which lets an OpenAI-side
 // prompt cache match this whole prefix across users of the same language
 // instead of missing on the old regionCode-conditional branch.
 //
@@ -581,6 +593,7 @@ profile.tone must shape the writing:
 - humorous: playful or witty where appropriate, but do not turn all ${BATCH_SIZE} messages into jokes.
 
 Use interests as things the AI knows about the person, not keywords to repeat literally. Let personal_goal noticeably steer some messages: work/business + productivity should feel different from mindfulness + wellbeing. Do not make every line coaching.
+Treat now.country as approximate country context: IP country first, device-locale fallback. Never infer the user's country from system language or timezone.
 Use device signals only when they create a natural useful observation. Do not make psychological, medical, or moral conclusions from unlocks, steps, battery, ambient light, or screen duration. High unlock count alone does not mean addiction or anxiety. Do not repeat the same signal observation more than once.
 
 Facts, history, holidays, and today_content are allowed, but they must not read like random encyclopedia cards. When possible, connect today_content to the user's moment or context. Do not invent factual claims that require current or precise accuracy beyond the trusted today_content supplied in context.
@@ -622,7 +635,7 @@ async function generateBatch(device, window, signals, weather) {
   // already returns [] in that case, so bankItems degrades to "no bank
   // content this batch" rather than failing.
   const deviceLocalDate = getLocalCalendarDate(new Date(), device.timezone);
-  const bankItems = selectBankItemsForDevice(device.device_id, getUtcDateString(), deviceLocalDate, device.gender);
+  const bankItems = selectBankItemsForDevice(device.device_id, getBankDateString(), deviceLocalDate, device.gender);
   const shownCategories = getShownCategories(device.device_id, deviceLocalDate);
 
   const context = buildContextPrompt(device, window, signals, weather, languageCode, bankItems, shownCategories);

@@ -21,6 +21,7 @@ const BANK_CATEGORIES = [
 // model -- generateDailyBank() below accepts whatever valid array it gets
 // back, even if shorter or longer than this.
 const TARGET_BANK_SIZE = 35;
+const BANK_TIMEZONE = 'Asia/Almaty';
 
 const insertBankItemStatement = db.prepare(`
   INSERT INTO daily_content_bank (bank_date, category, content_text, tags)
@@ -42,20 +43,27 @@ const insertShownCategoryStatement = db.prepare(`
 
 const DEFAULT_SELECTION_COUNT = 5;
 
-// Server's own UTC calendar date -- this bank is shared across every device
-// (not personalized, see module header), so there's no single device
-// timezone to anchor it to; each /batch request's own per-device local
-// time-of-day window still applies at the personalization step (step 2).
-function getUtcDateString(instant = new Date()) {
-  return instant.toISOString().slice(0, 10);
+// Shared product-day date for the global bank. This is deliberately one fixed
+// timezone, not per-user, so the app still generates one reusable bank per day.
+function getBankDateString(instant = new Date()) {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: BANK_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const parts = formatter.formatToParts(instant);
+  const get = (type) => parts.find((p) => p.type === type)?.value;
+  return `${get('year')}-${get('month')}-${get('day')}`;
 }
 
-function buildBankPrompt() {
-  return `Search the web for what's notable about today's date and put together a varied "content bank" for a phone lock screen app.
+function buildBankPrompt(bankDate) {
+  return `Search the web for what's notable about ${bankDate} and put together a varied global "content bank" for a phone lock screen app.
 Return STRICTLY a JSON array (no wrapper object, no explanations) of ${TARGET_BANK_SIZE} objects.
 Each object: {"category": one of [${BANK_CATEGORIES.join(', ')}], "content_text": "a short, self-contained piece of content in English, up to 200 characters", "tags": ["lowercase", "keyword", "tags"]}.
-Cover a genuine mix across ALL the listed categories, not just one or two -- include: any real holidays/observances for today's date, "on this day in history" facts, notable quotes, a psychology fact or insight, a practical piece of advice, something genuinely humorous, an interesting idiom with its meaning, an interesting statistic, and a warm wish or kind word for the reader.
-Prioritize accuracy from web search for date-specific items (holiday, on_this_day) -- do not invent fake historical events or holidays.
+Cover a genuine mix across ALL the listed categories, not just one or two -- include: any real holidays/observances for ${bankDate}, "on this day in history" facts, notable quotes, a psychology fact or insight, a practical piece of advice, something genuinely humorous, an interesting idiom with its meaning, an interesting statistic, and a warm wish or kind word for the reader.
+Keep the bank international and reusable for users in many countries: do not make it US-centric or Russia-centric.
+Prioritize accuracy from web search for date-specific items (holiday, on_this_day) -- they must match ${bankDate}; do not invent fake historical events or holidays.
 Keep every content_text glanceable and self-contained (no "as mentioned above", no follow-up questions).
 For "fact" items: if the fact is a scientific one, add "science" to its tags array (in addition to any other tags).
 For "advice" items: if the advice is specifically addressed to women or to men, add "for_women" or "for_men" (respectively) to its tags array; if it's general advice not aimed at a specific gender, add "general" instead. Every advice item should have exactly one of these three tags.
@@ -93,8 +101,8 @@ function parseBankItems(rawText) {
 
 /**
  * Generates today's shared content bank via a web-search-enabled OpenAI call
- * and persists each item as its own daily_content_bank row under today's UTC
- * date. Never throws -- a failed or malformed call is logged and leaves the
+ * and persists each item as its own daily_content_bank row under today's
+ * Asia/Almaty product-day date. Never throws -- a failed or malformed call is logged and leaves the
  * bank empty/partial for today rather than crashing the caller (the cron
  * endpoint that calls this, see src/routes/internalGenerateBank.js).
  *
@@ -106,7 +114,7 @@ async function generateDailyBank() {
     return { savedCount: 0, error: 'OPENAI_API_KEY is not configured' };
   }
 
-  const bankDate = getUtcDateString();
+  const bankDate = getBankDateString();
 
   try {
     const OpenAI = require('openai');
@@ -118,7 +126,7 @@ async function generateDailyBank() {
     const response = await client.responses.create({
       model: 'gpt-4o',
       tools: [{ type: 'web_search' }],
-      input: buildBankPrompt(),
+      input: buildBankPrompt(bankDate),
     });
 
     const items = parseBankItems(response.output_text);
@@ -164,8 +172,8 @@ function parseTags(rawTags) {
 }
 
 // Random-but-varied-by-category selection for one device's batch context.
-// bankDate is the server's UTC calendar date the bank was generated under
-// (see getUtcDateString above); deviceLocalDate is that same device's own
+// bankDate is the shared Asia/Almaty product-day date the bank was generated under
+// (see getBankDateString above); deviceLocalDate is that same device's own
 // local calendar date (the caller already computes this from device.timezone
 // for other purposes -- see contentGenerator.js's getLocalCalendarDate) and
 // is what device_shown_categories is keyed by, since "today" for repeat-
@@ -262,6 +270,6 @@ module.exports = {
   getShownCategories,
   selectBankItemsForDevice,
   recordShownCategories,
-  getUtcDateString,
+  getBankDateString,
   BANK_CATEGORIES,
 };

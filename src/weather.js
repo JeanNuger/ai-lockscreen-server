@@ -2,10 +2,11 @@
 // no GPS/location permission on the client (see PRODUCT_REBUILD_PLAN.md §5.1:
 // "погода — по IP-адресу входящего запроса, без GPS/геолокации на телефоне").
 // Two independent third-party calls, both free/keyless:
-//   1. ipwho.is: IP -> city + latitude/longitude
+//   1. ipwho.is: IP -> approximate country + city + latitude/longitude
 //   2. Open-Meteo: lat/lon -> current weather
-// Either step failing (timeout, bad IP, rate limit, service down) degrades to
-// no weather rather than failing the /batch request — same principle as
+// A failed IP lookup degrades to no geo/weather; a failed weather lookup still
+// keeps the approximate country/city from the IP lookup when available. Either
+// path avoids failing the /batch request — same principle as
 // src/deviceSignals.js: this is enrichment context for the AI prompt, not a
 // required field.
 //
@@ -85,7 +86,7 @@ function isPrivateOrLocalIp(ip) {
 /**
  * @param {string} ip - the requesting client's IP (req.ip, with Express
  *   'trust proxy' configured so this is the real client, not the reverse proxy)
- * @returns {Promise<{city: string, temperatureC: number, description: string} | null>}
+ * @returns {Promise<{countryCode: string|null, city: string|null, temperatureC?: number, description?: string|null} | null>}
  */
 async function resolveWeather(ip) {
   if (isPrivateOrLocalIp(ip)) {
@@ -93,11 +94,16 @@ async function resolveWeather(ip) {
   }
 
   const geo = await fetchWithTimeout(
-    `https://ipwho.is/${encodeURIComponent(ip)}?fields=success,city,latitude,longitude`,
+    `https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country_code,city,latitude,longitude`,
     IPWHOIS_TIMEOUT_MS
   );
-  if (!geo || geo.success !== true || typeof geo.latitude !== 'number' || typeof geo.longitude !== 'number') {
+  if (!geo || geo.success !== true) {
     return null;
+  }
+  const countryCode = typeof geo.country_code === 'string' && geo.country_code ? geo.country_code : null;
+  const city = geo.city || null;
+  if (typeof geo.latitude !== 'number' || typeof geo.longitude !== 'number') {
+    return { countryCode, city };
   }
 
   const weather = await fetchWithTimeout(
@@ -106,11 +112,12 @@ async function resolveWeather(ip) {
   );
   const current = weather && weather.current_weather;
   if (!current || typeof current.temperature !== 'number') {
-    return null;
+    return { countryCode, city };
   }
 
   return {
-    city: geo.city || null,
+    countryCode,
+    city,
     temperatureC: current.temperature,
     description: WEATHER_CODE_DESCRIPTIONS[current.weathercode] || null,
   };
