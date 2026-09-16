@@ -7,159 +7,160 @@ const {
   BANK_CATEGORIES,
 } = require('./dailyContentBank');
 
+const LOCK_SCREEN_TEXT_MAX_LENGTH = 140;
+
 // FALLBACK_PHRASES: the offline/failure path (no OPENAI_API_KEY configured,
-// the OpenAI call itself fails, the whole batch comes back empty, or an
+// the OpenAI call itself fails, the whole batch comes back unusable, or an
 // individual phrase fails its language check below). Translated into all 10
 // supported languages so this path degrades in the device's own language
-// instead of always falling back to English — same phrases, same warm/
-// short/glanceable tone, translated by hand per language rather than
-// machine-generated at request time (this list must work with zero API
-// calls). Keyed by the same language codes as SUPPORTED_LANGUAGES; callers
-// select a language's array by indexing FALLBACK_PHRASES[languageCode] (see
-// pickRandomFallbackPhrase/buildFallbackBatch below). 12 phrases per
-// language, matching BATCH_SIZE -- buildFallbackBatch's slice(0, BATCH_SIZE)
-// would otherwise silently cap below BATCH_SIZE if a language's list were
-// shorter.
+// instead of always falling back to English. The fallback copy is deliberately
+// short, neutral, one-way, question-free, and non-factual: it must preserve
+// the product character without pretending to know personal context. Keyed by
+// the same language codes as SUPPORTED_LANGUAGES; callers select a language's
+// array by indexing FALLBACK_PHRASES[languageCode] (see
+// pickRandomFallbackPhrase/buildFallbackBatch below). 12 phrases per language,
+// matching BATCH_SIZE -- buildFallbackBatch's slice(0, BATCH_SIZE) would
+// otherwise silently cap below BATCH_SIZE if a language's list were shorter.
 const FALLBACK_PHRASES = {
   en: [
-    'A good day starts with you',
-    "You're doing better than you think",
-    'Take a deep breath',
-    'Small steps lead to big changes',
-    'Today is a great day to try something new',
-    "Don't forget to call someone you love",
-    'Smile — just because',
-    'A little water never hurts',
-    "You've already come a long way",
-    'Give yourself a little rest if you need it',
-    'One thing at a time is still progress',
-    'A quiet moment counts too',
+    'A useful next move can stay simple',
+    'One clear detail is enough to start',
+    'The day has room for a sharper angle',
+    'Keep the useful part and leave the clutter',
+    'A small improvement still changes the shape',
+    'There is probably one thing worth doing first',
+    'Good timing beats extra effort',
+    'A clean start fits any kind of day',
+    'Notice the part that is already working',
+    'The next action does not need ceremony',
+    'A lighter version of the plan may work better',
+    'Stay with the thing that actually matters',
   ],
   fr: [
-    'Une bonne journée commence avec vous',
-    'Vous vous en sortez mieux que vous ne le pensez',
-    'Respirez profondément',
-    'Les petits pas mènent aux grands changements',
-    "Aujourd'hui est un bon jour pour essayer quelque chose de nouveau",
-    "N'oubliez pas d'appeler quelqu'un que vous aimez",
-    'Souriez — juste parce que',
-    'Un peu d\'eau ne fait jamais de mal',
-    'Vous avez déjà parcouru beaucoup de chemin',
-    'Accordez-vous un peu de repos si vous en avez besoin',
-    'Un pas à la fois, c\'est déjà avancer',
-    'Un moment de calme compte aussi',
+    'Le prochain geste utile peut rester simple',
+    'Un détail clair suffit pour commencer',
+    'La journée laisse place à un angle plus net',
+    'Gardez l’utile et laissez le bruit',
+    'Une petite amélioration change déjà la forme',
+    'Il y a sûrement une chose à faire en premier',
+    'Le bon moment vaut mieux que l’effort en plus',
+    'Un départ net convient à toute journée',
+    'Remarquez la partie qui fonctionne déjà',
+    'La prochaine action n’a pas besoin de cérémonie',
+    'Une version plus légère du plan peut mieux marcher',
+    'Restez avec ce qui compte vraiment',
   ],
   es: [
-    'Un buen día empieza contigo',
-    'Lo estás haciendo mejor de lo que crees',
-    'Respira profundamente',
-    'Los pequeños pasos llevan a grandes cambios',
-    'Hoy es un gran día para probar algo nuevo',
-    'No olvides llamar a alguien que quieres',
-    'Sonríe — solo porque sí',
-    'Un poco de agua nunca hace daño',
-    'Ya has recorrido un largo camino',
-    'Date un pequeño descanso si lo necesitas',
-    'Un paso a la vez también es progreso',
-    'Un momento de calma también cuenta',
+    'El próximo movimiento útil puede ser simple',
+    'Un detalle claro basta para empezar',
+    'El día tiene espacio para un ángulo más preciso',
+    'Quédate con lo útil y deja el ruido',
+    'Una pequeña mejora también cambia la forma',
+    'Probablemente hay una cosa que conviene hacer primero',
+    'El buen momento vale más que el esfuerzo extra',
+    'Un comienzo limpio encaja en cualquier día',
+    'Fíjate en la parte que ya funciona',
+    'La siguiente acción no necesita ceremonia',
+    'Una versión más ligera del plan puede funcionar mejor',
+    'Quédate con lo que de verdad importa',
   ],
   pt: [
-    'Um bom dia começa com você',
-    'Você está indo melhor do que pensa',
-    'Respire fundo',
-    'Pequenos passos levam a grandes mudanças',
-    'Hoje é um ótimo dia para experimentar algo novo',
-    'Não se esqueça de ligar para alguém que você ama',
-    'Sorria — só porque sim',
-    'Um pouco de água nunca faz mal',
-    'Você já percorreu um longo caminho',
-    'Dê a si mesmo um descanso se precisar',
-    'Um passo de cada vez também é progresso',
-    'Um momento de calma também conta',
+    'O próximo movimento útil pode ser simples',
+    'Um detalhe claro basta para começar',
+    'O dia tem espaço para um ângulo mais preciso',
+    'Fique com o útil e deixe o ruído',
+    'Uma pequena melhoria também muda a forma',
+    'Provavelmente há uma coisa que vale fazer primeiro',
+    'Bom timing vale mais que esforço extra',
+    'Um começo limpo combina com qualquer dia',
+    'Repare na parte que já está funcionando',
+    'A próxima ação não precisa de cerimônia',
+    'Uma versão mais leve do plano pode funcionar melhor',
+    'Fique com o que realmente importa',
   ],
   de: [
-    'Ein guter Tag beginnt mit dir',
-    'Du machst das besser, als du denkst',
-    'Atme tief durch',
-    'Kleine Schritte führen zu großen Veränderungen',
-    'Heute ist ein guter Tag, um etwas Neues auszuprobieren',
-    'Vergiss nicht, jemanden anzurufen, den du liebst',
-    'Lächle — einfach so',
-    'Ein bisschen Wasser schadet nie',
-    'Du hast schon einen weiten Weg zurückgelegt',
-    'Gönn dir eine kleine Pause, wenn du sie brauchst',
-    'Ein Schritt nach dem anderen ist auch Fortschritt',
-    'Ein ruhiger Moment zählt auch',
+    'Der nächste nützliche Schritt kann einfach bleiben',
+    'Ein klares Detail reicht für den Anfang',
+    'Der Tag hat Platz für einen schärferen Blick',
+    'Behalte das Nützliche und lass den Lärm weg',
+    'Eine kleine Verbesserung verändert schon die Form',
+    'Wahrscheinlich gibt es eine Sache zuerst',
+    'Gutes Timing schlägt zusätzliche Anstrengung',
+    'Ein klarer Anfang passt zu jedem Tag',
+    'Beachte den Teil, der schon funktioniert',
+    'Die nächste Aktion braucht keine Zeremonie',
+    'Eine leichtere Version des Plans kann besser passen',
+    'Bleib bei dem, was wirklich zählt',
   ],
   ru: [
-    'Хороший день начинается с тебя',
-    'У тебя получается лучше, чем ты думаешь',
-    'Сделай глубокий вдох',
-    'Маленькие шаги ведут к большим переменам',
-    'Сегодня отличный день, чтобы попробовать что-то новое',
-    'Не забудь позвонить тому, кого любишь',
-    'Улыбнись — просто так',
-    'Немного воды никогда не помешает',
-    'Ты уже прошёл долгий путь',
-    'Позволь себе немного отдохнуть, если нужно',
-    'Один шаг за раз — тоже движение вперёд',
-    'Тихая минута тоже на счету',
+    'Следующий полезный ход может быть простым',
+    'Одной ясной детали достаточно для начала',
+    'В дне есть место для более точного угла',
+    'Оставь полезное, а шум можно не брать с собой',
+    'Маленькое улучшение тоже меняет форму',
+    'Скорее всего, есть одна вещь, с которой стоит начать',
+    'Хороший момент иногда важнее лишнего усилия',
+    'Чистый старт подходит любому дню',
+    'Заметь ту часть, которая уже работает',
+    'Следующему действию не нужна церемония',
+    'Более лёгкая версия плана может сработать лучше',
+    'Держись того, что действительно важно',
   ],
   zh: [
-    '美好的一天从你开始',
-    '你做得比想象中更好',
-    '深呼吸一下',
-    '小小的步伐带来大大的改变',
-    '今天很适合尝试一些新事物',
-    '别忘了给你爱的人打个电话',
-    '微笑吧——不为什么',
-    '喝点水总没坏处',
-    '你已经走了很长的路',
-    '如果需要,给自己一点休息时间',
-    '一次做一件事,也是进步',
-    '安静的片刻也很重要',
+    '下一个有用动作可以很简单',
+    '一个清楚细节就足够开始',
+    '今天还容得下一个更准的角度',
+    '留下有用的部分，把杂音放下',
+    '一点小改进也会改变整体形状',
+    '也许先做那一件最值得的事',
+    '好的时机胜过额外用力',
+    '干净的开头适合任何一天',
+    '注意已经在运转的那一部分',
+    '下一个动作不需要仪式感',
+    '计划的轻量版本可能更好用',
+    '留在真正重要的事情上',
   ],
   ja: [
-    '良い一日はあなたから始まる',
-    '思っているより、うまくやれています',
-    '深呼吸してみましょう',
-    '小さな一歩が大きな変化につながる',
-    '今日は何か新しいことに挑戦するのにぴったりの日',
-    '大切な人に電話するのを忘れずに',
-    '理由なんてなくても、笑顔で',
-    '水を少し飲むのも悪くない',
-    'あなたはもうずいぶん頑張ってきました',
-    '必要なら、少し休んでもいい',
-    '一つずつでも、それは前進です',
-    '静かなひとときも大切です',
+    '次の役に立つ一手はシンプルでいい',
+    '始めるには一つのはっきりした細部で足ります',
+    '今日にはまだ別の見方を置く余地があります',
+    '役に立つ部分だけ残して、雑音は置いていきます',
+    '小さな改善でも形は変わります',
+    'まず手をつける価値のある一つがあります',
+    '余分な努力より、よいタイミングが効きます',
+    'すっきりした始まりはどんな日にも合います',
+    'もう動いている部分に目を向けます',
+    '次の行動に大げさな準備はいりません',
+    '軽い版の計画のほうが合うこともあります',
+    '本当に大事なものに寄せていきます',
   ],
   ko: [
-    '좋은 하루는 당신에게서 시작됩니다',
-    '생각보다 잘하고 있어요',
-    '심호흡을 해보세요',
-    '작은 발걸음이 큰 변화를 만듭니다',
-    '오늘은 새로운 걸 시도해보기 좋은 날이에요',
-    '사랑하는 사람에게 전화하는 걸 잊지 마세요',
-    '그냥 한번 웃어보세요',
-    '물 한 잔도 나쁘지 않아요',
-    '당신은 이미 먼 길을 걸어왔어요',
-    '필요하다면 잠시 쉬어가도 괜찮아요',
-    '한 번에 하나씩도 발전이에요',
-    '조용한 순간도 소중해요',
+    '다음 유용한 움직임은 단순해도 됩니다',
+    '분명한 세부 하나면 시작하기에 충분합니다',
+    '오늘에는 더 날카로운 각도를 둘 공간이 있습니다',
+    '쓸모 있는 부분만 남기고 소음은 덜어냅니다',
+    '작은 개선도 전체 모양을 바꿉니다',
+    '먼저 할 만한 한 가지가 있을 가능성이 큽니다',
+    '좋은 타이밍은 추가 노력보다 강합니다',
+    '깔끔한 시작은 어떤 하루에도 어울립니다',
+    '이미 작동하는 부분을 봅니다',
+    '다음 행동에 거창한 준비는 필요 없습니다',
+    '계획의 가벼운 버전이 더 잘 맞을 수 있습니다',
+    '정말 중요한 쪽에 머뭅니다',
   ],
   it: [
-    'Una buona giornata inizia con te',
-    'Stai andando meglio di quanto pensi',
-    'Fai un respiro profondo',
-    'I piccoli passi portano a grandi cambiamenti',
-    'Oggi è un ottimo giorno per provare qualcosa di nuovo',
-    'Non dimenticare di chiamare qualcuno che ami',
-    'Sorridi — così, senza motivo',
-    "Un po' d'acqua non fa mai male",
-    'Hai già fatto molta strada',
-    'Concediti un po\' di riposo se ne hai bisogno',
-    'Un passo alla volta è comunque un progresso',
-    'Anche un momento di calma conta',
+    'La prossima mossa utile può restare semplice',
+    'Un dettaglio chiaro basta per iniziare',
+    'La giornata ha spazio per un angolo più preciso',
+    'Tieni la parte utile e lascia il rumore',
+    'Un piccolo miglioramento cambia già la forma',
+    'Probabilmente c’è una cosa da fare per prima',
+    'Il tempismo giusto batte lo sforzo in più',
+    'Un inizio pulito sta bene in ogni giornata',
+    'Nota la parte che sta già funzionando',
+    'La prossima azione non ha bisogno di cerimonie',
+    'Una versione più leggera del piano può funzionare meglio',
+    'Resta con ciò che conta davvero',
   ],
 };
 
@@ -236,6 +237,49 @@ function dedupeStyleIds(items) {
     used.add(replacement);
     return { ...item, style_id: replacement };
   });
+}
+
+function normalizeTextForDedupe(text) {
+  return text.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function hasQuestionMark(text) {
+  return /[?¿؟？]/.test(text);
+}
+
+function cleanUsablePhrases(phrases) {
+  if (!Array.isArray(phrases)) {
+    return null;
+  }
+
+  const seenTexts = new Set();
+  const cleaned = [];
+  for (const phrase of phrases) {
+    if (!phrase || typeof phrase.text !== 'string') {
+      continue;
+    }
+    const text = phrase.text.trim();
+    if (
+      text.length === 0 ||
+      text.length > LOCK_SCREEN_TEXT_MAX_LENGTH ||
+      hasQuestionMark(text)
+    ) {
+      continue;
+    }
+
+    const normalized = normalizeTextForDedupe(text);
+    if (seenTexts.has(normalized)) {
+      continue;
+    }
+    seenTexts.add(normalized);
+
+    cleaned.push({
+      text,
+      style_id: STYLE_IDS.includes(phrase.style_id) ? phrase.style_id : pickRandomStyle(),
+    });
+  }
+
+  return cleaned.length === BATCH_SIZE ? cleaned : null;
 }
 
 // languageCode is expected to already be a resolved, known key of
@@ -520,19 +564,37 @@ function buildContextPrompt(device, window, signals, weather, languageCode, bank
 // call site for why.
 function buildSystemPrompt(languageCode) {
   const languageName = SUPPORTED_LANGUAGES[languageCode].name;
-  return `You are a personal content editor curating content for a phone lock screen (live wallpaper) -- not a generator of motivational phrases.
-Your job each time: create exactly ${BATCH_SIZE} very short pieces of content, in ${languageName}, for the user's next several screen unlocks.
-Give each of the ${BATCH_SIZE} phrases a different style_id from the enum -- do not reuse the same style_id twice within this batch.
+  return `You are a proactive personal AI companion on a phone lock screen (live wallpaper).
+The user cannot reply from the lock screen. Speak first with short one-way remarks that feel natural, personal, and context-aware -- not like a chat, trivia feed, quote app, encyclopedia, or translated joke list.
+Create exactly ${BATCH_SIZE} distinct lock-screen messages in ${languageName}. Give each message a different style_id from the enum -- do not reuse the same style_id twice within this batch.
 
-Every single piece must earn its place for at least one reason: it's interesting, useful, funny, surprising, insightful, or personal to this user. Nothing filler.
-You choose the mix of genres for this batch -- there's no fixed template -- but a batch must never be variations on the same idea. Allowed formats: humor, facts, practical advice, sharp observations, thought-provoking questions, tiny challenges, language/history/culture/psychology tidbits, the user's own interests, real items from today's content ideas when given, and -- occasionally, not as a rule -- one well-known, uncontested general-knowledge fact about the user's country (skip it rather than risk something wrong, disputed, or political; you have no web search here).
-At most 1 out of ${BATCH_SIZE} phrases may be warm/motivational in tone -- the rest must be something else (facts, humor, advice, questions, etc.). Before finalizing each phrase, check it against this: "would this exact line fit literally anyone, on any day, with zero context?" -- if yes, it's a generic slogan and must be replaced with something more specific and less generic. This rules out not just the three examples below but the whole genre of interchangeable pep-talk lines: explicitly avoid "believe in yourself", "you've got this", "seize the moment", "smile and the world smiles back", "every step is a new discovery", "make the world better starting with yourself" (and equivalents/paraphrases in any language) -- and anything else that reads like a generic inspirational poster rather than a specific piece of content.
-The context may include today's content ideas and personal signals (interests, goal, tone, steps, battery, weather, etc.) -- use them only when they genuinely raise relevance. Don't turn telemetry into a status report, and don't force it into every phrase; most phrases can ignore it entirely.
+Never ask the user a question. Never request a reply, choice, confirmation, reflection, or answer. Do not end phrases with question marks. Rewrite question-shaped ideas as statements, observations, suggestions, or short remarks.
+
+Every message must earn its place: personal, useful, situational, funny, quietly insightful, or grounded in trusted today_content. Nothing filler.
+When profile/context is rich enough, about 4-5 of the ${BATCH_SIZE} messages should feel personal through one or more factors: interests, personal_goal, age/life context, name, relevant behavior/device context, weather/time, or today_content. Do not force telemetry just to hit a quota.
+If profile.name is present, use the name about once in the whole batch. Do not use it more often unless there is a strong natural reason. Never invent a name.
+Do not assume an unlock means the user needs to put the phone away, pause, breathe, calm down, reset, or reduce screen time. Use that kind of message only when the profile/context genuinely supports it.
+
+profile.tone must shape the writing:
+- formal: calm, polished, restrained; no slang.
+- friendly: warm, natural, conversational.
+- humorous: playful or witty where appropriate, but do not turn all ${BATCH_SIZE} messages into jokes.
+
+Use interests as things the AI knows about the person, not keywords to repeat literally. Let personal_goal noticeably steer some messages: work/business + productivity should feel different from mindfulness + wellbeing. Do not make every line coaching.
+Use device signals only when they create a natural useful observation. Do not make psychological, medical, or moral conclusions from unlocks, steps, battery, ambient light, or screen duration. High unlock count alone does not mean addiction or anxiety. Do not repeat the same signal observation more than once.
+
+Facts, history, holidays, and today_content are allowed, but they must not read like random encyclopedia cards. When possible, connect today_content to the user's moment or context. Do not invent factual claims that require current or precise accuracy beyond the trusted today_content supplied in context.
+Humor must work directly in ${languageName}. Avoid English wordplay or puns that become meaningless after adaptation. Prefer short situational or observational humor. Humor is optional, even for humorous tone.
+
+The ${BATCH_SIZE} messages must vary by idea and wording. Do not produce ${BATCH_SIZE} pieces of advice, ${BATCH_SIZE} facts, ${BATCH_SIZE} motivational statements, several paraphrases of the same thought, or repeated use of one interest/signal/event.
+Vary the character of the batch: it should feel like ${BATCH_SIZE} natural remarks from a versatile personal AI, not a wellness or digital-detox app.
+Warm or motivational generic content is allowed at most 1 out of ${BATCH_SIZE}, and only if it genuinely fits.
 Never reuse a topic or category listed as already shown today for this user.
 Never invent facts beyond what today's content ideas actually say.
-Never invent, guess, or make up a name for the user. Only use a name if 'profile.name' is explicitly present in the given context -- and even then, use it rarely, not as a rule, and never as a placeholder for "personal touch" when no name was given. If there is no name in the context, none of the phrases may address the user by any name. The same applies to gender: only reference it when 'profile.gender' is explicitly present, and only when it clearly improves relevance -- never as a rule applied to every phrase.
+Never invent, guess, or make up a name for the user. Only use profile.gender when it clearly improves relevance -- never as a rule applied to every phrase.
 Match the given time-of-day window -- never a morning greeting in a day/evening/night batch, or vice versa.
 Every phrase's text must be entirely in ${languageName}, with no words or letters from any other language, even for a single word.
+Every phrase must be at most ${LOCK_SCREEN_TEXT_MAX_LENGTH} characters.
 Do not explain your reasoning or return any analysis -- only the structured result the API call asks for.`;
 }
 
@@ -587,10 +649,12 @@ async function generateBatch(device, window, signals, weather) {
             properties: {
               phrases: {
                 type: 'array',
+                minItems: BATCH_SIZE,
+                maxItems: BATCH_SIZE,
                 items: {
                   type: 'object',
                   properties: {
-                    text: { type: 'string' },
+                    text: { type: 'string', maxLength: LOCK_SCREEN_TEXT_MAX_LENGTH },
                     style_id: { type: 'string', enum: STYLE_IDS },
                   },
                   required: ['text', 'style_id'],
@@ -615,15 +679,7 @@ async function generateBatch(device, window, signals, weather) {
 
     const parsed = JSON.parse(response.choices[0].message.content);
     const phrases = Array.isArray(parsed.phrases) ? parsed.phrases : [];
-
-    // Validate style_id against the fixed set — never forward a value the
-    // Android client wouldn't recognize (see constants.js comment).
-    const cleaned = phrases
-      .filter((p) => p && typeof p.text === 'string' && p.text.trim().length > 0)
-      .map((p) => ({
-        text: p.text.trim(),
-        style_id: STYLE_IDS.includes(p.style_id) ? p.style_id : pickRandomStyle(),
-      }));
+    const cleaned = cleanUsablePhrases(phrases);
 
     // TEMPORARY diagnostic-only logging (DEBUG_LOG_BATCH_COUNTS env var, no-op unless set) --
     // investigating the owner's real-usage report of only 2-5 distinct phrases/backgrounds
@@ -637,15 +693,26 @@ async function generateBatch(device, window, signals, weather) {
     // once the real numbers are collected. See TASK "diagnostics: batch phrase count" report.
     if (process.env.DEBUG_LOG_BATCH_COUNTS) {
       console.log(`DEBUG_LOG_BATCH_COUNTS raw=${Array.isArray(parsed.phrases) ? parsed.phrases.length : 'not-array'}`);
-      console.log(`DEBUG_LOG_BATCH_COUNTS phrases.length=${phrases.length} cleaned.length=${cleaned.length}`);
-      if (phrases.length !== cleaned.length) {
-        const dropped = phrases.filter((p) => !(p && typeof p.text === 'string' && p.text.trim().length > 0));
+      console.log(`DEBUG_LOG_BATCH_COUNTS phrases.length=${phrases.length} cleaned.length=${cleaned ? cleaned.length : 'invalid'}`);
+      if (!cleaned || phrases.length !== cleaned.length) {
+        const seen = new Set();
+        const dropped = phrases.filter((p) => {
+          if (!(p && typeof p.text === 'string')) return true;
+          const text = p.text.trim();
+          const normalized = normalizeTextForDedupe(text);
+          const invalid = text.length === 0 ||
+            text.length > LOCK_SCREEN_TEXT_MAX_LENGTH ||
+            hasQuestionMark(text) ||
+            seen.has(normalized);
+          seen.add(normalized);
+          return invalid;
+        });
         console.log(`DEBUG_LOG_BATCH_COUNTS dropped=${JSON.stringify(dropped)}`);
       }
       console.log(`DEBUG_LOG_BATCH_COUNTS used_categories=${JSON.stringify(parsed.used_categories)}`);
     }
 
-    if (cleaned.length === 0) {
+    if (!cleaned) {
       return { phrases: buildFallbackBatch(languageCode), source: 'fallback', context };
     }
 
@@ -678,6 +745,11 @@ async function generateBatch(device, window, signals, weather) {
       console.warn(`Replaced ${invalidCount}/${cleaned.length} OpenAI phrase(s) that failed the ${SUPPORTED_LANGUAGES[languageCode].name}-language check (target=${languageCode})`);
     }
 
+    const finalChecked = cleanUsablePhrases(languageChecked);
+    if (!finalChecked) {
+      return { phrases: buildFallbackBatch(languageCode), source: 'fallback', context };
+    }
+
     // Record which bank categories this batch actually drew from (per the
     // model's own "used_categories" field -- see buildSystemPrompt), so the
     // device's next batch today doesn't get offered the same categories
@@ -689,7 +761,7 @@ async function generateBatch(device, window, signals, weather) {
       : [];
     recordShownCategories(device.device_id, deviceLocalDate, usedCategories);
 
-    return { phrases: languageChecked, source: 'openai', context };
+    return { phrases: finalChecked, source: 'openai', context };
   } catch (err) {
     console.error('OpenAI batch generation failed, using fallback:', err.message);
     return { phrases: buildFallbackBatch(languageCode), source: 'fallback', context };
