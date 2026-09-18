@@ -218,6 +218,10 @@ function pickUniqueStyles(count) {
   return shuffled.slice(0, count);
 }
 
+function pickFirstUnusedStyle(usedStyles) {
+  return STYLE_IDS.find((id) => !usedStyles.has(id)) || pickRandomStyle();
+}
+
 // Reassigns any duplicate style_id within a batch to one not yet used in that
 // same batch, walked in order -- keeps each phrase's own style_id whenever it's
 // still free within the batch, only touches actual repeats. 27 style_ids vs
@@ -276,37 +280,197 @@ function isUnusableLockScreenText(text) {
   );
 }
 
-function cleanUsablePhrases(phrases) {
+function collectUsablePhrases(phrases, languageCode) {
   if (!Array.isArray(phrases)) {
     return null;
   }
 
   const seenTexts = new Set();
-  const cleaned = [];
+  const accepted = [];
+  let rejectedCount = 0;
   for (const phrase of phrases) {
     if (!phrase || typeof phrase.text !== 'string') {
+      rejectedCount += 1;
       continue;
     }
     const text = phrase.text.trim();
     if (isUnusableLockScreenText(text)) {
+      rejectedCount += 1;
+      continue;
+    }
+    if (languageCode && !isValidLanguageText(text, languageCode)) {
+      rejectedCount += 1;
       continue;
     }
 
     const normalized = normalizeTextForDedupe(text);
     if (seenTexts.has(normalized)) {
+      rejectedCount += 1;
       continue;
     }
     seenTexts.add(normalized);
 
-    cleaned.push({
+    accepted.push({
       text,
-      style_id: STYLE_IDS.includes(phrase.style_id) ? phrase.style_id : pickRandomStyle(),
+      style_id: STYLE_IDS.includes(phrase.style_id) ? phrase.style_id : null,
     });
   }
 
-  return cleaned.length === BATCH_SIZE ? cleaned : null;
+  return { accepted, rejectedCount, inputCount: phrases.length };
 }
 
+function cleanUsablePhrases(phrases, languageCode) {
+  const collected = collectUsablePhrases(phrases, languageCode);
+  if (!collected) {
+    return null;
+  }
+  const styled = assignUniqueStyleIds(collected.accepted);
+  const finalChecked = validateFinalBatch(styled);
+  return finalChecked ? styled : null;
+}
+
+function assignUniqueStyleIds(items) {
+  const usedStyles = new Set();
+  return items.map((item) => {
+    const style_id = STYLE_IDS.includes(item.style_id) && !usedStyles.has(item.style_id)
+      ? item.style_id
+      : pickFirstUnusedStyle(usedStyles);
+    usedStyles.add(style_id);
+    return { ...item, style_id };
+  });
+}
+
+function validateFinalBatch(items) {
+  if (!Array.isArray(items) || items.length !== BATCH_SIZE) {
+    return false;
+  }
+  const seenTexts = new Set();
+  const seenStyles = new Set();
+  for (const item of items) {
+    if (!item || typeof item.text !== 'string' || isUnusableLockScreenText(item.text)) {
+      return false;
+    }
+    if (!STYLE_IDS.includes(item.style_id) || seenStyles.has(item.style_id)) {
+      return false;
+    }
+    seenStyles.add(item.style_id);
+    const normalized = normalizeTextForDedupe(item.text);
+    if (seenTexts.has(normalized)) {
+      return false;
+    }
+    seenTexts.add(normalized);
+  }
+  return true;
+}
+
+function fillWithFallbackPhrases(generated, languageCode) {
+  const result = [...generated];
+  const seenTexts = new Set(result.map((item) => normalizeTextForDedupe(item.text)));
+  const fallbackPhrases = FALLBACK_PHRASES[languageCode] || FALLBACK_PHRASES[DEFAULT_LANGUAGE_CODE];
+  const shuffledFallback = [...fallbackPhrases].sort(() => Math.random() - 0.5);
+
+  for (const text of shuffledFallback) {
+    if (result.length >= BATCH_SIZE) {
+      break;
+    }
+    const trimmed = text.trim();
+    const normalized = normalizeTextForDedupe(trimmed);
+    if (isUnusableLockScreenText(trimmed) || seenTexts.has(normalized)) {
+      continue;
+    }
+    seenTexts.add(normalized);
+    result.push({ text: trimmed, style_id: null });
+  }
+
+  if (result.length !== BATCH_SIZE) {
+    return null;
+  }
+  return assignUniqueStyleIds(result);
+}
+
+function assembleBatchFromGeneratedPhrases(phrases, languageCode) {
+  const collected = collectUsablePhrases(phrases, languageCode);
+  if (!collected) {
+    return null;
+  }
+  const generated = collected.accepted.slice(0, BATCH_SIZE);
+  const fallbackFillCount = BATCH_SIZE - generated.length;
+  const assembled = fallbackFillCount > 0
+    ? fillWithFallbackPhrases(generated, languageCode)
+    : assignUniqueStyleIds(generated);
+
+  if (!assembled || !validateFinalBatch(assembled)) {
+    return {
+      phrases: null,
+      generatedCount: generated.length,
+      rejectedCount: collected.rejectedCount,
+      fallbackFillCount,
+      reason: 'final_assembly_fallback',
+    };
+  }
+
+  return {
+    phrases: assembled,
+    generatedCount: generated.length,
+    rejectedCount: collected.rejectedCount,
+    fallbackFillCount,
+    reason: fallbackFillCount === 0
+      ? 'success'
+      : generated.length === 0
+        ? 'all_invalid_fallback'
+        : 'partial_validation_fill',
+  };
+}
+
+function logBatchResult({ generatedCount, rejectedCount, fallbackFillCount, reason }) {
+  console.log(
+    `AI_BATCH_RESULT generated_count=${generatedCount} rejected_count=${rejectedCount} fallback_fill_count=${fallbackFillCount} reason=${reason}`
+  );
+}
+
+function buildLoggedFallbackResult(languageCode, context, reason, rejectedCount = 0) {
+  logBatchResult({
+    generatedCount: 0,
+    rejectedCount,
+    fallbackFillCount: BATCH_SIZE,
+    reason,
+  });
+  return { phrases: buildFallbackBatch(languageCode), source: 'fallback', context };
+}
+
+function buildLoggedOpenAiResult(assembly, context) {
+  logBatchResult(assembly);
+  return { phrases: assembly.phrases, source: assembly.generatedCount > 0 ? 'openai' : 'fallback', context };
+}
+
+function buildLoggedFinalAssemblyFallback(languageCode, context, assembly) {
+  logBatchResult({
+    generatedCount: assembly ? assembly.generatedCount : 0,
+    rejectedCount: assembly ? assembly.rejectedCount : 0,
+    fallbackFillCount: BATCH_SIZE,
+    reason: 'final_assembly_fallback',
+  });
+  return { phrases: buildFallbackBatch(languageCode), source: 'fallback', context };
+}
+
+function parseOpenAiBatchResponse(response) {
+  const content = response &&
+    response.choices &&
+    response.choices[0] &&
+    response.choices[0].message &&
+    response.choices[0].message.content;
+  const parsed = JSON.parse(content);
+  if (!parsed || !Array.isArray(parsed.phrases)) {
+    throw new Error('response did not contain phrases array');
+  }
+  return parsed;
+}
+
+function extractUsedCategories(parsed) {
+  return Array.isArray(parsed.used_categories)
+    ? parsed.used_categories.filter((c) => BANK_CATEGORIES.includes(c))
+    : [];
+}
 // languageCode is expected to already be a resolved, known key of
 // FALLBACK_PHRASES (i.e. the output of resolveTargetLanguageCode) — the
 // DEFAULT_LANGUAGE_CODE fallback here is defense in depth for a caller that
@@ -680,16 +844,17 @@ async function generateBatch(device, window, signals, weather) {
   const context = buildContextPrompt(device, window, signals, weather, languageCode, bankItems, shownCategories);
 
   if (!apiKey) {
-    return { phrases: buildFallbackBatch(languageCode), source: 'fallback', context };
+    return buildLoggedFallbackResult(languageCode, context, 'no_api_key_fallback');
   }
 
+  let response;
   try {
     // Lazy require: avoids crashing at startup if the package is present but
     // no key is set yet, and keeps the fallback path dependency-free.
     const OpenAI = require('openai');
     const client = new OpenAI({ apiKey });
 
-    const response = await client.chat.completions.create({
+    response = await client.chat.completions.create({
       model: 'gpt-4o-mini',
       response_format: {
         type: 'json_schema',
@@ -729,92 +894,45 @@ async function generateBatch(device, window, signals, weather) {
       ],
     });
 
-    const parsed = JSON.parse(response.choices[0].message.content);
-    const phrases = Array.isArray(parsed.phrases) ? parsed.phrases : [];
-    const cleaned = cleanUsablePhrases(phrases);
-
-    // TEMPORARY diagnostic-only logging (DEBUG_LOG_BATCH_COUNTS env var, no-op unless set) --
-    // investigating the owner's real-usage report of only 2-5 distinct phrases/backgrounds
-    // reaching the device per batch instead of the expected BATCH_SIZE (10). Logs counts
-    // before/after the text-emptiness filter above, the dropped items themselves (with their
-    // style_id, since the working hypothesis is items with a style_id outside the new 27-code
-    // STYLE_IDS set silently disappearing -- note this filter does NOT actually drop on
-    // style_id, it only substitutes pickRandomStyle() for an invalid one, so this logging is
-    // also how we confirm/refute that hypothesis rather than assume it), and used_categories
-    // for completeness. Not fixing anything here -- remove this block in a separate commit
-    // once the real numbers are collected. See TASK "diagnostics: batch phrase count" report.
-    if (process.env.DEBUG_LOG_BATCH_COUNTS) {
-      console.log(`DEBUG_LOG_BATCH_COUNTS raw=${Array.isArray(parsed.phrases) ? parsed.phrases.length : 'not-array'}`);
-      console.log(`DEBUG_LOG_BATCH_COUNTS phrases.length=${phrases.length} cleaned.length=${cleaned ? cleaned.length : 'invalid'}`);
-      if (!cleaned || phrases.length !== cleaned.length) {
-        const seen = new Set();
-        const dropped = phrases.filter((p) => {
-          if (!(p && typeof p.text === 'string')) return true;
-          const text = p.text.trim();
-          const normalized = normalizeTextForDedupe(text);
-          const invalid = isUnusableLockScreenText(text) || seen.has(normalized);
-          seen.add(normalized);
-          return invalid;
-        });
-        console.log(`DEBUG_LOG_BATCH_COUNTS dropped=${JSON.stringify(dropped)}`);
-      }
-      console.log(`DEBUG_LOG_BATCH_COUNTS used_categories=${JSON.stringify(parsed.used_categories)}`);
-    }
-
-    if (!cleaned) {
-      return { phrases: buildFallbackBatch(languageCode), source: 'fallback', context };
-    }
-
-    // Ensure no two phrases in this batch share the same style_id -- buildSystemPrompt
-    // asks the model not to repeat style_id, but the enum constraint alone doesn't
-    // prevent it (no uniqueItems equivalent in Structured Outputs), so this is the
-    // actual guarantee. See dedupeStyleIds above.
-    const deduped = dedupeStyleIds(cleaned);
-
-    // Language reliability: swap out only the individual phrases that failed
-    // the target-language script check for a random local fallback phrase,
-    // rather than retrying the whole OpenAI call — a full retry would double the token
-    // cost and latency of every batch that has even one bad phrase, for a
-    // failure mode this cheap per-phrase substitution already fixes. The
-    // batch is still reported as 'openai' since it's still mostly
-    // AI-generated; only the substitution count is logged for visibility.
-    let invalidCount = 0;
-    const languageChecked = deduped.map((p) => {
-      if (isValidLanguageText(p.text, languageCode)) {
-        return p;
-      }
-      invalidCount += 1;
-      // Substituted with a FALLBACK_PHRASES entry in the same resolved
-      // target language, now that the list is translated (see the
-      // FALLBACK_PHRASES comment above) — no longer an English-regardless-
-      // of-languageCode substitution.
-      return { text: pickRandomFallbackPhrase(languageCode), style_id: p.style_id };
-    });
-    if (invalidCount > 0) {
-      console.warn(`Replaced ${invalidCount}/${cleaned.length} OpenAI phrase(s) that failed the ${SUPPORTED_LANGUAGES[languageCode].name}-language check (target=${languageCode})`);
-    }
-
-    const finalChecked = cleanUsablePhrases(languageChecked);
-    if (!finalChecked) {
-      return { phrases: buildFallbackBatch(languageCode), source: 'fallback', context };
-    }
-
-    // Record which bank categories this batch actually drew from (per the
-    // model's own "used_categories" field -- see buildSystemPrompt), so the
-    // device's next batch today doesn't get offered the same categories
-    // again (see selectBankItemsForDevice). Only categories from the fixed
-    // BANK_CATEGORIES set are trusted here; anything else is the model
-    // inventing a label and is dropped rather than stored.
-    const usedCategories = Array.isArray(parsed.used_categories)
-      ? parsed.used_categories.filter((c) => BANK_CATEGORIES.includes(c))
-      : [];
-    recordShownCategories(device.device_id, deviceLocalDate, usedCategories);
-
-    return { phrases: finalChecked, source: 'openai', context };
   } catch (err) {
-    console.error('OpenAI batch generation failed, using fallback:', err.message);
-    return { phrases: buildFallbackBatch(languageCode), source: 'fallback', context };
+    console.error(`AI_BATCH_ERROR reason=openai_error error=${err.name || 'Error'}`);
+    return buildLoggedFallbackResult(languageCode, context, 'openai_error');
   }
+
+  let parsed;
+  try {
+    parsed = parseOpenAiBatchResponse(response);
+  } catch (err) {
+    console.error(`AI_BATCH_ERROR reason=parse_or_schema_error error=${err.name || 'Error'}`);
+    return buildLoggedFallbackResult(languageCode, context, 'parse_or_schema_error');
+  }
+
+  let assembly;
+  try {
+    assembly = assembleBatchFromGeneratedPhrases(parsed.phrases, languageCode);
+  } catch (err) {
+    console.error(`AI_BATCH_ERROR reason=final_assembly_fallback error=${err.name || 'Error'}`);
+    return buildLoggedFallbackResult(languageCode, context, 'final_assembly_fallback');
+  }
+
+  if (!assembly) {
+    return buildLoggedFallbackResult(languageCode, context, 'parse_or_schema_error');
+  }
+
+  if (!assembly.phrases) {
+    return buildLoggedFinalAssemblyFallback(languageCode, context, assembly);
+  }
+
+  // Record which bank categories this batch actually drew from (per the
+  // model's own "used_categories" field -- see buildSystemPrompt), so the
+  // device's next batch today doesn't get offered the same categories
+  // again (see selectBankItemsForDevice). Only categories from the fixed
+  // BANK_CATEGORIES set are trusted here; anything else is the model
+  // inventing a label and is dropped rather than stored.
+  const usedCategories = extractUsedCategories(parsed);
+  recordShownCategories(device.device_id, deviceLocalDate, usedCategories);
+
+  return buildLoggedOpenAiResult(assembly, context);
 }
 
 module.exports = {
@@ -825,6 +943,8 @@ module.exports = {
     hasQuestionMark,
     hasQuestionShapeWithoutMark,
     isGenericBadLockScreenPhrase,
+    assembleBatchFromGeneratedPhrases,
+    validateFinalBatch,
     resolveTargetLanguageCode,
   },
 };
