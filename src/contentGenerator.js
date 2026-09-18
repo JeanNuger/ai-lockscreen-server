@@ -23,144 +23,144 @@ const LOCK_SCREEN_TEXT_MAX_LENGTH = 140;
 // otherwise silently cap below BATCH_SIZE if a language's list were shorter.
 const FALLBACK_PHRASES = {
   en: [
-    'A useful next move can stay simple',
-    'One clear detail is enough to start',
-    'The day has room for a sharper angle',
-    'Keep the useful part and leave the clutter',
-    'A small improvement still changes the shape',
-    'There is probably one thing worth doing first',
-    'Good timing beats extra effort',
-    'A clean start fits any kind of day',
-    'Notice the part that is already working',
-    'The next action does not need ceremony',
-    'A lighter version of the plan may work better',
-    'Stay with the thing that actually matters',
+    'Clouds can move faster than they look from the ground',
+    'City lights make rainy streets look sharper',
+    'A quiet room changes the sound of small things',
+    'Good coffee has a way of announcing itself early',
+    'Maps hide entire stories behind thin lines',
+    'Fresh air after rain has its own kind of punctuation',
+    'Old buildings usually keep the best shadows',
+    'A clear sky can make the city feel newly drawn',
+    'Tiny routines leave bigger traces than expected',
+    'Even familiar streets change with the hour',
+    'A low battery icon is modern suspense in miniature',
+    'Some days have better lighting than planning',
   ],
   fr: [
-    'Le prochain geste utile peut rester simple',
-    'Un détail clair suffit pour commencer',
-    'La journée laisse place à un angle plus net',
-    'Gardez l’utile et laissez le bruit',
-    'Une petite amélioration change déjà la forme',
-    'Il y a sûrement une chose à faire en premier',
-    'Le bon moment vaut mieux que l’effort en plus',
-    'Un départ net convient à toute journée',
-    'Remarquez la partie qui fonctionne déjà',
-    'La prochaine action n’a pas besoin de cérémonie',
-    'Une version plus légère du plan peut mieux marcher',
-    'Restez avec ce qui compte vraiment',
+    'Les nuages vont parfois plus vite qu’ils n’en ont l’air',
+    'La pluie rend les lumières de la ville plus nettes',
+    'Une pièce calme change le bruit des petites choses',
+    'Un bon café sait se faire remarquer tôt',
+    'Les cartes cachent des histoires derrière de fines lignes',
+    'L’air après la pluie a sa propre ponctuation',
+    'Les vieux bâtiments gardent souvent les meilleures ombres',
+    'Un ciel clair redessine presque la ville',
+    'Les petites habitudes laissent de grandes traces',
+    'Même une rue connue change selon l’heure',
+    'Une batterie faible crée un suspense très moderne',
+    'Certains jours ont une meilleure lumière que le programme',
   ],
   es: [
-    'El próximo movimiento útil puede ser simple',
-    'Un detalle claro basta para empezar',
-    'El día tiene espacio para un ángulo más preciso',
-    'Quédate con lo útil y deja el ruido',
-    'Una pequeña mejora también cambia la forma',
-    'Probablemente hay una cosa que conviene hacer primero',
-    'El buen momento vale más que el esfuerzo extra',
-    'Un comienzo limpio encaja en cualquier día',
-    'Fíjate en la parte que ya funciona',
-    'La siguiente acción no necesita ceremonia',
-    'Una versión más ligera del plan puede funcionar mejor',
-    'Quédate con lo que de verdad importa',
+    'Las nubes a veces van más rápido de lo que parece',
+    'La lluvia vuelve más nítidas las luces de la ciudad',
+    'Una habitación tranquila cambia el sonido de las cosas pequeñas',
+    'El buen café sabe anunciarse temprano',
+    'Los mapas esconden historias detrás de líneas finas',
+    'El aire después de la lluvia tiene su propia puntuación',
+    'Los edificios antiguos suelen guardar las mejores sombras',
+    'Un cielo claro hace que la ciudad parezca recién dibujada',
+    'Las rutinas pequeñas dejan huellas más grandes de lo esperado',
+    'Hasta las calles conocidas cambian con la hora',
+    'Un icono de batería baja es suspenso moderno en miniatura',
+    'Algunos días tienen mejor luz que planificación',
   ],
   pt: [
-    'O próximo movimento útil pode ser simples',
-    'Um detalhe claro basta para começar',
-    'O dia tem espaço para um ângulo mais preciso',
-    'Fique com o útil e deixe o ruído',
-    'Uma pequena melhoria também muda a forma',
-    'Provavelmente há uma coisa que vale fazer primeiro',
-    'Bom timing vale mais que esforço extra',
-    'Um começo limpo combina com qualquer dia',
-    'Repare na parte que já está funcionando',
-    'A próxima ação não precisa de cerimônia',
-    'Uma versão mais leve do plano pode funcionar melhor',
-    'Fique com o que realmente importa',
+    'As nuvens às vezes se movem mais rápido do que parecem',
+    'A chuva deixa as luzes da cidade mais nítidas',
+    'Um quarto silencioso muda o som das pequenas coisas',
+    'Um bom café sabe aparecer cedo',
+    'Mapas escondem histórias atrás de linhas finas',
+    'O ar depois da chuva tem sua própria pontuação',
+    'Prédios antigos costumam guardar as melhores sombras',
+    'Um céu limpo faz a cidade parecer redesenhada',
+    'Pequenas rotinas deixam marcas maiores do que parecem',
+    'Até ruas conhecidas mudam com a hora',
+    'Um ícone de bateria baixa é suspense moderno em miniatura',
+    'Alguns dias têm luz melhor que planejamento',
   ],
   de: [
-    'Der nächste nützliche Schritt kann einfach bleiben',
-    'Ein klares Detail reicht für den Anfang',
-    'Der Tag hat Platz für einen schärferen Blick',
-    'Behalte das Nützliche und lass den Lärm weg',
-    'Eine kleine Verbesserung verändert schon die Form',
-    'Wahrscheinlich gibt es eine Sache zuerst',
-    'Gutes Timing schlägt zusätzliche Anstrengung',
-    'Ein klarer Anfang passt zu jedem Tag',
-    'Beachte den Teil, der schon funktioniert',
-    'Die nächste Aktion braucht keine Zeremonie',
-    'Eine leichtere Version des Plans kann besser passen',
-    'Bleib bei dem, was wirklich zählt',
+    'Wolken bewegen sich oft schneller, als sie wirken',
+    'Regen macht Stadtlichter schärfer',
+    'Ein stiller Raum verändert den Klang kleiner Dinge',
+    'Guter Kaffee meldet sich früh genug',
+    'Karten verstecken Geschichten hinter dünnen Linien',
+    'Luft nach Regen hat ihre eigene Zeichensetzung',
+    'Alte Gebäude haben oft die besten Schatten',
+    'Ein klarer Himmel lässt die Stadt neu gezeichnet wirken',
+    'Kleine Routinen hinterlassen größere Spuren als gedacht',
+    'Selbst bekannte Straßen ändern sich mit der Uhrzeit',
+    'Ein niedriger Akkustand ist moderner Miniatur-Suspense',
+    'Manche Tage haben besseres Licht als Planung',
   ],
   ru: [
-    'Следующий полезный ход может быть простым',
-    'Одной ясной детали достаточно для начала',
-    'В дне есть место для более точного угла',
-    'Оставь полезное, а шум можно не брать с собой',
-    'Маленькое улучшение тоже меняет форму',
-    'Скорее всего, есть одна вещь, с которой стоит начать',
-    'Хороший момент иногда важнее лишнего усилия',
-    'Чистый старт подходит любому дню',
-    'Заметь ту часть, которая уже работает',
-    'Следующему действию не нужна церемония',
-    'Более лёгкая версия плана может сработать лучше',
-    'Держись того, что действительно важно',
+    'Облака часто движутся быстрее, чем кажется с земли',
+    'Дождь делает городские огни резче',
+    'В тихой комнате мелкие звуки становятся заметнее',
+    'Хороший кофе умеет заявить о себе заранее',
+    'На картах за тонкими линиями прячутся целые истории',
+    'У воздуха после дождя есть своя пунктуация',
+    'Старые здания обычно хранят лучшие тени',
+    'Ясное небо делает город почти заново нарисованным',
+    'Маленькие привычки оставляют следы крупнее, чем кажется',
+    'Даже знакомые улицы меняются вместе с часом',
+    'Значок низкой батареи — маленький современный саспенс',
+    'У некоторых дней освещение лучше, чем расписание',
   ],
   zh: [
-    '下一个有用动作可以很简单',
-    '一个清楚细节就足够开始',
-    '今天还容得下一个更准的角度',
-    '留下有用的部分，把杂音放下',
-    '一点小改进也会改变整体形状',
-    '也许先做那一件最值得的事',
-    '好的时机胜过额外用力',
-    '干净的开头适合任何一天',
-    '注意已经在运转的那一部分',
-    '下一个动作不需要仪式感',
-    '计划的轻量版本可能更好用',
-    '留在真正重要的事情上',
+    '云有时比地面上看起来移动得更快',
+    '雨会让城市灯光显得更锋利',
+    '安静的房间会放大小东西的声音',
+    '好咖啡总会很早就有存在感',
+    '地图把故事藏在细细的线后面',
+    '雨后的空气有自己的标点',
+    '老建筑常常留着最好的阴影',
+    '晴朗的天空会让城市像刚被重新画过',
+    '小习惯留下的痕迹常比想象中大',
+    '熟悉的街道也会随着时间变样',
+    '低电量图标是一种迷你现代悬念',
+    '有些日子的光线比计划更好',
   ],
   ja: [
-    '次の役に立つ一手はシンプルでいい',
-    '始めるには一つのはっきりした細部で足ります',
-    '今日にはまだ別の見方を置く余地があります',
-    '役に立つ部分だけ残して、雑音は置いていきます',
-    '小さな改善でも形は変わります',
-    'まず手をつける価値のある一つがあります',
-    '余分な努力より、よいタイミングが効きます',
-    'すっきりした始まりはどんな日にも合います',
-    'もう動いている部分に目を向けます',
-    '次の行動に大げさな準備はいりません',
-    '軽い版の計画のほうが合うこともあります',
-    '本当に大事なものに寄せていきます',
+    '雲は地上から見るより速く動くことがあります',
+    '雨は街の明かりを少し鋭く見せます',
+    '静かな部屋では小さな音がよく目立ちます',
+    'よいコーヒーは早い時間から存在感があります',
+    '地図の細い線の奥には物語があります',
+    '雨上がりの空気には独特の区切りがあります',
+    '古い建物にはいい影が残りがちです',
+    '澄んだ空は街を描き直したように見せます',
+    '小さな習慣は思ったより大きな跡を残します',
+    '見慣れた通りも時間で表情が変わります',
+    '低いバッテリー表示は小さな現代サスペンスです',
+    '計画より光のほうがいい日もあります',
   ],
   ko: [
-    '다음 유용한 움직임은 단순해도 됩니다',
-    '분명한 세부 하나면 시작하기에 충분합니다',
-    '오늘에는 더 날카로운 각도를 둘 공간이 있습니다',
-    '쓸모 있는 부분만 남기고 소음은 덜어냅니다',
-    '작은 개선도 전체 모양을 바꿉니다',
-    '먼저 할 만한 한 가지가 있을 가능성이 큽니다',
-    '좋은 타이밍은 추가 노력보다 강합니다',
-    '깔끔한 시작은 어떤 하루에도 어울립니다',
-    '이미 작동하는 부분을 봅니다',
-    '다음 행동에 거창한 준비는 필요 없습니다',
-    '계획의 가벼운 버전이 더 잘 맞을 수 있습니다',
-    '정말 중요한 쪽에 머뭅니다',
+    '구름은 땅에서 보는 것보다 빠르게 움직일 때가 있습니다',
+    '비는 도시의 불빛을 더 선명하게 만듭니다',
+    '조용한 방에서는 작은 소리가 더 또렷합니다',
+    '좋은 커피는 이른 시간부터 존재감을 냅니다',
+    '지도는 얇은 선 뒤에 많은 이야기를 숨깁니다',
+    '비 온 뒤의 공기에는 고유한 쉼표가 있습니다',
+    '오래된 건물은 대개 좋은 그림자를 품고 있습니다',
+    '맑은 하늘은 도시를 새로 그린 듯 보이게 합니다',
+    '작은 습관은 생각보다 큰 흔적을 남깁니다',
+    '익숙한 거리도 시간에 따라 달라집니다',
+    '낮은 배터리 표시는 작은 현대식 긴장감입니다',
+    '어떤 날은 계획보다 빛이 더 좋습니다',
   ],
   it: [
-    'La prossima mossa utile può restare semplice',
-    'Un dettaglio chiaro basta per iniziare',
-    'La giornata ha spazio per un angolo più preciso',
-    'Tieni la parte utile e lascia il rumore',
-    'Un piccolo miglioramento cambia già la forma',
-    'Probabilmente c’è una cosa da fare per prima',
-    'Il tempismo giusto batte lo sforzo in più',
-    'Un inizio pulito sta bene in ogni giornata',
-    'Nota la parte che sta già funzionando',
-    'La prossima azione non ha bisogno di cerimonie',
-    'Una versione più leggera del piano può funzionare meglio',
-    'Resta con ciò che conta davvero',
+    'Le nuvole a volte corrono più di quanto sembri',
+    'La pioggia rende più nette le luci della città',
+    'Una stanza silenziosa cambia il suono delle piccole cose',
+    'Un buon caffè sa farsi notare presto',
+    'Le mappe nascondono storie dietro linee sottili',
+    'L’aria dopo la pioggia ha una punteggiatura tutta sua',
+    'Gli edifici vecchi tengono spesso le ombre migliori',
+    'Un cielo limpido fa sembrare la città appena disegnata',
+    'Le piccole abitudini lasciano tracce più grandi del previsto',
+    'Anche le strade note cambiano con l’ora',
+    'L’icona della batteria bassa è suspense moderno in miniatura',
+    'Certi giorni hanno una luce migliore del programma',
   ],
 };
 
@@ -247,6 +247,35 @@ function hasQuestionMark(text) {
   return /[?¿؟？]/.test(text);
 }
 
+function hasQuestionShapeWithoutMark(text) {
+  const normalized = normalizeTextForDedupe(text).replace(/[.!…,:;]+$/g, '');
+  return /^(знаешь ли|а ты|ты замечал|ты когда-нибудь|хочешь|почему бы не|как насч[её]т)(?:\s|$|[,.!…:;])/i.test(normalized);
+}
+
+function isGenericBadLockScreenPhrase(text) {
+  const normalized = normalizeTextForDedupe(text).replace(/[.!…,:;]+$/g, '');
+  return [
+    'скорее всего, есть одна вещь, с которой стоит начать',
+    'маленькие улучшения тоже меняют форму',
+    'маленькое улучшение тоже меняет форму',
+    'на дне есть место для более точного угла',
+    'в дне есть место для более точного угла',
+    'следующему действию не нужна церемония',
+    'чистый старт подходит любому дню',
+    'заметь ту часть, которая уже работает',
+  ].includes(normalized);
+}
+
+function isUnusableLockScreenText(text) {
+  return (
+    text.length === 0 ||
+    text.length > LOCK_SCREEN_TEXT_MAX_LENGTH ||
+    hasQuestionMark(text) ||
+    hasQuestionShapeWithoutMark(text) ||
+    isGenericBadLockScreenPhrase(text)
+  );
+}
+
 function cleanUsablePhrases(phrases) {
   if (!Array.isArray(phrases)) {
     return null;
@@ -259,11 +288,7 @@ function cleanUsablePhrases(phrases) {
       continue;
     }
     const text = phrase.text.trim();
-    if (
-      text.length === 0 ||
-      text.length > LOCK_SCREEN_TEXT_MAX_LENGTH ||
-      hasQuestionMark(text)
-    ) {
+    if (isUnusableLockScreenText(text)) {
       continue;
     }
 
@@ -578,11 +603,14 @@ function buildSystemPrompt(languageCode) {
   const languageName = SUPPORTED_LANGUAGES[languageCode].name;
   return `You are a proactive personal AI companion on a phone lock screen (live wallpaper).
 The user cannot reply from the lock screen. Speak first with short one-way remarks that feel natural, personal, and context-aware -- not like a chat, trivia feed, quote app, encyclopedia, or translated joke list.
+You are not a coach, therapist, motivational speaker, mindfulness app, productivity guru, or quote generator. Do not default to advice or self-help just because profile.personal_goal exists.
 Create exactly ${BATCH_SIZE} distinct lock-screen messages in ${languageName}. Give each message a different style_id from the enum -- do not reuse the same style_id twice within this batch.
 
 Never ask the user a question. Never request a reply, choice, confirmation, reflection, or answer. Do not end phrases with question marks. Rewrite question-shaped ideas as statements, observations, suggestions, or short remarks.
+Avoid advice openings such as "try", "start with", "notice", "focus on", "remember", "you should", "you can start", "small steps", "today is a good day for", "you do not need", or their equivalents in ${languageName}.
 
-Every message must earn its place: personal, useful, situational, funny, quietly insightful, or grounded in trusted today_content. Nothing filler.
+Every message must earn its place: a concrete observation, relevant context, useful specific information, natural humor, a date/event item, or a real connection to interests/goals/signals. Nothing filler.
+Each message must be understandable by itself. Avoid vague wisdom, unfinished thoughts, meaningless metaphors, generic encouragement, and statements with no concrete referent. Bad examples: "There is probably one thing worth doing first", "Small improvements still change the shape", "The day has room for a sharper angle", "The next action does not need ceremony". If a line could fit almost anyone on almost any day unchanged, it is usually too generic.
 When profile/context is rich enough, about 4-5 of the ${BATCH_SIZE} messages should feel personal through one or more factors: interests, personal_goal, age/life context, name, relevant behavior/device context, weather/time, or today_content. Do not force telemetry just to hit a quota.
 If profile.name is present, use the name about once in the whole batch. Do not use it more often unless there is a strong natural reason. Never invent a name.
 Do not assume an unlock means the user needs to put the phone away, pause, breathe, calm down, reset, or reduce screen time. Use that kind of message only when the profile/context genuinely supports it.
@@ -601,7 +629,7 @@ Humor must work directly in ${languageName}. Avoid English wordplay or puns that
 
 The ${BATCH_SIZE} messages must vary by idea and wording. Do not produce ${BATCH_SIZE} pieces of advice, ${BATCH_SIZE} facts, ${BATCH_SIZE} motivational statements, several paraphrases of the same thought, or repeated use of one interest/signal/event.
 Vary the character of the batch: it should feel like ${BATCH_SIZE} natural remarks from a versatile personal AI, not a wellness or digital-detox app.
-Warm or motivational generic content is allowed at most 1 out of ${BATCH_SIZE}, and only if it genuinely fits.
+Aim for a mix: several personal/context-aware, several time/weather/device-aware only when interesting, several today/world items only when relevant, and several free observations/humor/unexpected thoughts. Advice/self-help is 0 by default; at most 1 if a specific context makes it genuinely useful. Generic motivational content is 0.
 Never reuse a topic or category listed as already shown today for this user.
 Never invent facts beyond what today's content ideas actually say.
 Never invent, guess, or make up a name for the user. Only use profile.gender when it clearly improves relevance -- never as a rule applied to every phrase.
@@ -635,7 +663,18 @@ async function generateBatch(device, window, signals, weather) {
   // already returns [] in that case, so bankItems degrades to "no bank
   // content this batch" rather than failing.
   const deviceLocalDate = getLocalCalendarDate(new Date(), device.timezone);
-  const bankItems = selectBankItemsForDevice(device.device_id, getBankDateString(), deviceLocalDate, device.gender);
+  const countryCode = weather && typeof weather.countryCode === 'string' && weather.countryCode
+    ? weather.countryCode
+    : signals && typeof signals.region === 'string'
+      ? signals.region
+      : null;
+  const bankItems = selectBankItemsForDevice(
+    device.device_id,
+    getBankDateString(),
+    deviceLocalDate,
+    device.gender,
+    countryCode
+  );
   const shownCategories = getShownCategories(device.device_id, deviceLocalDate);
 
   const context = buildContextPrompt(device, window, signals, weather, languageCode, bankItems, shownCategories);
@@ -713,10 +752,7 @@ async function generateBatch(device, window, signals, weather) {
           if (!(p && typeof p.text === 'string')) return true;
           const text = p.text.trim();
           const normalized = normalizeTextForDedupe(text);
-          const invalid = text.length === 0 ||
-            text.length > LOCK_SCREEN_TEXT_MAX_LENGTH ||
-            hasQuestionMark(text) ||
-            seen.has(normalized);
+          const invalid = isUnusableLockScreenText(text) || seen.has(normalized);
           seen.add(normalized);
           return invalid;
         });
@@ -781,4 +817,14 @@ async function generateBatch(device, window, signals, weather) {
   }
 }
 
-module.exports = { generateBatch, buildFallbackBatch };
+module.exports = {
+  generateBatch,
+  buildFallbackBatch,
+  _test: {
+    cleanUsablePhrases,
+    hasQuestionMark,
+    hasQuestionShapeWithoutMark,
+    isGenericBadLockScreenPhrase,
+    resolveTargetLanguageCode,
+  },
+};

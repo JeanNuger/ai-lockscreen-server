@@ -9,12 +9,9 @@ const BANK_CATEGORIES = [
   'fact',
   'quote',
   'on_this_day',
-  'psychology',
-  'advice',
   'humor',
   'idiom',
   'statistic',
-  'wish',
 ];
 
 // How many bank items to ask the model for. Not a hard contract with the
@@ -61,12 +58,12 @@ function buildBankPrompt(bankDate) {
   return `Search the web for what's notable about ${bankDate} and put together a varied global "content bank" for a phone lock screen app.
 Return STRICTLY a JSON array (no wrapper object, no explanations) of ${TARGET_BANK_SIZE} objects.
 Each object: {"category": one of [${BANK_CATEGORIES.join(', ')}], "content_text": "a short, self-contained piece of content in English, up to 200 characters", "tags": ["lowercase", "keyword", "tags"]}.
-Cover a genuine mix across ALL the listed categories, not just one or two -- include: any real holidays/observances for ${bankDate}, "on this day in history" facts, notable quotes, a psychology fact or insight, a practical piece of advice, something genuinely humorous, an interesting idiom with its meaning, an interesting statistic, and a warm wish or kind word for the reader.
+Cover a genuine mix across ALL the listed categories, not just one or two -- include: real holidays/observances for ${bankDate}, "on this day in history" facts, notable quotes, interesting facts/statistics, useful timely information, and light humor only if it localizes cleanly.
 Keep the bank international and reusable for users in many countries: do not make it US-centric or Russia-centric.
 Prioritize accuracy from web search for date-specific items (holiday, on_this_day) -- they must match ${bankDate}; do not invent fake historical events or holidays.
 Keep every content_text glanceable and self-contained (no "as mentioned above", no follow-up questions).
-For "fact" items: if the fact is a scientific one, add "science" to its tags array (in addition to any other tags).
-For "advice" items: if the advice is specifically addressed to women or to men, add "for_women" or "for_men" (respectively) to its tags array; if it's general advice not aimed at a specific gender, add "general" instead. Every advice item should have exactly one of these three tags.
+For global/international items, add "global" to tags. For country-specific items, add the ISO country code tag such as "KZ", "FR", or "JP". Avoid country-specific politics.
+Do not generate self-help, motivational coaching, psychology tips, productivity advice, or generic wishes.
 Respond with the JSON array only, nothing else.`;
 }
 
@@ -171,6 +168,32 @@ function parseTags(rawTags) {
   }
 }
 
+function normalizeCountryCode(countryCode) {
+  return typeof countryCode === 'string' && /^[A-Za-z]{2}$/.test(countryCode)
+    ? countryCode.toUpperCase()
+    : null;
+}
+
+function countryTagsFromBankItem(row) {
+  return new Set(
+    parseTags(row.tags)
+      .map((tag) => tag.trim())
+      .filter((tag) => /^[A-Z]{2}$/.test(tag) && tag !== 'UN')
+  );
+}
+
+function isBankItemAllowedForCountry(row, countryCode) {
+  if (!BANK_CATEGORIES.includes(row.category)) {
+    return false;
+  }
+  const targetCountry = normalizeCountryCode(countryCode);
+  const itemCountries = countryTagsFromBankItem(row);
+  if (itemCountries.size === 0) {
+    return true;
+  }
+  return targetCountry ? itemCountries.has(targetCountry) : false;
+}
+
 // Random-but-varied-by-category selection for one device's batch context.
 // bankDate is the shared Asia/Almaty product-day date the bank was generated under
 // (see getBankDateString above); deviceLocalDate is that same device's own
@@ -190,12 +213,25 @@ function parseTags(rawTags) {
 // -- an empty selection would silently strip bank content from every
 // remaining batch that day once categories cycle out, which is worse than
 // occasionally repeating a category within the same day.
-function selectBankItemsForDevice(deviceId, bankDate, deviceLocalDate, deviceGender, count = DEFAULT_SELECTION_COUNT) {
+function selectBankItemsForDevice(
+  deviceId,
+  bankDate,
+  deviceLocalDate,
+  deviceGender,
+  countryCode,
+  count = DEFAULT_SELECTION_COUNT
+) {
+  if (typeof countryCode === 'number' && count === DEFAULT_SELECTION_COUNT) {
+    count = countryCode;
+    countryCode = null;
+  }
   if (!bankDate || !deviceLocalDate) {
     return [];
   }
 
-  const bankRows = selectBankRowsForDateStatement.all(bankDate);
+  const bankRows = selectBankRowsForDateStatement
+    .all(bankDate)
+    .filter((row) => isBankItemAllowedForCountry(row, countryCode));
   if (bankRows.length === 0) {
     return [];
   }
@@ -272,4 +308,9 @@ module.exports = {
   recordShownCategories,
   getBankDateString,
   BANK_CATEGORIES,
+  _test: {
+    countryTagsFromBankItem,
+    isBankItemAllowedForCountry,
+    normalizeCountryCode,
+  },
 };
