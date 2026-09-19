@@ -9,6 +9,209 @@ const {
 
 const LOCK_SCREEN_TEXT_MAX_LENGTH = 140;
 
+const WINDOW_CONTEXT = {
+  morning: { id: 'morning', range: '05:00-11:00' },
+  day: { id: 'day', range: '11:00-15:00' },
+  evening: { id: 'evening', range: '15:00-20:00' },
+  night: { id: 'night', range: '20:00-05:00' },
+};
+
+// One entry per SUPPORTED_LANGUAGES code -- covers every language the app
+// actually generates in, not just ru/en, so the date/weekday guard applies
+// uniformly regardless of resolveTargetLanguageCode's result. Aliases are
+// deliberately minimal: just the forms needed to catch "Tomorrow is Friday"/
+// "Today is Saturday" and their natural equivalents (a couple of inflected
+// forms where a language needs them, e.g. Russian accusative "пятницу",
+// Portuguese's short "segunda" alongside "segunda-feira") -- not a full
+// grammatical case/conjugation table.
+const WEEKDAY_ALIASES = {
+  ru: {
+    Monday: ['понедельник'],
+    Tuesday: ['вторник'],
+    Wednesday: ['среда', 'среду'],
+    Thursday: ['четверг'],
+    Friday: ['пятница', 'пятницу'],
+    Saturday: ['суббота', 'субботу'],
+    Sunday: ['воскресенье'],
+  },
+  en: {
+    Monday: ['monday'],
+    Tuesday: ['tuesday'],
+    Wednesday: ['wednesday'],
+    Thursday: ['thursday'],
+    Friday: ['friday'],
+    Saturday: ['saturday'],
+    Sunday: ['sunday'],
+  },
+  fr: {
+    Monday: ['lundi'],
+    Tuesday: ['mardi'],
+    Wednesday: ['mercredi'],
+    Thursday: ['jeudi'],
+    Friday: ['vendredi'],
+    Saturday: ['samedi'],
+    Sunday: ['dimanche'],
+  },
+  es: {
+    Monday: ['lunes'],
+    Tuesday: ['martes'],
+    Wednesday: ['miércoles', 'miercoles'],
+    Thursday: ['jueves'],
+    Friday: ['viernes'],
+    Saturday: ['sábado', 'sabado'],
+    Sunday: ['domingo'],
+  },
+  pt: {
+    Monday: ['segunda-feira', 'segunda'],
+    Tuesday: ['terça-feira', 'terça', 'terca-feira', 'terca'],
+    Wednesday: ['quarta-feira', 'quarta'],
+    Thursday: ['quinta-feira', 'quinta'],
+    Friday: ['sexta-feira', 'sexta'],
+    Saturday: ['sábado', 'sabado'],
+    Sunday: ['domingo'],
+  },
+  de: {
+    Monday: ['montag'],
+    Tuesday: ['dienstag'],
+    Wednesday: ['mittwoch'],
+    Thursday: ['donnerstag'],
+    Friday: ['freitag'],
+    Saturday: ['samstag'],
+    Sunday: ['sonntag'],
+  },
+  zh: {
+    Monday: ['星期一', '周一'],
+    Tuesday: ['星期二', '周二'],
+    Wednesday: ['星期三', '周三'],
+    Thursday: ['星期四', '周四'],
+    Friday: ['星期五', '周五'],
+    Saturday: ['星期六', '周六'],
+    Sunday: ['星期日', '星期天', '周日'],
+  },
+  ja: {
+    Monday: ['月曜日', '月曜'],
+    Tuesday: ['火曜日', '火曜'],
+    Wednesday: ['水曜日', '水曜'],
+    Thursday: ['木曜日', '木曜'],
+    Friday: ['金曜日', '金曜'],
+    Saturday: ['土曜日', '土曜'],
+    Sunday: ['日曜日', '日曜'],
+  },
+  ko: {
+    Monday: ['월요일'],
+    Tuesday: ['화요일'],
+    Wednesday: ['수요일'],
+    Thursday: ['목요일'],
+    Friday: ['금요일'],
+    Saturday: ['토요일'],
+    Sunday: ['일요일'],
+  },
+  it: {
+    Monday: ['lunedì', 'lunedi'],
+    Tuesday: ['martedì', 'martedi'],
+    Wednesday: ['mercoledì', 'mercoledi'],
+    Thursday: ['giovedì', 'giovedi'],
+    Friday: ['venerdì', 'venerdi'],
+    Saturday: ['sabato'],
+    Sunday: ['domenica'],
+  },
+};
+
+const RELATIVE_DAY_MARKERS = {
+  ru: {
+    today: ['сегодня'],
+    tomorrow: ['завтра'],
+  },
+  en: {
+    today: ['today'],
+    tomorrow: ['tomorrow'],
+  },
+  fr: {
+    today: ["aujourd'hui", 'aujourdhui'],
+    tomorrow: ['demain'],
+  },
+  es: {
+    today: ['hoy'],
+    tomorrow: ['mañana', 'manana'],
+  },
+  pt: {
+    today: ['hoje'],
+    tomorrow: ['amanhã', 'amanha'],
+  },
+  de: {
+    today: ['heute'],
+    tomorrow: ['morgen'],
+  },
+  zh: {
+    today: ['今天'],
+    tomorrow: ['明天'],
+  },
+  ja: {
+    today: ['今日'],
+    tomorrow: ['明日'],
+  },
+  ko: {
+    today: ['오늘'],
+    tomorrow: ['내일'],
+  },
+  it: {
+    today: ['oggi'],
+    tomorrow: ['domani'],
+  },
+};
+
+const BATTERY_TERMS = {
+  ru: ['заряд', 'заряда', 'заряж', 'батаре', 'аккумулятор'],
+  en: ['battery', 'charge'],
+};
+
+const UNLOCK_TERMS = {
+  ru: ['разблокиров'],
+  en: ['unlock', 'unlocks'],
+};
+
+// JS's \b is defined in terms of \w, which is ASCII-only (`[A-Za-z0-9_]`) --
+// Cyrillic letters are never "word characters" to it, so a Cyrillic-only
+// pattern like /\bпора\b/ never matches anything at all (found while adding
+// tests for the patterns below: every RU pattern silently no-op'd). This
+// builds an equivalent boundary using a lookaround against an explicit
+// Latin+Cyrillic+digit+underscore class instead, so RU patterns actually
+// fire. EN patterns don't need this (plain ASCII \b already works for them).
+const WORD_CHARS = 'A-Za-zА-Яа-яЁё0-9_';
+function ruWordBoundaryPattern(source) {
+  return new RegExp(`(?<![${WORD_CHARS}])(?:${source})(?![${WORD_CHARS}])`, 'i');
+}
+
+const UNSUPPORTED_CONTEXT_PATTERNS = {
+  traffic: {
+    ru: ['в\\s+пробк[аеуы]', 'пробк[аеуы]'].map(ruWordBoundaryPattern),
+    en: [/\btraffic\s+jam\b/i, /\bstuck\s+in\s+traffic\b/i, /\bin\s+traffic\b/i],
+  },
+};
+
+const COACHING_PATTERNS = {
+  ru: [
+    'не\\s+забудь',
+    'тебе\\s+стоит',
+    'пора\\s+[а-яё]+',
+    'попробуй',
+    'попробовать',
+    'сделай',
+    'дай\\s+себе',
+    'запланируй',
+    'экспериментируй',
+  ].map(ruWordBoundaryPattern),
+  en: [
+    /\bdon't\s+forget\b/i,
+    /\byou\s+should\b/i,
+    /\bit'?s\s+time\s+to\b/i,
+    /\btry\s+(?:to\s+)?[a-z]/i,
+    /\bremember\s+to\b/i,
+    /\bstart\s+with\b/i,
+    /\bfocus\s+on\b/i,
+  ],
+};
+
 // FALLBACK_PHRASES: the offline/failure path (no OPENAI_API_KEY configured,
 // the OpenAI call itself fails, the whole batch comes back unusable, or an
 // individual phrase fails its language check below). Translated into all 10
@@ -280,7 +483,110 @@ function isUnusableLockScreenText(text) {
   );
 }
 
-function collectUsablePhrases(phrases, languageCode) {
+function getLanguageMap(map, languageCode) {
+  return map[languageCode] || map[DEFAULT_LANGUAGE_CODE] || {};
+}
+
+function containsAnyMarker(normalized, markers) {
+  return markers.some((marker) => normalized.includes(marker));
+}
+
+function detectRelativeWeekdayClaim(text, languageCode) {
+  const normalized = normalizeTextForDedupe(text);
+  const relativeMarkers = getLanguageMap(RELATIVE_DAY_MARKERS, languageCode);
+  const weekdayAliases = getLanguageMap(WEEKDAY_ALIASES, languageCode);
+  const relative = Object.keys(relativeMarkers).find((key) => containsAnyMarker(normalized, relativeMarkers[key]));
+  if (!relative) {
+    return null;
+  }
+  for (const [weekday, aliases] of Object.entries(weekdayAliases)) {
+    if (containsAnyMarker(normalized, aliases)) {
+      return { relative, weekday };
+    }
+  }
+  return null;
+}
+
+function hasInvalidRelativeDateClaim(text, languageCode, validationContext = {}) {
+  const claim = detectRelativeWeekdayClaim(text, languageCode);
+  if (!claim) {
+    return false;
+  }
+  const dateContext = validationContext.dateContext;
+  if (!dateContext) {
+    return true;
+  }
+  const expected = claim.relative === 'tomorrow'
+    ? dateContext.tomorrow_weekday
+    : dateContext.weekday;
+  return expected !== claim.weekday;
+}
+
+function numberNearTerms(normalized, value, terms) {
+  if (value === undefined || value === null || value < 0) {
+    return false;
+  }
+  const escapedValue = String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const termPattern = terms.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  if (!termPattern) {
+    return false;
+  }
+  return new RegExp(`(?:${escapedValue}\\s*(?:%|[^\\n]{0,24}(?:${termPattern}))|(?:${termPattern})[^\\n]{0,24}${escapedValue})`, 'i')
+    .test(normalized);
+}
+
+function hasExactTelemetryEcho(text, languageCode, validationContext = {}) {
+  const normalized = normalizeTextForDedupe(text);
+  const signals = validationContext.signals || {};
+  if (signals.battery_level !== undefined) {
+    const batteryTerms = getLanguageMap(BATTERY_TERMS, languageCode);
+    if (normalized.includes(`${signals.battery_level}%`) || numberNearTerms(normalized, signals.battery_level, batteryTerms)) {
+      return true;
+    }
+  }
+  if (signals.unlocks_since_last_batch !== undefined) {
+    const unlockTerms = getLanguageMap(UNLOCK_TERMS, languageCode);
+    if (numberNearTerms(normalized, signals.unlocks_since_last_batch, unlockTerms)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasUnsupportedContextClaim(text, languageCode, validationContext = {}) {
+  const hasTrafficContext = validationContext.contextFlags && validationContext.contextFlags.traffic === true;
+  if (hasTrafficContext) {
+    return false;
+  }
+  const trafficPatterns = (UNSUPPORTED_CONTEXT_PATTERNS.traffic[languageCode] || [])
+    .concat(UNSUPPORTED_CONTEXT_PATTERNS.traffic[DEFAULT_LANGUAGE_CODE] || []);
+  return trafficPatterns.some((pattern) => pattern.test(text));
+}
+
+function hasCoachingOrDirectiveShape(text, languageCode) {
+  const patterns = (COACHING_PATTERNS[languageCode] || []).concat(COACHING_PATTERNS[DEFAULT_LANGUAGE_CODE] || []);
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+function rejectionReasonForText(text, languageCode, validationContext = {}) {
+  if (text.length === 0 || text.length > LOCK_SCREEN_TEXT_MAX_LENGTH) return 'basic_quality';
+  if (hasQuestionMark(text) || hasQuestionShapeWithoutMark(text)) return 'question';
+  if (isGenericBadLockScreenPhrase(text)) return 'generic';
+  if (hasInvalidRelativeDateClaim(text, languageCode, validationContext)) return 'date_claim';
+  if (hasExactTelemetryEcho(text, languageCode, validationContext)) return 'telemetry_echo';
+  if (hasUnsupportedContextClaim(text, languageCode, validationContext)) return 'unsupported_context';
+  if (hasCoachingOrDirectiveShape(text, languageCode)) return 'coaching';
+  return null;
+}
+
+function incrementReason(reasonCounts, reason) {
+  if (!reason) {
+    return;
+  }
+  reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
+}
+
+function collectUsablePhrases(phrases, languageCode, validationContext = {}) {
   if (!Array.isArray(phrases)) {
     return null;
   }
@@ -288,24 +594,30 @@ function collectUsablePhrases(phrases, languageCode) {
   const seenTexts = new Set();
   const accepted = [];
   let rejectedCount = 0;
+  const rejectionReasons = {};
   for (const phrase of phrases) {
     if (!phrase || typeof phrase.text !== 'string') {
       rejectedCount += 1;
+      incrementReason(rejectionReasons, 'schema');
       continue;
     }
     const text = phrase.text.trim();
-    if (isUnusableLockScreenText(text)) {
+    const reason = rejectionReasonForText(text, languageCode, validationContext);
+    if (reason) {
       rejectedCount += 1;
+      incrementReason(rejectionReasons, reason);
       continue;
     }
     if (languageCode && !isValidLanguageText(text, languageCode)) {
       rejectedCount += 1;
+      incrementReason(rejectionReasons, 'language');
       continue;
     }
 
     const normalized = normalizeTextForDedupe(text);
     if (seenTexts.has(normalized)) {
       rejectedCount += 1;
+      incrementReason(rejectionReasons, 'duplicate');
       continue;
     }
     seenTexts.add(normalized);
@@ -316,11 +628,11 @@ function collectUsablePhrases(phrases, languageCode) {
     });
   }
 
-  return { accepted, rejectedCount, inputCount: phrases.length };
+  return { accepted, rejectedCount, inputCount: phrases.length, rejectionReasons };
 }
 
-function cleanUsablePhrases(phrases, languageCode) {
-  const collected = collectUsablePhrases(phrases, languageCode);
+function cleanUsablePhrases(phrases, languageCode, validationContext = {}) {
+  const collected = collectUsablePhrases(phrases, languageCode, validationContext);
   if (!collected) {
     return null;
   }
@@ -388,8 +700,8 @@ function fillWithFallbackPhrases(generated, languageCode) {
   return assignUniqueStyleIds(result);
 }
 
-function assembleBatchFromGeneratedPhrases(phrases, languageCode) {
-  const collected = collectUsablePhrases(phrases, languageCode);
+function assembleBatchFromGeneratedPhrases(phrases, languageCode, validationContext = {}) {
+  const collected = collectUsablePhrases(phrases, languageCode, validationContext);
   if (!collected) {
     return null;
   }
@@ -406,6 +718,7 @@ function assembleBatchFromGeneratedPhrases(phrases, languageCode) {
       rejectedCount: collected.rejectedCount,
       fallbackFillCount,
       reason: 'final_assembly_fallback',
+      rejectionReasons: collected.rejectionReasons,
     };
   }
 
@@ -414,6 +727,7 @@ function assembleBatchFromGeneratedPhrases(phrases, languageCode) {
     generatedCount: generated.length,
     rejectedCount: collected.rejectedCount,
     fallbackFillCount,
+    rejectionReasons: collected.rejectionReasons,
     reason: fallbackFillCount === 0
       ? 'success'
       : generated.length === 0
@@ -422,9 +736,19 @@ function assembleBatchFromGeneratedPhrases(phrases, languageCode) {
   };
 }
 
-function logBatchResult({ generatedCount, rejectedCount, fallbackFillCount, reason }) {
+function formatRejectionReasons(rejectionReasons) {
+  if (!rejectionReasons || Object.keys(rejectionReasons).length === 0) {
+    return '';
+  }
+  return Object.entries(rejectionReasons)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([reasonName, count]) => ` rejected_${reasonName}=${count}`)
+    .join('');
+}
+
+function logBatchResult({ generatedCount, rejectedCount, fallbackFillCount, reason, rejectionReasons }) {
   console.log(
-    `AI_BATCH_RESULT generated_count=${generatedCount} rejected_count=${rejectedCount} fallback_fill_count=${fallbackFillCount} reason=${reason}`
+    `AI_BATCH_RESULT generated_count=${generatedCount} rejected_count=${rejectedCount} fallback_fill_count=${fallbackFillCount} reason=${reason}${formatRejectionReasons(rejectionReasons)}`
   );
 }
 
@@ -449,6 +773,7 @@ function buildLoggedFinalAssemblyFallback(languageCode, context, assembly) {
     rejectedCount: assembly ? assembly.rejectedCount : 0,
     fallbackFillCount: BATCH_SIZE,
     reason: 'final_assembly_fallback',
+    rejectionReasons: assembly ? assembly.rejectionReasons : undefined,
   });
   return { phrases: buildFallbackBatch(languageCode), source: 'fallback', context };
 }
@@ -495,17 +820,37 @@ function isValidLanguageText(text, languageCode) {
   return language.scriptCheck.test(text);
 }
 
+function weekdayForDateString(date) {
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: 'UTC',
+      weekday: 'long',
+    }).format(new Date(`${date}T00:00:00Z`));
+  } catch (err) {
+    return null;
+  }
+}
+
+function addDaysToDateString(date, days) {
+  const instant = new Date(`${date}T00:00:00Z`);
+  if (Number.isNaN(instant.getTime())) {
+    return null;
+  }
+  instant.setUTCDate(instant.getUTCDate() + days);
+  return instant.toISOString().slice(0, 10);
+}
+
 // Date/day-of-week is deliberately NOT a client-sent signal (see
 // PRODUCT_REBUILD_PLAN.md server contract docs) — the server already has the
 // device's IANA timezone (e.g. "Asia/Almaty") from /register
 // (TimeZone.getDefault().getID() on the Android side), so it can compute the
 // device's local date/weekday itself rather than trusting/parsing a second
 // client-sent value that would just have to agree with the timezone anyway.
-// Returns null if there's no timezone on file yet, or it's not a timezone
-// Intl recognizes (Intl.DateTimeFormat throws RangeError on an invalid one).
-function getLocalDateContext(timezone) {
+// Returns {dateContext, unavailableReason}. dateContext is null if there's no
+// timezone on file yet, or it's not a timezone Intl recognizes.
+function resolveLocalDateContext(timezone) {
   if (!timezone) {
-    return null;
+    return { dateContext: null, unavailableReason: 'missing_timezone' };
   }
   try {
     const formatter = new Intl.DateTimeFormat('en-US', {
@@ -514,18 +859,37 @@ function getLocalDateContext(timezone) {
       month: '2-digit',
       day: '2-digit',
       weekday: 'long',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
     });
     const parts = formatter.formatToParts(new Date());
     const get = (type) => parts.find((p) => p.type === type)?.value;
     const date = `${get('year')}-${get('month')}-${get('day')}`;
     const weekday = get('weekday');
-    if (!weekday) {
-      return null;
+    const time = `${get('hour')}:${get('minute')}`;
+    const tomorrowDate = addDaysToDateString(date, 1);
+    const tomorrowWeekday = tomorrowDate ? weekdayForDateString(tomorrowDate) : null;
+    if (!weekday || !time || !tomorrowDate || !tomorrowWeekday) {
+      return { dateContext: null, unavailableReason: 'invalid_timezone' };
     }
-    return { date, weekday };
+    return {
+      dateContext: {
+        date,
+        weekday,
+        time,
+        tomorrow_date: tomorrowDate,
+        tomorrow_weekday: tomorrowWeekday,
+      },
+      unavailableReason: null,
+    };
   } catch (err) {
-    return null;
+    return { dateContext: null, unavailableReason: 'invalid_timezone' };
   }
+}
+
+function getLocalDateContext(timezone) {
+  return resolveLocalDateContext(timezone).dateContext;
 }
 
 // Formats `instant` as the calendar date (YYYY-MM-DD) it falls on within
@@ -658,7 +1022,11 @@ function computeAge(birthDate) {
 // shownCategories (optional): category names already shown to this device
 // today (see dailyContentBank.js's getShownCategories) — listed so the model
 // avoids repeating them, without re-sending the actual past phrases.
-function buildContextPrompt(device, window, signals, weather, languageCode, bankItems, shownCategories) {
+function windowContextFor(window) {
+  return WINDOW_CONTEXT[window] || { id: window };
+}
+
+function buildContextPrompt(device, window, signals, weather, languageCode, bankItems, shownCategories, dateContext) {
   const profile = {};
   if (device.name) profile.name = device.name;
   if (device.gender) profile.gender = device.gender;
@@ -685,7 +1053,7 @@ function buildContextPrompt(device, window, signals, weather, languageCode, bank
   // happened. `timezone` itself is deliberately NOT included here (unlike
   // the old "; "-joined context) -- the model only ever needs the derived
   // date/weekday/days_since_install below, not the raw IANA string.
-  const now = { language: SUPPORTED_LANGUAGES[languageCode].name, window };
+  const now = { language: SUPPORTED_LANGUAGES[languageCode].name, window: windowContextFor(window) };
   if (signals && signals.system_language && signals.system_language !== languageCode) {
     now.device_language = signals.system_language;
   }
@@ -703,10 +1071,11 @@ function buildContextPrompt(device, window, signals, weather, languageCode, bank
     now.country_source = 'device_locale';
   }
   if (device.timezone) {
-    const dateContext = getLocalDateContext(device.timezone);
     if (dateContext) {
       now.date = dateContext.date;
       now.weekday = dateContext.weekday;
+      now.time = dateContext.time;
+      now.tomorrow = [dateContext.tomorrow_date, dateContext.tomorrow_weekday];
     }
     const daysSinceInstall = getDaysSinceInstall(device.created_at, device.timezone);
     if (daysSinceInstall !== null) {
@@ -766,12 +1135,12 @@ function buildContextPrompt(device, window, signals, weather, languageCode, bank
 function buildSystemPrompt(languageCode) {
   const languageName = SUPPORTED_LANGUAGES[languageCode].name;
   return `You are a proactive personal AI companion on a phone lock screen (live wallpaper).
-The user cannot reply from the lock screen. Speak first with short one-way remarks that feel natural, personal, and context-aware -- not like a chat, trivia feed, quote app, encyclopedia, or translated joke list.
-You are not a coach, therapist, motivational speaker, mindfulness app, productivity guru, or quote generator. Do not default to advice or self-help just because profile.personal_goal exists.
+The user cannot reply from the lock screen. Speak first with short one-way remarks that feel natural, personal, and context-aware -- not like a chat, trivia feed, quote app, encyclopedia, translated joke list, coach, therapist, motivational quote app, productivity assistant, or mindfulness app.
+Most messages should sound like the AI noticed something worth saying, not like it is assigning the user an action. Prefer concrete observations, specific relevant facts, subtle personalization, natural humor, unexpected but grounded thoughts, and concise context-aware remarks.
 Create exactly ${BATCH_SIZE} distinct lock-screen messages in ${languageName}. Give each message a different style_id from the enum -- do not reuse the same style_id twice within this batch.
 
 Never ask the user a question. Never request a reply, choice, confirmation, reflection, or answer. Do not end phrases with question marks. Rewrite question-shaped ideas as statements, observations, suggestions, or short remarks.
-Avoid advice openings such as "try", "start with", "notice", "focus on", "remember", "you should", "you can start", "small steps", "today is a good day for", "you do not need", or their equivalents in ${languageName}.
+Avoid advice, commands, life coaching, generic encouragement, vague wisdom, and filler. Avoid advice openings such as "try", "start with", "notice", "focus on", "remember", "you should", "you can start", "small steps", "today is a good day for", "you do not need", or their equivalents in ${languageName}.
 
 Every message must earn its place: a concrete observation, relevant context, useful specific information, natural humor, a date/event item, or a real connection to interests/goals/signals. Nothing filler.
 Each message must be understandable by itself. Avoid vague wisdom, unfinished thoughts, meaningless metaphors, generic encouragement, and statements with no concrete referent. Bad examples: "There is probably one thing worth doing first", "Small improvements still change the shape", "The day has room for a sharper angle", "The next action does not need ceremony". If a line could fit almost anyone on almost any day unchanged, it is usually too generic.
@@ -786,9 +1155,12 @@ profile.tone must shape the writing:
 
 Use interests as things the AI knows about the person, not keywords to repeat literally. Let personal_goal noticeably steer some messages: work/business + productivity should feel different from mindfulness + wellbeing. Do not make every line coaching.
 Treat now.country as approximate country context: IP country first, device-locale fallback. Never infer the user's country from system language or timezone.
-Use device signals only when they create a natural useful observation. Do not make psychological, medical, or moral conclusions from unlocks, steps, battery, ambient light, or screen duration. High unlock count alone does not mean addiction or anxiety. Do not repeat the same signal observation more than once.
+Window ids are internal scheduling labels. Use now.window.range and now.time, not the English id alone, to infer time of day. 15:00 is afternoon, not late evening. Do not say the day is ending unless the actual local time supports it.
+Use device signals only when they create a natural useful observation. Treat battery/unlock values as generation-time snapshots that may be stale when displayed. Never expose exact battery percentages or exact unlock counts. Do not make psychological, medical, or moral conclusions from unlocks, steps, battery, ambient light, or screen duration. High unlock count alone does not mean addiction or anxiety. Do not repeat the same signal observation more than once.
+Never assume the user is in traffic, commuting, at work, at school, at home, outside, driving, eating, or about to sleep unless that state is explicitly present in context.
 
-Facts, history, holidays, and today_content are allowed, but they must not read like random encyclopedia cards. When possible, connect today_content to the user's moment or context. Do not invent factual claims that require current or precise accuracy beyond the trusted today_content supplied in context.
+Facts, history, holidays, and today_content are allowed, but they must not read like random encyclopedia cards. When possible, connect today_content to the user's moment or context. If making a factual claim about today/world/date/event, it must come from authoritative now/date context or today_content. Do not invent holidays, weekdays, events, anniversaries, statistics, "tomorrow is...", or "today is...". If today_content is absent, use timeless general observations instead of current-event/date-specific claims.
+When using weather, ground the message in an available weather field. Do not turn generic weather into lifestyle advice. If weather is absent, make no weather claims.
 Humor must work directly in ${languageName}. Avoid English wordplay or puns that become meaningless after adaptation. Prefer short situational or observational humor. Humor is optional, even for humorous tone.
 
 The ${BATCH_SIZE} messages must vary by idea and wording. Do not produce ${BATCH_SIZE} pieces of advice, ${BATCH_SIZE} facts, ${BATCH_SIZE} motivational statements, several paraphrases of the same thought, or repeated use of one interest/signal/event.
@@ -818,6 +1190,10 @@ Do not explain your reasoning or return any analysis -- only the structured resu
 async function generateBatch(device, window, signals, weather) {
   const apiKey = process.env.OPENAI_API_KEY;
   const languageCode = resolveTargetLanguageCode(signals);
+  const { dateContext, unavailableReason } = resolveLocalDateContext(device.timezone);
+  if (!dateContext && unavailableReason) {
+    console.warn(`DATE_CONTEXT_UNAVAILABLE reason=${unavailableReason}`);
+  }
 
   // Bank items are keyed by the device's own local calendar date (matches
   // device_shown_categories' "today"), not the server's UTC bank_date --
@@ -826,7 +1202,7 @@ async function generateBatch(device, window, signals, weather) {
   // missing/empty (new device, cron hasn't run yet) -- selectBankItemsForDevice
   // already returns [] in that case, so bankItems degrades to "no bank
   // content this batch" rather than failing.
-  const deviceLocalDate = getLocalCalendarDate(new Date(), device.timezone);
+  const deviceLocalDate = dateContext ? dateContext.date : null;
   const countryCode = weather && typeof weather.countryCode === 'string' && weather.countryCode
     ? weather.countryCode
     : signals && typeof signals.region === 'string'
@@ -841,7 +1217,13 @@ async function generateBatch(device, window, signals, weather) {
   );
   const shownCategories = getShownCategories(device.device_id, deviceLocalDate);
 
-  const context = buildContextPrompt(device, window, signals, weather, languageCode, bankItems, shownCategories);
+  const context = buildContextPrompt(device, window, signals, weather, languageCode, bankItems, shownCategories, dateContext);
+  const validationContext = {
+    dateContext,
+    signals,
+    weather,
+    contextFlags: { traffic: false },
+  };
 
   if (!apiKey) {
     return buildLoggedFallbackResult(languageCode, context, 'no_api_key_fallback');
@@ -909,7 +1291,7 @@ async function generateBatch(device, window, signals, weather) {
 
   let assembly;
   try {
-    assembly = assembleBatchFromGeneratedPhrases(parsed.phrases, languageCode);
+    assembly = assembleBatchFromGeneratedPhrases(parsed.phrases, languageCode, validationContext);
   } catch (err) {
     console.error(`AI_BATCH_ERROR reason=final_assembly_fallback error=${err.name || 'Error'}`);
     return buildLoggedFallbackResult(languageCode, context, 'final_assembly_fallback');
@@ -946,5 +1328,9 @@ module.exports = {
     assembleBatchFromGeneratedPhrases,
     validateFinalBatch,
     resolveTargetLanguageCode,
+    windowContextFor,
+    resolveLocalDateContext,
+    buildSystemPrompt,
+    SUPPORTED_LANGUAGES,
   },
 };

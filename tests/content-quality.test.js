@@ -30,6 +30,29 @@ function validGeneratedPhrases(count = BATCH_SIZE) {
   return Array.from({ length: count }, (_, i) => phrase(`Конкретная строка ${i + 1}`, STYLE_IDS[i % STYLE_IDS.length]));
 }
 
+// Script-appropriate filler text per SUPPORTED_LANGUAGES code, so a batch
+// tested with languageCode='fr' (etc.) doesn't get its own filler phrases
+// rejected by isValidLanguageText's script check (Cyrillic filler would fail
+// a Latin/Han/Hiragana/Hangul scriptCheck). Only used to pad a batch to 11
+// clean phrases around the one phrase under test -- not meant to look
+// natural, just to pass validation and stay unique.
+const LANGUAGE_FILLER_TEXT = {
+  ru: 'Конкретная строка',
+  en: 'Concrete line',
+  fr: 'Phrase concrète',
+  es: 'Frase concreta',
+  pt: 'Frase concreta',
+  de: 'Konkreter Satz',
+  zh: '具体的句子',
+  ja: '具体的な文',
+  ko: '구체적인 문장',
+  it: 'Frase concreta',
+};
+function validGeneratedPhrasesForLanguage(languageCode, count = BATCH_SIZE - 1) {
+  const base = LANGUAGE_FILLER_TEXT[languageCode];
+  return Array.from({ length: count }, (_, i) => phrase(`${base} ${i + 1}`, STYLE_IDS[i % STYLE_IDS.length]));
+}
+
 function normalizedTexts(items) {
   return items.map((item) => item.text.trim().replace(/\s+/g, ' ').toLowerCase());
 }
@@ -47,20 +70,25 @@ function assertFinalBatch(items) {
 function captureConsole(callback) {
   const originalLog = console.log;
   const originalError = console.error;
+  const originalWarn = console.warn;
   const logs = [];
   const errors = [];
+  const warnings = [];
   console.log = (message) => logs.push(String(message));
   console.error = (message) => errors.push(String(message));
+  console.warn = (message) => warnings.push(String(message));
   return Promise.resolve()
     .then(callback)
     .then((result) => {
       console.log = originalLog;
       console.error = originalError;
-      return { result, logs, errors };
+      console.warn = originalWarn;
+      return { result, logs, errors, warnings };
     })
     .catch((err) => {
       console.log = originalLog;
       console.error = originalError;
+      console.warn = originalWarn;
       throw err;
     });
 }
@@ -152,6 +180,234 @@ async function main() {
   assertFinalBatch(invalidStyles.phrases);
   assert.strictEqual(invalidStyles.generatedCount, BATCH_SIZE);
   assert(invalidStyles.phrases.some((p) => p.text === 'Конкретная строка 1'), 'good text with invalid style_id must be preserved');
+
+  // --- Regression tests for a real production batch (2026-09-19) where the
+  // model wrote "Завтра пятница" on an actual Saturday (real tomorrow:
+  // Sunday), echoed exact battery/unlock snapshots, invented "в пробке" with
+  // no traffic signal, and used directive/coaching phrasing despite the
+  // prompt already forbidding it. See task history for the full production
+  // AI_BATCH_RESULT and example phrases this exercises.
+
+  const saturdayDateContext = {
+    date: '2026-09-19',
+    weekday: 'Saturday',
+    time: '15:30',
+    tomorrow_date: '2026-09-20',
+    tomorrow_weekday: 'Sunday',
+  };
+
+  // DATE / WEEKDAY
+  const wrongTomorrowWeekday = contentTest.assembleBatchFromGeneratedPhrases(
+    [...validTwelve.slice(0, 11), phrase('Завтра пятница, отличный повод запланировать выходные.')],
+    'ru',
+    { dateContext: saturdayDateContext }
+  );
+  assertFinalBatch(wrongTomorrowWeekday.phrases);
+  assert.strictEqual(wrongTomorrowWeekday.rejectedCount, 1);
+  assert.strictEqual(wrongTomorrowWeekday.rejectionReasons.date_claim, 1, 'wrong tomorrow weekday must be rejected as date_claim');
+
+  const correctTomorrowWeekday = contentTest.assembleBatchFromGeneratedPhrases(
+    [...validTwelve.slice(0, 11), phrase('Завтра воскресенье, можно не спешить с утра.')],
+    'ru',
+    { dateContext: saturdayDateContext }
+  );
+  assertFinalBatch(correctTomorrowWeekday.phrases);
+  assert.strictEqual(correctTomorrowWeekday.rejectedCount, 0, 'correct tomorrow weekday claim must be allowed');
+  // Explicitly confirm NO guard fired for this phrase, not just that the
+  // date guard let it through -- "не спешить" isn't a match for any
+  // COACHING_PATTERNS.ru entry (не забудь/тебе стоит/пора X/попробуй(-ть)/
+  // сделай/дай себе/запланируй/экспериментируй), but this asserts it rather
+  // than assuming it, so this stays a pure date-correctness check and isn't
+  // accidentally piggybacking on coaching semantics.
+  assert.deepStrictEqual(correctTomorrowWeekday.rejectionReasons, {}, 'correct weekday claim must not trigger the coaching guard or any other guard');
+  assert(correctTomorrowWeekday.phrases.some((p) => p.text.includes('воскресенье')), 'correct weekday claim must survive into the final batch');
+
+  const noDateContextWeekdayClaim = contentTest.assembleBatchFromGeneratedPhrases(
+    [...validTwelve.slice(0, 11), phrase('Завтра пятница, отличный повод запланировать выходные.')],
+    'ru',
+    { dateContext: null }
+  );
+  assertFinalBatch(noDateContextWeekdayClaim.phrases);
+  assert.strictEqual(noDateContextWeekdayClaim.rejectionReasons.date_claim, 1, 'relative weekday claim without authoritative date context must be rejected');
+
+  // DATE / WEEKDAY -- all 10 SUPPORTED_LANGUAGES, not just ru. Each phrase is
+  // deliberately short/neutral (no imperative verbs) so a false reject here
+  // can only be the date guard, not coaching/traffic/telemetry leaking in
+  // through DEFAULT_LANGUAGE_CODE's EN fallback patterns.
+  const weekdayGuardLanguageCases = {
+    ru: { wrong: 'Завтра пятница.', correct: 'Завтра воскресенье.' },
+    en: { wrong: 'Tomorrow is Friday.', correct: 'Tomorrow is Sunday.' },
+    fr: { wrong: "Demain c'est vendredi.", correct: "Demain c'est dimanche." },
+    es: { wrong: 'Mañana es viernes.', correct: 'Mañana es domingo.' },
+    pt: { wrong: 'Amanhã é sexta-feira.', correct: 'Amanhã é domingo.' },
+    de: { wrong: 'Morgen ist Freitag.', correct: 'Morgen ist Sonntag.' },
+    zh: { wrong: '明天是星期五。', correct: '明天是星期日。' },
+    ja: { wrong: '明日は金曜日。', correct: '明日は日曜日。' },
+    ko: { wrong: '내일은 금요일이다.', correct: '내일은 일요일이다.' },
+    it: { wrong: 'Domani è venerdì.', correct: 'Domani è domenica.' },
+  };
+  assert.deepStrictEqual(
+    Object.keys(weekdayGuardLanguageCases).sort(),
+    Object.keys(contentTest.SUPPORTED_LANGUAGES).sort(),
+    'weekday guard language test coverage must match SUPPORTED_LANGUAGES exactly'
+  );
+  for (const [langCode, cases] of Object.entries(weekdayGuardLanguageCases)) {
+    const filler = validGeneratedPhrasesForLanguage(langCode, 11);
+
+    const wrongResult = contentTest.assembleBatchFromGeneratedPhrases(
+      [...filler, phrase(cases.wrong)],
+      langCode,
+      { dateContext: saturdayDateContext }
+    );
+    assertFinalBatch(wrongResult.phrases);
+    assert.strictEqual(wrongResult.rejectionReasons.date_claim, 1, `[${langCode}] wrong tomorrow weekday must be rejected as date_claim`);
+
+    const correctResult = contentTest.assembleBatchFromGeneratedPhrases(
+      [...filler, phrase(cases.correct)],
+      langCode,
+      { dateContext: saturdayDateContext }
+    );
+    assertFinalBatch(correctResult.phrases);
+    assert.deepStrictEqual(correctResult.rejectionReasons, {}, `[${langCode}] correct tomorrow weekday claim must not be rejected by any guard`);
+    assert(correctResult.phrases.some((p) => p.text === cases.correct), `[${langCode}] correct weekday claim must survive into the final batch`);
+  }
+
+  // WINDOW / TIME OF DAY
+  const eveningWindow = contentTest.windowContextFor('evening');
+  assert.strictEqual(eveningWindow.id, 'evening');
+  assert.strictEqual(eveningWindow.range, '15:00-20:00', 'evening window must expose its actual clock range, not just the id');
+  const systemPromptText = contentTest.buildSystemPrompt('ru');
+  assert(/now\.window\.range/.test(systemPromptText), 'prompt must tell the model to use now.window.range, not the window id alone');
+  assert(/15:00 is afternoon/i.test(systemPromptText), 'prompt must explicitly say 15:00 is not late evening');
+
+  // BATTERY
+  const batteryEcho = contentTest.assembleBatchFromGeneratedPhrases(
+    [...validTwelve.slice(0, 11), phrase('75% заряда. Умная батарея всегда готова к следующему вызову.')],
+    'ru',
+    { signals: { battery_level: 75 } }
+  );
+  assertFinalBatch(batteryEcho.phrases);
+  assert.strictEqual(batteryEcho.rejectionReasons.telemetry_echo, 1, 'exact battery percentage echo must be rejected');
+
+  const irrelevantNumberNotBattery = contentTest.assembleBatchFromGeneratedPhrases(
+    [...validTwelve.slice(0, 11), phrase('До ближайшего города 75 километров по трассе.')],
+    'ru',
+    { signals: { battery_level: 75 } }
+  );
+  assertFinalBatch(irrelevantNumberNotBattery.phrases);
+  assert.strictEqual(irrelevantNumberNotBattery.rejectedCount, 0, 'an unrelated number must not trip the telemetry guard just because it matches battery_level');
+
+  // UNLOCKS
+  const unlockEcho = contentTest.assembleBatchFromGeneratedPhrases(
+    [...validTwelve.slice(0, 11), phrase('Сегодня получилось 65 разблокировок подряд.')],
+    'ru',
+    { signals: { unlocks_since_last_batch: 65 } }
+  );
+  assertFinalBatch(unlockEcho.phrases);
+  assert.strictEqual(unlockEcho.rejectionReasons.telemetry_echo, 1, 'exact unlock count echo must be rejected');
+
+  // TRAFFIC / UNSUPPORTED SITUATIONAL CONTEXT
+  const trafficClaim = contentTest.assembleBatchFromGeneratedPhrases(
+    [...validTwelve.slice(0, 11), phrase('Скучное время в пробке может превратиться в отличное время с подкастом.')],
+    'ru',
+    {}
+  );
+  assertFinalBatch(trafficClaim.phrases);
+  assert.strictEqual(trafficClaim.rejectionReasons.unsupported_context, 1, 'unsupported traffic claim must be rejected without a traffic signal');
+
+  const trafficAllowedWithContext = contentTest.assembleBatchFromGeneratedPhrases(
+    [...validTwelve.slice(0, 11), phrase('Скучное время в пробке может превратиться в отличное время с подкастом.')],
+    'ru',
+    { contextFlags: { traffic: true } }
+  );
+  assertFinalBatch(trafficAllowedWithContext.phrases);
+  assert.strictEqual(trafficAllowedWithContext.rejectedCount, 0, 'traffic claim must be allowed once a real traffic signal exists');
+
+  // COACHING / DIRECTIVE PHRASING
+  const coachingProductionFailures = [
+    'Не забудь дать себе немного времени на паузу.',
+    'Пора завершать дела.',
+    'Попробуй что-то новое.',
+    'Экспериментируй на кухне.',
+  ];
+  for (const bad of coachingProductionFailures) {
+    const result = contentTest.assembleBatchFromGeneratedPhrases(
+      [...validTwelve.slice(0, 11), phrase(bad)],
+      'ru',
+      {}
+    );
+    assertFinalBatch(result.phrases);
+    assert.strictEqual(result.rejectionReasons.coaching, 1, `coaching phrase must be rejected: ${bad}`);
+  }
+
+  const neutralObservationsMustSurvive = [
+    'В Алматы сегодня около 12°C.',
+    'После дождя городские огни выглядят резче.',
+  ];
+  for (const good of neutralObservationsMustSurvive) {
+    const result = contentTest.assembleBatchFromGeneratedPhrases(
+      [...validTwelve.slice(0, 11), phrase(good)],
+      'ru',
+      {}
+    );
+    assertFinalBatch(result.phrases);
+    assert.strictEqual(result.rejectedCount, 0, `neutral observation must not be rejected: ${good}`);
+  }
+
+  // ASSEMBLY: several different rejection reasons in one batch must each be
+  // caught independently, with exactly the clean phrases preserved and the
+  // rest fallback-filled to exactly BATCH_SIZE (partial validation, not
+  // all-or-nothing).
+  const mixedBatch = [
+    ...validTwelve.slice(0, 8),
+    phrase('Завтра пятница, отличный повод запланировать выходные.'),
+    phrase('75% заряда. Умная батарея всегда готова к следующему вызову.'),
+    phrase('Скучное время в пробке может превратиться в отличное время с подкастом.'),
+    phrase('Попробуй что-то новое.'),
+  ];
+  const mixedResult = contentTest.assembleBatchFromGeneratedPhrases(
+    mixedBatch,
+    'ru',
+    { dateContext: saturdayDateContext, signals: { battery_level: 75 } }
+  );
+  assertFinalBatch(mixedResult.phrases);
+  assert.strictEqual(mixedResult.generatedCount, 8, 'only the 8 clean generated phrases should survive');
+  assert.strictEqual(mixedResult.rejectedCount, 4);
+  assert.strictEqual(mixedResult.fallbackFillCount, 4);
+  assert.strictEqual(mixedResult.reason, 'partial_validation_fill');
+  assert.deepStrictEqual(
+    mixedResult.rejectionReasons,
+    { date_claim: 1, telemetry_echo: 1, unsupported_context: 1, coaching: 1 },
+    'each production failure category must be attributed to its own reason, independently'
+  );
+  for (let i = 1; i <= 8; i++) {
+    assert(mixedResult.phrases.some((p) => p.text === `Конкретная строка ${i}`), `valid generated phrase ${i} must be preserved`);
+  }
+
+  // DATE_CONTEXT_UNAVAILABLE: privacy-safe diagnostic (no device id/timezone
+  // value in the log line) when the device has no usable timezone yet.
+  assert.deepStrictEqual(contentTest.resolveLocalDateContext(undefined), { dateContext: null, unavailableReason: 'missing_timezone' });
+  assert.deepStrictEqual(contentTest.resolveLocalDateContext('Not/AZone'), { dateContext: null, unavailableReason: 'invalid_timezone' });
+  const validTzResult = contentTest.resolveLocalDateContext('Asia/Almaty');
+  assert(validTzResult.dateContext, 'a valid timezone must produce a dateContext');
+  assert(validTzResult.dateContext.tomorrow_weekday, 'dateContext must include tomorrow_weekday');
+  assert.strictEqual(validTzResult.unavailableReason, null);
+
+  const noTimezoneLogs = await captureConsole(() => generateBatch(
+    { device_id: 'device-no-timezone', created_at: '2026-09-17 00:00:00' },
+    'day',
+    { system_language: 'ru' },
+    null
+  ));
+  assertFinalBatch(noTimezoneLogs.result.phrases);
+  assert(
+    noTimezoneLogs.warnings.some((line) => line === 'DATE_CONTEXT_UNAVAILABLE reason=missing_timezone'),
+    'missing timezone must log a privacy-safe diagnostic reason'
+  );
+  assert(
+    !noTimezoneLogs.warnings.some((line) => /device-no-timezone/.test(line)),
+    'diagnostic log must not include the device id'
+  );
 
   assert(!BANK_CATEGORIES.includes('psychology'), 'daily bank must not target psychology');
   assert(!BANK_CATEGORIES.includes('advice'), 'daily bank must not target advice');
