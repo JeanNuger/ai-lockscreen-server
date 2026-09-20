@@ -98,6 +98,24 @@ function hasBlockedPhrase(text) {
   return STOP_PHRASES.some((phrase) => normalized.includes(phrase));
 }
 
+// Catches imperative/command-verb openers (everyday_lifehack's most common
+// leak into commanding tone) — e.g. "Используй общественный транспорт...",
+// "Проверяй зарядку..." — rather than the short-fact/observation format the
+// system prompt requires for that slot type.
+//
+// NOT a plain \b word-boundary check: JS regex \b is defined relative to the
+// ASCII \w class, which does not include Cyrillic letters, so a trailing \b
+// right after a Cyrillic word never actually matches (verified directly --
+// the literal /^(...)\b/i form silently matched nothing on any Cyrillic
+// sample). The (?![а-яёa-z]) lookahead requires the match not be immediately
+// followed by another letter (so "используй" matches but a longer word that
+// merely starts with the same stem does not), without relying on \b.
+const IMPERATIVE_OPENER_PATTERN = /^(используй|выбери|держи|создай|читай|проверяй|наблюдай|соблюдай|делай)(?![а-яёa-z])/i;
+
+function hasImperativeCommand(text) {
+  return IMPERATIVE_OPENER_PATTERN.test(String(text || '').trim());
+}
+
 function validateLockScreenText(text, options = {}) {
   if (typeof text !== 'string') {
     return { ok: false, reason: 'schema' };
@@ -118,6 +136,9 @@ function validateLockScreenText(text, options = {}) {
   if (hasBlockedPhrase(trimmed)) {
     return { ok: false, reason: 'blocked_phrase' };
   }
+  if (hasImperativeCommand(trimmed)) {
+    return { ok: false, reason: 'imperative_command' };
+  }
   return { ok: true, reason: null };
 }
 
@@ -128,5 +149,6 @@ module.exports = {
   normalizeText,
   hasQuestionMark,
   hasBlockedPhrase,
+  hasImperativeCommand,
   validateLockScreenText,
 };
