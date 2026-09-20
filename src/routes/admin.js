@@ -5,6 +5,7 @@ const rateLimit = require('express-rate-limit');
 const db = require('../db');
 const { requireAdminAuth } = require('../adminAuth');
 const { STYLE_IDS } = require('../constants');
+const { getBankDateString } = require('../dailyContentBank');
 
 const router = express.Router();
 
@@ -110,6 +111,56 @@ router.get('/api/devices', requireAdminAuth, (req, res) => {
   res.status(200).json({ devices: parsed });
 });
 
+// --- Daily Bank monitoring (read-only) ---
+// Render's Free plan has no Shell access, so this is the only way to check
+// whether today's shared daily_content_bank actually exists without either
+// triggering a real generation call (which costs a shared OpenAI web-search
+// call) or getting direct DB access. Strictly SELECT-only: never generates a
+// bank, never touches OpenAI, never writes to the database, never exposes
+// INTERNAL_CRON_SECRET or any other secret -- only bank_date/category/
+// content_text, the same non-secret fields already served to every device
+// via /api/v1/batch.
+
+const latestBankDateStatement = db.prepare(`
+  SELECT bank_date FROM daily_content_bank ORDER BY bank_date DESC LIMIT 1
+`);
+const bankRowsForDateStatement = db.prepare(`
+  SELECT category, content_text FROM daily_content_bank WHERE bank_date = ? ORDER BY id ASC
+`);
+
+// Pure response-shaping, kept separate from the DB reads/route wiring so it
+// can be unit-tested directly (see tests/admin-daily-bank-status.test.js)
+// without needing an HTTP/session test harness -- same split every other
+// module in this codebase already uses (DB-touching code stays thin, the
+// actual logic is a plain function exposed via _test).
+function buildDailyBankStatusResponse(latestBankDate, expectedBankDate, rows) {
+  const categories = {};
+  for (const row of rows) {
+    categories[row.category] = (categories[row.category] || 0) + 1;
+  }
+  return {
+    latest_bank_date: latestBankDate,
+    expected_bank_date: expectedBankDate,
+    is_current: latestBankDate === expectedBankDate,
+    total_items: rows.length,
+    categories,
+    sample_items: rows.slice(0, 5).map((row) => ({ category: row.category, content_text: row.content_text })),
+  };
+}
+
+router.get('/api/daily-bank-status', requireAdminAuth, (req, res) => {
+  const latestRow = latestBankDateStatement.get();
+  const latestBankDate = latestRow ? latestRow.bank_date : null;
+  // Same Asia/Almaty product-day date logic Daily Bank generation itself
+  // uses (see dailyContentBank.js's getBankDateString) -- reused directly
+  // rather than reimplemented, so this can never silently drift out of sync
+  // with what generateDailyBank() actually considers "today".
+  const expectedBankDate = getBankDateString();
+  const rows = latestBankDate ? bankRowsForDateStatement.all(latestBankDate) : [];
+
+  res.status(200).json(buildDailyBankStatusResponse(latestBankDate, expectedBankDate, rows));
+});
+
 // --- Admin messages (send to one device or broadcast to all) ---
 
 const insertMessageStatement = db.prepare(`
@@ -152,5 +203,11 @@ router.post('/api/messages/:id/deactivate', requireAdminAuth, (req, res) => {
   deactivateMessageStatement.run(req.params.id);
   res.status(200).json({ ok: true });
 });
+
+// router is an Express Router instance (a function), so it can still carry a
+// _test property the same way every other module here exposes pure logic
+// for direct unit testing -- app.use('/admin', require('./routes/admin'))
+// is unaffected, this is purely additive.
+router._test = { buildDailyBankStatusResponse };
 
 module.exports = router;
