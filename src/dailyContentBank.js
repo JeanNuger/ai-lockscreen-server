@@ -60,6 +60,28 @@ const insertBankItemStatement = db.prepare(`
   VALUES (?, ?, ?, ?)
 `);
 
+const deleteBankItemsForDateStatement = db.prepare(`
+  DELETE FROM daily_content_bank WHERE bank_date = ?
+`);
+
+// Atomically replaces every daily_content_bank row for bankDate with a
+// freshly generated, already-parsed/validated set. Only ever called once a
+// complete valid `rows` array exists -- generateDailyBank() never calls this
+// until after a successful OpenAI response has been parsed, so a failed
+// request, a malformed response, or a parse/validation failure never reaches
+// here and the existing bank for that date is left completely untouched.
+// The delete+insert pair runs inside one better-sqlite3 transaction (a
+// single SQLite transaction under the hood): if anything inside throws,
+// SQLite rolls back the whole thing, so a same-day rerun either fully
+// replaces today's bank or leaves the previous one intact -- never a partial
+// state, and never an append/duplicate (see HANDOFF_2 idempotency fix).
+const replaceBankItemsForDate = db.transaction((bankDate, rows) => {
+  deleteBankItemsForDateStatement.run(bankDate);
+  for (const row of rows) {
+    insertBankItemStatement.run(bankDate, row.category, row.content_text, JSON.stringify(row.tags));
+  }
+});
+
 const selectBankRowsForDateStatement = db.prepare(`
   SELECT id, category, content_text, tags FROM daily_content_bank WHERE bank_date = ?
 `);
@@ -167,12 +189,12 @@ async function generateDailyBank() {
       return { savedCount: 0, error: 'model returned zero usable bank items' };
     }
 
-    const insertMany = db.transaction((rows) => {
-      for (const row of rows) {
-        insertBankItemStatement.run(bankDate, row.category, row.content_text, JSON.stringify(row.tags));
-      }
-    });
-    insertMany(items);
+    // Replace, not append -- a same-day rerun (manual or accidental) must
+    // regenerate and replace today's bank, not duplicate it. Nothing before
+    // this line has touched the DB, so any failure above (network error,
+    // malformed JSON, zero valid items) already returned without altering
+    // the existing bank.
+    replaceBankItemsForDate(bankDate, items);
 
     return { savedCount: items.length, error: null };
   } catch (err) {
@@ -367,5 +389,6 @@ module.exports = {
     normalizeCountryCode,
     getEvergreenBackfillRows,
     EVERGREEN_CONTENT_BANK,
+    replaceBankItemsForDate,
   },
 };
