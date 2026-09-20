@@ -1,18 +1,41 @@
 const db = require('./db');
+const EVERGREEN_CONTENT_BANK = require('./evergreenContentBank');
 
 // Fixed category set for daily_content_bank rows. Step 2 (personalization,
 // not this task) will filter/select by these when building a device's batch,
 // so the set is small and stable rather than whatever labels the model feels
-// like inventing per call.
+// like inventing per call. As of Phase 5, the category IS the semantic
+// classifier SlotPlanner maps directly off of (see mapBankItemType) -- the
+// model, not server-side keyword/regex inference, owns this classification.
 const BANK_CATEGORIES = [
   'holiday',
-  'fact',
-  'quote',
   'on_this_day',
   'humor',
   'idiom',
   'statistic',
+  'quote',
+  'science',
+  'technology',
+  'economics',
+  'fact',
 ];
+
+// Bank categories that are NOT tied to a specific calendar date, so a static
+// evergreen catalog item is an acceptable substitute when today's live bank
+// has none. holiday/on_this_day are deliberately excluded -- they require
+// date-verified web-search accuracy (see buildBankPrompt) that no static
+// catalog entry could honestly claim; if today's bank lacks them, the
+// product prefers omitting them over risking a stale/wrong date claim.
+const EVERGREEN_COMPATIBLE_CATEGORIES = new Set([
+  'humor',
+  'idiom',
+  'statistic',
+  'quote',
+  'science',
+  'technology',
+  'economics',
+  'fact',
+]);
 
 // How many bank items to ask the model for. Not a hard contract with the
 // model -- generateDailyBank() below accepts whatever valid array it gets
@@ -58,7 +81,8 @@ function buildBankPrompt(bankDate) {
   return `Search the web for what's notable about ${bankDate} and put together a varied global "content bank" for a phone lock screen app.
 Return STRICTLY a JSON array (no wrapper object, no explanations) of ${TARGET_BANK_SIZE} objects.
 Each object: {"category": one of [${BANK_CATEGORIES.join(', ')}], "content_text": "a short, self-contained piece of content in English, up to 200 characters", "tags": ["lowercase", "keyword", "tags"]}.
-Cover a genuine mix across ALL the listed categories, not just one or two -- include: real holidays/observances for ${bankDate}, "on this day in history" facts, notable quotes, interesting facts/statistics, useful timely information, and light humor only if it localizes cleanly.
+Cover a genuine mix across ALL the listed categories, not just one or two -- include: real holidays/observances for ${bankDate}, "on this day in history" facts, notable quotes, interesting statistics, an interesting idiom or expression with its meaning, and light humor only if it localizes cleanly.
+Choose "category" precisely -- it is used directly to decide what this item is, not just a label: "science" is for a science fact (physics, biology, space, chemistry, etc.); "technology" is for a technology/computing fact; "economics" is for a money/economics fact; "fact" is only for a genuinely miscellaneous interesting fact that does not belong in science, technology, or economics. Do not put a science/technology/economics fact under "fact".
 Keep the bank international and reusable for users in many countries: do not make it US-centric or Russia-centric.
 Prioritize accuracy from web search for date-specific items (holiday, on_this_day) -- they must match ${bankDate}; do not invent fake historical events or holidays.
 Keep every content_text glanceable and self-contained (no "as mentioned above", no follow-up questions).
@@ -145,20 +169,15 @@ async function generateDailyBank() {
   }
 }
 
-// Maps a device's stored gender (Android's stable identifiers -- see
-// devices.gender / Const.GENDER_MALE/FEMALE/NON_BINARY on the client side)
-// to the advice tag selectBankItemsForDevice should prefer. Returns null for
-// non_binary, unset, or any unrecognized value -- those get no preference,
-// same as before this tag existed.
-function genderAdviceTag(deviceGender) {
-  if (deviceGender === 'female') return 'for_women';
-  if (deviceGender === 'male') return 'for_men';
-  return null;
-}
-
+// Accepts both a JSON-encoded tags string (live daily_content_bank rows, as
+// stored in SQLite) and a plain array (the static evergreen catalog, which
+// is authored as ordinary JS, not round-tripped through SQLite/JSON).
 function parseTags(rawTags) {
   if (!rawTags) {
     return [];
+  }
+  if (Array.isArray(rawTags)) {
+    return rawTags;
   }
   try {
     const parsed = JSON.parse(rawTags);
@@ -194,6 +213,21 @@ function isBankItemAllowedForCountry(row, countryCode) {
   return targetCountry ? itemCountries.has(targetCountry) : false;
 }
 
+// Static fallback for evergreen-compatible categories that have zero live
+// rows in today's bank -- covers both a genuinely missing category and a
+// total generateDailyBank() failure (every category ends up "missing" that
+// day) without any additional OpenAI call. Never touches holiday/on_this_day
+// (excluded from EVERGREEN_COMPATIBLE_CATEGORIES) and never returns an item
+// for a category that already has live content today, so live rows always
+// take priority. Shares isBankItemAllowedForCountry with live rows so the
+// same country-tag rules apply to evergreen items.
+function getEvergreenBackfillRows(liveCategoriesToday, countryCode) {
+  return EVERGREEN_CONTENT_BANK
+    .filter((item) => EVERGREEN_COMPATIBLE_CATEGORIES.has(item.category))
+    .filter((item) => !liveCategoriesToday.has(item.category))
+    .filter((item) => isBankItemAllowedForCountry(item, countryCode));
+}
+
 // Random-but-varied-by-category selection for one device's batch context.
 // bankDate is the shared Asia/Almaty product-day date the bank was generated under
 // (see getBankDateString above); deviceLocalDate is that same device's own
@@ -201,10 +235,11 @@ function isBankItemAllowedForCountry(row, countryCode) {
 // for other purposes -- see contentGenerator.js's getLocalCalendarDate) and
 // is what device_shown_categories is keyed by, since "today" for repeat-
 // avoidance purposes should match the device's own day boundary, not the
-// server's UTC one. deviceGender (optional) is the device's raw stored
-// gender value ('male'/'female'/'non_binary'/null) -- used only as a soft
-// preference for which 'advice' row gets picked (see genderAdviceTag), never
-// a hard filter.
+// server's UTC one. deviceGender is currently unused (kept only for call-site
+// signature stability -- see HANDOFF_2 Phase 5 audit: the gender-tagged
+// 'advice' preference this parameter used to drive was removed along with
+// the 'advice' category itself; gender personalization now lives entirely in
+// the separate gender_context profile signal, not in bank selection).
 //
 // Picks at most one item per category so the count items offered are spread
 // across topics rather than, say, 4 quotes and 1 fact. If every category in
@@ -213,6 +248,15 @@ function isBankItemAllowedForCountry(row, countryCode) {
 // -- an empty selection would silently strip bank content from every
 // remaining batch that day once categories cycle out, which is worse than
 // occasionally repeating a category within the same day.
+//
+// Live rows always take priority: the evergreen catalog only ever backfills
+// an evergreen-compatible category (see EVERGREEN_COMPATIBLE_CATEGORIES)
+// that has ZERO live rows for bankDate -- it never supplements or replaces a
+// category that already has live content, and it never applies to
+// holiday/on_this_day. This is also what makes a total generateDailyBank()
+// failure degrade gracefully: every evergreen-compatible category is
+// "missing" that day, so evergreen naturally backstops all of them, while
+// holiday/on_this_day are simply omitted rather than guessed at.
 function selectBankItemsForDevice(
   deviceId,
   bankDate,
@@ -229,9 +273,12 @@ function selectBankItemsForDevice(
     return [];
   }
 
-  const bankRows = selectBankRowsForDateStatement
+  const liveBankRows = selectBankRowsForDateStatement
     .all(bankDate)
     .filter((row) => isBankItemAllowedForCountry(row, countryCode));
+  const liveCategoriesToday = new Set(liveBankRows.map((row) => row.category));
+  const backfillRows = getEvergreenBackfillRows(liveCategoriesToday, countryCode);
+  const bankRows = liveBankRows.concat(backfillRows);
   if (bankRows.length === 0) {
     return [];
   }
@@ -250,20 +297,13 @@ function selectBankItemsForDevice(
     byCategory.get(row.category).push(row);
   }
 
-  const preferredAdviceTag = genderAdviceTag(deviceGender);
   const shuffledCategories = [...byCategory.keys()].sort(() => Math.random() - 0.5);
   const selected = [];
   for (const category of shuffledCategories) {
     if (selected.length >= count) {
       break;
     }
-    let rowsInCategory = byCategory.get(category);
-    if (category === 'advice' && preferredAdviceTag) {
-      const matchingGenderTag = rowsInCategory.filter((row) => parseTags(row.tags).includes(preferredAdviceTag));
-      if (matchingGenderTag.length > 0) {
-        rowsInCategory = matchingGenderTag;
-      }
-    }
+    const rowsInCategory = byCategory.get(category);
     const pick = rowsInCategory[Math.floor(Math.random() * rowsInCategory.length)];
     selected.push({ id: pick.id, category: pick.category, content_text: pick.content_text });
   }
@@ -308,9 +348,12 @@ module.exports = {
   recordShownCategories,
   getBankDateString,
   BANK_CATEGORIES,
+  EVERGREEN_COMPATIBLE_CATEGORIES,
   _test: {
     countryTagsFromBankItem,
     isBankItemAllowedForCountry,
     normalizeCountryCode,
+    getEvergreenBackfillRows,
+    EVERGREEN_CONTENT_BANK,
   },
 };

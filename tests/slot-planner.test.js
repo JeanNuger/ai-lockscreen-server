@@ -74,7 +74,7 @@ async function main() {
     weather: { temperatureC: 18, city: 'Almaty', description: 'rain' },
     bankItems: [
       { category: 'on_this_day', content_text: 'In 1519, Magellan set sail across the Atlantic.', tags: ['global', 'history'] },
-      { category: 'fact', content_text: 'Octopuses have three hearts.', tags: ['science'] },
+      { category: 'science', content_text: 'Octopuses have three hearts.', tags: ['global'] },
     ],
   };
 
@@ -232,7 +232,7 @@ async function main() {
 
   const candidates = collectCandidates(baseInput);
   assert(candidates.some((candidate) => candidate.source === 'daily_bank' && candidate.type === 'history_today'), 'on_this_day bank item must become history_today candidate');
-  assert(candidates.some((candidate) => candidate.source === 'daily_bank' && candidate.type === 'science'), 'science-tagged bank fact must become science candidate');
+  assert(candidates.some((candidate) => candidate.source === 'daily_bank' && candidate.type === 'science'), 'a science-category bank item must become a science candidate (Phase 5: direct mapping, not keyword inference)');
 
   const noPhoneTrendCandidates = collectCandidates({
     ...baseInput,

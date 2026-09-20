@@ -264,12 +264,14 @@ function mapBankItemType(item) {
   if (item.category === 'idiom') return 'word_learning';
   if (item.category === 'statistic') return 'unusual_fact';
   if (item.category === 'quote') return 'culture';
-
-  const text = `${item.content_text || ''} ${(item.tags || []).join(' ')}`.toLowerCase();
-  if (/\bscience|space|biology|physics|chemistry|astronomy\b/.test(text)) return 'science';
-  if (/\btech|technology|ai|software|computer\b/.test(text)) return 'technology';
-  if (/\bmoney|economy|economic|market|inflation\b/.test(text)) return 'money_economics';
-  if (/\bculture|music|film|book|art\b/.test(text)) return 'culture';
+  // Direct, deterministic mapping as of Phase 5 -- the Daily Bank source
+  // (generateDailyBank's prompt, see dailyContentBank.js) now owns choosing
+  // the precise category itself; SlotPlanner only validates/maps it, no
+  // longer infers it from content_text/tags keywords.
+  if (item.category === 'science') return 'science';
+  if (item.category === 'technology') return 'technology';
+  if (item.category === 'economics') return 'money_economics';
+  if (item.category === 'fact') return 'unusual_fact';
   return 'unusual_fact';
 }
 

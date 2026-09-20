@@ -444,10 +444,16 @@ async function main() {
     INSERT INTO daily_content_bank (bank_date, category, content_text, tags)
     VALUES (?, ?, ?, ?)
   `).run(bankDate, 'fact', 'A global astronomy item for today.', JSON.stringify(['global', 'science']));
+  // count=5 with Phase 5 evergreen backfill active means the exact item set
+  // is no longer just the two rows inserted above (missing evergreen-
+  // compatible categories get backfilled with a non-seeded random pick, see
+  // dailyContentBank.js) -- the one thing this test can deterministically
+  // guarantee is that the Russia-tagged on_this_day item never leaks into a
+  // KZ selection, regardless of which evergreen categories happen to fill
+  // the rest of the count.
   const selectedForKz = selectBankItemsForDevice('device-kz', bankDate, '2026-09-18', null, 'KZ', 5);
-  assert.deepStrictEqual(
-    selectedForKz.map((item) => item.content_text),
-    ['A global astronomy item for today.'],
+  assert(
+    !selectedForKz.some((item) => item.content_text === 'Russia marks a country-specific event today.'),
     'country=KZ must not select Russia-specific bank item'
   );
 
