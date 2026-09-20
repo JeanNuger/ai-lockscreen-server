@@ -512,7 +512,15 @@ async function main() {
     morningSlots
   );
   assert.strictEqual(morningRejected.phrases[0].slot_id, morningSlots[0].slot_id, 'rejected morning greeting fallback must remain first');
-  assert(/^Good morning\./.test(morningRejected.phrases[0].text), 'morning greeting fallback must be greeting-specific');
+  // fallbackTextForSlot now rotates through 5 warm variants by calendar day
+  // (see ANCHOR_FALLBACK_TEXT/currentFallbackSetIndex in contentGenerator.js)
+  // rather than always returning the same single string, so this checks
+  // "is it today's actual anchor variant", not a fixed substring.
+  assert.strictEqual(
+    morningRejected.phrases[0].text,
+    contentTest.fallbackTextForSlot({ type: 'greeting_name' }, 'en'),
+    'morning greeting fallback must be greeting-specific'
+  );
 
   const nightSlots = planSlots({ ...baseInput, window: 'night' }, { seed: 'night-reject-seed' }).slots;
   const nightGenerated = validSlotPhrases(nightSlots);
@@ -527,7 +535,11 @@ async function main() {
     nightSlots[nightSlots.length - 1].slot_id,
     'rejected night goodnight fallback must remain last'
   );
-  assert(/phone needs rest/i.test(nightRejected.phrases[nightRejected.phrases.length - 1].text), 'night fallback must be rest-specific');
+  assert.strictEqual(
+    nightRejected.phrases[nightRejected.phrases.length - 1].text,
+    contentTest.fallbackTextForSlot({ type: 'goodnight_care' }, 'en'),
+    'night fallback must be goodnight-specific'
+  );
 
   const badSlotIds = contentTest.assembleBatchFromGeneratedPhrases(
     [
