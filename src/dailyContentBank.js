@@ -331,7 +331,14 @@ function selectBankItemsForDevice(
     byCategory.get(row.category).push(row);
   }
 
-  const shuffledCategories = [...byCategory.keys()].sort(() => Math.random() - 0.5);
+  const liveCategorySet = new Set(liveBankRows.map((row) => row.category));
+  const liveCategories = [...byCategory.keys()]
+    .filter((category) => liveCategorySet.has(category))
+    .sort(() => Math.random() - 0.5);
+  const backfillCategories = [...byCategory.keys()]
+    .filter((category) => !liveCategorySet.has(category))
+    .sort(() => Math.random() - 0.5);
+  const shuffledCategories = liveCategories.concat(backfillCategories);
   const selected = [];
   for (const category of shuffledCategories) {
     if (selected.length >= count) {

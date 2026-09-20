@@ -15,8 +15,12 @@ const {
   recordRecalledWords,
 } = require('./learningMemory');
 const { planSlots } = require('./slotPlanner');
+const {
+  hasQuestionMark,
+  validateLockScreenText,
+} = require('./textFilter');
 
-const LOCK_SCREEN_TEXT_MAX_LENGTH = 140;
+const LOCK_SCREEN_TEXT_MAX_LENGTH = 65;
 
 const WINDOW_CONTEXT = {
   morning: { id: 'morning', range: '05:00-11:00' },
@@ -459,10 +463,6 @@ function normalizeTextForDedupe(text) {
   return text.trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
-function hasQuestionMark(text) {
-  return /[?¿؟？]/.test(text);
-}
-
 function hasQuestionShapeWithoutMark(text) {
   const normalized = normalizeTextForDedupe(text).replace(/[.!…,:;]+$/g, '');
   return /^(знаешь ли|а ты|ты замечал|ты когда-нибудь|хочешь|почему бы не|как насч[её]т)(?:\s|$|[,.!…:;])/i.test(normalized);
@@ -483,10 +483,9 @@ function isGenericBadLockScreenPhrase(text) {
 }
 
 function isUnusableLockScreenText(text) {
+  const filterResult = validateLockScreenText(text, { maxLength: LOCK_SCREEN_TEXT_MAX_LENGTH });
   return (
-    text.length === 0 ||
-    text.length > LOCK_SCREEN_TEXT_MAX_LENGTH ||
-    hasQuestionMark(text) ||
+    !filterResult.ok ||
     hasQuestionShapeWithoutMark(text) ||
     isGenericBadLockScreenPhrase(text)
   );
@@ -578,8 +577,9 @@ function hasCoachingOrDirectiveShape(text, languageCode) {
 }
 
 function rejectionReasonForText(text, languageCode, validationContext = {}) {
-  if (text.length === 0 || text.length > LOCK_SCREEN_TEXT_MAX_LENGTH) return 'basic_quality';
-  if (hasQuestionMark(text) || hasQuestionShapeWithoutMark(text)) return 'question';
+  const filterResult = validateLockScreenText(text, { maxLength: LOCK_SCREEN_TEXT_MAX_LENGTH });
+  if (!filterResult.ok) return filterResult.reason;
+  if (hasQuestionShapeWithoutMark(text)) return 'question';
   if (isGenericBadLockScreenPhrase(text)) return 'generic';
   if (hasInvalidRelativeDateClaim(text, languageCode, validationContext)) return 'date_claim';
   if (hasExactTelemetryEcho(text, languageCode, validationContext)) return 'telemetry_echo';
@@ -604,18 +604,24 @@ function collectUsablePhrases(phrases, languageCode, validationContext = {}, exp
   const seenSlotIds = new Set();
   const expectedSlotSet = Array.isArray(expectedSlotIds) ? new Set(expectedSlotIds) : null;
   const accepted = [];
+  const rejectedSlotIds = new Set();
   let rejectedCount = 0;
   const rejectionReasons = {};
+  const reject = (reason, slotId) => {
+    rejectedCount += 1;
+    incrementReason(rejectionReasons, reason);
+    if (expectedSlotSet && typeof slotId === 'string' && expectedSlotSet.has(slotId)) {
+      rejectedSlotIds.add(slotId);
+    }
+  };
   for (const phrase of phrases) {
     if (!phrase || typeof phrase.text !== 'string') {
-      rejectedCount += 1;
-      incrementReason(rejectionReasons, 'schema');
+      reject('schema', phrase && phrase.slot_id);
       continue;
     }
     if (expectedSlotSet) {
       if (typeof phrase.slot_id !== 'string' || !expectedSlotSet.has(phrase.slot_id) || seenSlotIds.has(phrase.slot_id)) {
-        rejectedCount += 1;
-        incrementReason(rejectionReasons, 'slot_id');
+        reject('slot_id', phrase.slot_id);
         continue;
       }
       seenSlotIds.add(phrase.slot_id);
@@ -623,20 +629,17 @@ function collectUsablePhrases(phrases, languageCode, validationContext = {}, exp
     const text = phrase.text.trim();
     const reason = rejectionReasonForText(text, languageCode, validationContext);
     if (reason) {
-      rejectedCount += 1;
-      incrementReason(rejectionReasons, reason);
+      reject(reason, phrase.slot_id);
       continue;
     }
     if (languageCode && !isValidLanguageText(text, languageCode)) {
-      rejectedCount += 1;
-      incrementReason(rejectionReasons, 'language');
+      reject('language', phrase.slot_id);
       continue;
     }
 
     const normalized = normalizeTextForDedupe(text);
     if (seenTexts.has(normalized)) {
-      rejectedCount += 1;
-      incrementReason(rejectionReasons, 'duplicate');
+      reject('duplicate', phrase.slot_id);
       continue;
     }
     seenTexts.add(normalized);
@@ -648,7 +651,16 @@ function collectUsablePhrases(phrases, languageCode, validationContext = {}, exp
     });
   }
 
-  return { accepted, rejectedCount, inputCount: phrases.length, rejectionReasons };
+  if (expectedSlotSet) {
+    const acceptedSlotIds = new Set(accepted.map((item) => item.slot_id));
+    for (const slotId of expectedSlotSet) {
+      if (!acceptedSlotIds.has(slotId)) {
+        rejectedSlotIds.add(slotId);
+      }
+    }
+  }
+
+  return { accepted, rejectedCount, inputCount: phrases.length, rejectionReasons, rejectedSlotIds: [...rejectedSlotIds] };
 }
 
 function cleanUsablePhrases(phrases, languageCode, validationContext = {}) {
@@ -697,12 +709,12 @@ function validateFinalBatch(items) {
 
 function fallbackTextForSlot(slot, languageCode) {
   if (slot && slot.type === 'goodnight') {
-    if (languageCode === 'ru') return 'Спокойной ночи. Пусть остаток дня станет мягче и тише';
-    return 'Good night. Let the rest of the day land softly';
+    if (languageCode === 'ru') return 'Спокойной ночи. Телефону тоже нужен отдых';
+    return 'Good night. Even a phone needs rest';
   }
   if (slot && slot.type === 'greeting') {
-    if (languageCode === 'ru') return 'Доброе утро. Пусть день начнется спокойно и по-доброму';
-    return 'Good morning. Let the day start gently and kindly';
+    if (languageCode === 'ru') return 'Доброе утро. Один точный шаг экономит час';
+    return 'Good morning. One precise step saves an hour';
   }
   return null;
 }
@@ -807,6 +819,7 @@ function assembleBatchFromGeneratedPhrases(phrases, languageCode, validationCont
     rejectedCount: collected.rejectedCount,
     fallbackFillCount,
     rejectionReasons: collected.rejectionReasons,
+    rejectedSlotIds: collected.rejectedSlotIds,
     reason: fallbackFillCount === 0
       ? 'success'
       : generated.length === 0
@@ -869,6 +882,86 @@ function parseOpenAiBatchResponse(response) {
     throw new Error('response did not contain phrases array');
   }
   return parsed;
+}
+
+function buildBatchResponseFormat(name, count) {
+  return {
+    type: 'json_schema',
+    json_schema: {
+      name,
+      strict: true,
+      schema: {
+        type: 'object',
+        properties: {
+          phrases: {
+            type: 'array',
+            minItems: count,
+            maxItems: count,
+            items: {
+              type: 'object',
+              properties: {
+                slot_id: { type: 'string' },
+                text: { type: 'string', maxLength: LOCK_SCREEN_TEXT_MAX_LENGTH },
+                style_id: { type: 'string', enum: STYLE_IDS },
+              },
+              required: ['slot_id', 'text', 'style_id'],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ['phrases'],
+        additionalProperties: false,
+      },
+    },
+  };
+}
+
+async function createOpenAiBatch(client, context, languageCode, count = BATCH_SIZE, schemaName = 'lock_screen_batch') {
+  return client.chat.completions.create({
+    model: 'gpt-4o-mini',
+    response_format: buildBatchResponseFormat(schemaName, count),
+    messages: [
+      { role: 'system', content: buildSystemPrompt(languageCode) },
+      { role: 'user', content: context },
+    ],
+  });
+}
+
+async function regenerateRejectedSlots(client, basePayload, slots, rejectedSlotIds, languageCode, validationContext) {
+  if (!Array.isArray(rejectedSlotIds) || rejectedSlotIds.length === 0) {
+    return null;
+  }
+  const rejectedSlotSet = new Set(rejectedSlotIds);
+  const repairSlots = slots.filter((slot) => rejectedSlotSet.has(slot.slot_id));
+  if (repairSlots.length === 0) {
+    return null;
+  }
+  const repairPayload = {
+    ...basePayload,
+    repair: 'rewrite_only_these_rejected_slots',
+    slots: repairSlots.map((slot) => ({
+      slot_id: slot.slot_id,
+      type: slot.type,
+      facts: slot.facts || {},
+      constraints: slot.constraints || [],
+      interest_hint: slot.interest_hint || undefined,
+    })),
+  };
+  const response = await createOpenAiBatch(
+    client,
+    JSON.stringify(repairPayload),
+    languageCode,
+    repairSlots.length,
+    'lock_screen_repair'
+  );
+  const parsed = parseOpenAiBatchResponse(response);
+  const repaired = collectUsablePhrases(
+    parsed.phrases,
+    languageCode,
+    validationContext,
+    repairSlots.map((slot) => slot.slot_id)
+  );
+  return repaired && repaired.accepted.length > 0 ? repaired.accepted : null;
 }
 
 function extractUsedCategoriesFromSlots(slots) {
@@ -1186,28 +1279,12 @@ function buildContextPrompt(device, window, signals, weather, languageCode, slot
 // in generateBatch, not described in this text -- see the call site for why.
 function buildSystemPrompt(languageCode) {
   const languageName = SUPPORTED_LANGUAGES[languageCode].name;
-  return `You write for a proactive AI companion on a phone lock screen. The server already chose exactly ${BATCH_SIZE} editorial slots; your job is only to write one short natural message for each slot.
-Write entirely in ${languageName}. Return exactly one phrase per input slot, preserving every slot_id. Use a different style_id for every phrase.
-
-Voice: warm, kind, alive, concise, interesting, lightly personal when the slot supports it. The user cannot reply from the lock screen, so every line must stand alone.
-This is not a chat, quote app, trivia feed, encyclopedia, coach, therapist, mindfulness app, productivity assistant, or moralizer.
-
-Hard rules:
-- never ask the user for an answer, reply, choice, confirmation, or reflection; no question marks
-- no commands, life coaching, generic motivation, vague wisdom, or filler
-- do not invent facts, names, holidays, dates, events, physical location, commuting/work/home/sleep state, or user feelings
-- use only facts present in the slot/profile/now context; free_ai_thought may use timeless general observation, not user facts
-- weather and date claims must stay safe for a delayed batch display; weather temperature is grounding only, never state exact temperature in generated text
-- prefer stable weather wording from available facts, such as rain expected or broad conditions; do not invent warmer/cooler comparisons without comparison data
-- avoid "right now" and exact transient telemetry
-- do not expose exact battery, unlock, screen-time, step, or sensor values
-- do not make psychological, medical, moral, or addiction claims from phone behavior
-- if profile.name exists, use it at most once in the whole batch
-- gender/age context is optional and rare; avoid stereotypes
-- a few slots may include an interest_hint (a short topic tag, e.g. "sport"): when present, let that one slot's phrasing lean naturally toward that topic only if it genuinely fits the slot's own facts/type; never name, quote, or reveal the hint itself, never say or imply "since you like/are interested in/told me about X" or anything similar -- the personalization must stay invisible; a factual slot must still only use the facts actually given, never invent a fact or a connection just to satisfy the hint, and slots with no interest_hint need no interest angle at all
-- each text must be at most ${LOCK_SCREEN_TEXT_MAX_LENGTH} characters
-
-Make the batch varied in wording and feel, but do not change the selected slot types. Output only the structured JSON requested by the schema.`;
+  return `Ты — живой, наблюдательный и добрый AI-компаньон на экране блокировки. Давай короткие мысли монологом: 1 предложение, емко, полезно, разнообразно.
+Язык: ${languageName}. На каждый slot_id верни ровно одну строку и уникальный style_id.
+Запрет: ?, открытки вроде «пусть день будет», уют/чай/тихий свет/мысли, «верь в себя», «ты справишься», вода, коучинг, команды, выдуманные факты.
+Пиши ультра-коротко (до 8 слов). Экономь слова. Смысл должен считываться за 1 секунду.
+Только факты из slot/profile/now; погода житейски без точных градусов; утром можно имя 1 раз; gender/age дают только аккуратный практичный оттенок; interest_hint используй незаметно, без «since you like».
+До 60 символов, hard cap ${LOCK_SCREEN_TEXT_MAX_LENGTH}. Только JSON по схеме.`;
 }
 
 /**
@@ -1276,48 +1353,13 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {})
   }
 
   let response;
+  let client;
   try {
     // Lazy require: avoids crashing at startup if the package is present but
     // no key is set yet, and keeps the fallback path dependency-free.
     const OpenAI = require('openai');
-    const client = new OpenAI({ apiKey });
-
-    response = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
-      response_format: {
-        type: 'json_schema',
-        json_schema: {
-          name: 'lock_screen_batch',
-          strict: true,
-          schema: {
-            type: 'object',
-            properties: {
-              phrases: {
-                type: 'array',
-                minItems: BATCH_SIZE,
-                maxItems: BATCH_SIZE,
-                items: {
-                  type: 'object',
-                  properties: {
-                    slot_id: { type: 'string' },
-                    text: { type: 'string', maxLength: LOCK_SCREEN_TEXT_MAX_LENGTH },
-                    style_id: { type: 'string', enum: STYLE_IDS },
-                  },
-                  required: ['slot_id', 'text', 'style_id'],
-                  additionalProperties: false,
-                },
-              },
-            },
-            required: ['phrases'],
-            additionalProperties: false,
-          },
-        },
-      },
-      messages: [
-        { role: 'system', content: buildSystemPrompt(languageCode) },
-        { role: 'user', content: context },
-      ],
-    });
+    client = new OpenAI({ apiKey });
+    response = await createOpenAiBatch(client, context, languageCode);
 
   } catch (err) {
     console.error(`AI_BATCH_ERROR reason=openai_error error=${err.name || 'Error'}`);
@@ -1342,6 +1384,35 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {})
 
   if (!assembly) {
     return buildLoggedFallbackResult(languageCode, context, 'parse_or_schema_error');
+  }
+
+  if (assembly.rejectedSlotIds && assembly.rejectedSlotIds.length > 0 && assembly.generatedCount > 0) {
+    try {
+      const basePayload = JSON.parse(context);
+      const repaired = await regenerateRejectedSlots(
+        client,
+        basePayload,
+        slots,
+        assembly.rejectedSlotIds,
+        languageCode,
+        validationContext
+      );
+      if (repaired && repaired.length > 0) {
+        const acceptedSlotIds = new Set(assembly.generatedSlotIds);
+        const merged = parsed.phrases
+          .filter((phrase) => acceptedSlotIds.has(phrase.slot_id))
+          .concat(repaired);
+        const repairedAssembly = assembleBatchFromGeneratedPhrases(merged, languageCode, validationContext, slots);
+        if (repairedAssembly && repairedAssembly.phrases) {
+          repairedAssembly.reason = repairedAssembly.rejectedCount === 0
+            ? 'success_after_slot_regeneration'
+            : 'partial_slot_regeneration';
+          assembly = repairedAssembly;
+        }
+      }
+    } catch (err) {
+      console.error(`AI_BATCH_ERROR reason=slot_regeneration_error error=${err.name || 'Error'}`);
+    }
   }
 
   if (!assembly.phrases) {

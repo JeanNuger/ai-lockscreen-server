@@ -66,7 +66,8 @@ function assertFinalBatch(items) {
   assert.strictEqual(items.length, BATCH_SIZE, 'final batch must be exactly 12');
   assert.strictEqual(new Set(normalizedTexts(items)).size, BATCH_SIZE, 'final texts must be unique');
   for (const item of items) {
-    assert(item.text && item.text.length <= 140, 'final text must be nonempty and within max length');
+    assert(item.text && item.text.length <= 65, 'final text must be nonempty and within max length');
+    assert(item.text.trim().split(/\s+/).length <= 10, 'final text must fit the lock-screen word budget');
     assert(STYLE_IDS.includes(item.style_id), `style_id must be valid: ${item.style_id}`);
   }
   assert.strictEqual(new Set(items.map((item) => item.style_id)).size, BATCH_SIZE, 'final styles must be unique');
@@ -121,6 +122,14 @@ async function main() {
   assert(contentTest.hasQuestionShapeWithoutMark('Знаешь ли ты, что сегодня произошло'), 'Russian question-shaped text without ? must be blocked');
   assert(contentTest.hasQuestionShapeWithoutMark('Почему бы не открыть план'), 'Russian "why not" question shape must be blocked');
   assert(contentTest.isGenericBadLockScreenPhrase('Следующему действию не нужна церемония.'), 'known generic bad example must be blocked');
+  assert.strictEqual(
+    contentTest.assembleBatchFromGeneratedPhrases(
+      [...validGeneratedPhrases().slice(0, 11), phrase('Уют и чай наполняют день теплом.')],
+      'ru'
+    ).rejectionReasons.blocked_phrase,
+    1,
+    'local textFilter must reject postcard filler without spending tokens'
+  );
 
   const validTwelve = validGeneratedPhrases();
   const successAssembly = contentTest.assembleBatchFromGeneratedPhrases(validTwelve, 'ru');
@@ -203,7 +212,7 @@ async function main() {
 
   // DATE / WEEKDAY
   const wrongTomorrowWeekday = contentTest.assembleBatchFromGeneratedPhrases(
-    [...validTwelve.slice(0, 11), phrase('Завтра пятница, отличный повод запланировать выходные.')],
+    [...validTwelve.slice(0, 11), phrase('Завтра пятница, выходные уже рядом.')],
     'ru',
     { dateContext: saturdayDateContext }
   );
@@ -228,7 +237,7 @@ async function main() {
   assert(correctTomorrowWeekday.phrases.some((p) => p.text.includes('воскресенье')), 'correct weekday claim must survive into the final batch');
 
   const noDateContextWeekdayClaim = contentTest.assembleBatchFromGeneratedPhrases(
-    [...validTwelve.slice(0, 11), phrase('Завтра пятница, отличный повод запланировать выходные.')],
+    [...validTwelve.slice(0, 11), phrase('Завтра пятница, выходные уже рядом.')],
     'ru',
     { dateContext: null }
   );
@@ -282,7 +291,7 @@ async function main() {
   assert.strictEqual(eveningWindow.id, 'evening');
   assert.strictEqual(eveningWindow.range, '15:00-20:00', 'evening window must expose its actual clock range, not just the id');
   const systemPromptText = contentTest.buildSystemPrompt('ru');
-  assert(/server already chose exactly 12 editorial slots/i.test(systemPromptText), 'prompt must keep OpenAI in slot-writing mode');
+  assert(/slot_id/.test(systemPromptText), 'prompt must keep OpenAI in slot-writing mode');
   assert(!/profile\.tone/.test(systemPromptText), 'prompt must not depend on the old tone setting');
 
   // BATTERY
@@ -313,7 +322,7 @@ async function main() {
 
   // TRAFFIC / UNSUPPORTED SITUATIONAL CONTEXT
   const trafficClaim = contentTest.assembleBatchFromGeneratedPhrases(
-    [...validTwelve.slice(0, 11), phrase('Скучное время в пробке может превратиться в отличное время с подкастом.')],
+    [...validTwelve.slice(0, 11), phrase('В пробке подкаст звучит полезнее радио.')],
     'ru',
     {}
   );
@@ -321,7 +330,7 @@ async function main() {
   assert.strictEqual(trafficClaim.rejectionReasons.unsupported_context, 1, 'unsupported traffic claim must be rejected without a traffic signal');
 
   const trafficAllowedWithContext = contentTest.assembleBatchFromGeneratedPhrases(
-    [...validTwelve.slice(0, 11), phrase('Скучное время в пробке может превратиться в отличное время с подкастом.')],
+    [...validTwelve.slice(0, 11), phrase('В пробке подкаст звучит полезнее радио.')],
     'ru',
     { contextFlags: { traffic: true } }
   );
@@ -365,9 +374,9 @@ async function main() {
   // all-or-nothing).
   const mixedBatch = [
     ...validTwelve.slice(0, 8),
-    phrase('Завтра пятница, отличный повод запланировать выходные.'),
+    phrase('Завтра пятница, выходные уже рядом.'),
     phrase('75% заряда. Умная батарея всегда готова к следующему вызову.'),
-    phrase('Скучное время в пробке может превратиться в отличное время с подкастом.'),
+    phrase('В пробке подкаст звучит полезнее радио.'),
     phrase('Попробуй что-то новое.'),
   ];
   const mixedResult = contentTest.assembleBatchFromGeneratedPhrases(
@@ -597,7 +606,7 @@ async function main() {
       null
     );
 
-    assert.strictEqual(memoryOpenAiCallCount, 1, 'content-memory generation must still make exactly one OpenAI call');
+    assert.strictEqual(memoryOpenAiCallCount, 2, 'one rejected slot should trigger exactly one targeted repair OpenAI call');
     assert.strictEqual(memoryResult.source, 'openai');
     assertFinalBatch(memoryResult.phrases);
     const memoryRows = db.prepare(`
@@ -614,6 +623,72 @@ async function main() {
     assert(!payloadText.includes('already_shown'), 'device_shown_categories history must not be sent as a prompt history blob');
   } finally {
     Module._load = originalMemoryLoad;
+    delete process.env.OPENAI_API_KEY;
+  }
+
+  process.env.OPENAI_API_KEY = 'test-key-slot-repair';
+  let repairOpenAiCallCount = 0;
+  const repairRequestSlotCounts = [];
+  const repairRequestSlotIds = [];
+  const originalRepairLoad = Module._load;
+  Module._load = function patchedRepairLoad(request, parent, isMain) {
+    if (request === 'openai') {
+      return class MockOpenAI {
+        constructor() {
+          this.chat = {
+            completions: {
+              create: async (requestBody) => {
+                repairOpenAiCallCount += 1;
+                const payload = JSON.parse(requestBody.messages[1].content);
+                repairRequestSlotCounts.push(payload.slots.length);
+                repairRequestSlotIds.push(payload.slots.map((slot) => slot.slot_id));
+                return {
+                  choices: [{
+                    message: {
+                      content: JSON.stringify({
+                        phrases: payload.slots.map((slot, index) => ({
+                          slot_id: slot.slot_id,
+                          text: repairOpenAiCallCount === 1 && index === 2
+                            ? 'Уют и чай наполняют день теплом.'
+                            : `Concrete repair line ${repairOpenAiCallCount}-${index + 1}`,
+                          style_id: STYLE_IDS[index],
+                        })),
+                      }),
+                    },
+                  }],
+                };
+              },
+            },
+          };
+        }
+      };
+    }
+    return originalRepairLoad.call(this, request, parent, isMain);
+  };
+  try {
+    db.prepare('INSERT OR IGNORE INTO devices (device_id, timezone, created_at) VALUES (?, ?, ?)')
+      .run('device-slot-repair', 'Asia/Almaty', '2026-09-17 00:00:00');
+    const repairedLogs = await captureConsole(() => generateBatch(
+      {
+        device_id: 'device-slot-repair',
+        timezone: 'Asia/Almaty',
+        created_at: '2026-09-17 00:00:00',
+      },
+      'day',
+      { system_language: 'en' },
+      null
+    ));
+    assert.strictEqual(repairOpenAiCallCount, 2, 'one blocked phrase must trigger one targeted repair call');
+    assert.deepStrictEqual(repairRequestSlotCounts, [BATCH_SIZE, 1], 'repair call must send only the rejected slot');
+    assert.deepStrictEqual(repairRequestSlotIds[1], [repairRequestSlotIds[0][2]], 'repair call must preserve the rejected slot_id only');
+    assertFinalBatch(repairedLogs.result.phrases);
+    assert(!repairedLogs.result.phrases.some((item) => /уют|чай|теплом/i.test(item.text)), 'blocked filler must not survive after repair');
+    assert(
+      repairedLogs.logs.some((line) => line.includes('reason=success_after_slot_regeneration')),
+      'successful repair must be visible in batch logs'
+    );
+  } finally {
+    Module._load = originalRepairLoad;
     delete process.env.OPENAI_API_KEY;
   }
 

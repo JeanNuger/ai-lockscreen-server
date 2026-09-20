@@ -572,15 +572,15 @@ async function main() {
   const weatherSlot = weatherSlots.find((slot) => slot.type === 'weather');
   assert(weatherSlot, 'planner should include weather slot when weather facts are available');
   assert(weatherSlot.constraints.includes('do_not_state_exact_temperature'), 'weather slot must explicitly forbid exact temperature output');
-  assert(/never state exact temperature/i.test(contentTest.buildSystemPrompt('en')), 'prompt must forbid exact weather temperature output');
+  assert(/без точных градусов/i.test(contentTest.buildSystemPrompt('en')), 'prompt must forbid exact weather temperature output');
 
   // 7: the static/cached system prompt must explicitly forbid revealing the
   // interest_hint personalization mechanism to the user.
   const systemPromptText = contentTest.buildSystemPrompt('en');
   assert(/interest_hint/i.test(systemPromptText), 'system prompt must document interest_hint semantics');
-  assert(/never name, quote, or reveal/i.test(systemPromptText), 'system prompt must explicitly forbid revealing the hint itself');
+  assert(/незаметно/i.test(systemPromptText), 'system prompt must require invisible personalization');
   assert(/since you like/i.test(systemPromptText), 'system prompt must explicitly forbid profile-revealing phrasing like "since you like X"');
-  assert(/never invent a fact/i.test(systemPromptText), 'system prompt must forbid inventing facts/connections to satisfy an interest hint');
+  assert(/выдуманные факты/i.test(systemPromptText), 'system prompt must forbid inventing facts/connections to satisfy an interest hint');
 
   const bankDate = getBankDateString();
   db.prepare(`

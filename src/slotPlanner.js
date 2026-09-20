@@ -11,6 +11,7 @@ const CONTENT_TYPES = [
   'learning_recall',
   'foreign_word_or_expression',
   'humor',
+  'everyday_lifehack',
   'technology',
   'money_economics',
   'culture',
@@ -19,7 +20,6 @@ const CONTENT_TYPES = [
   'everyday_observation',
   'playful_thought',
   'tiny_imagined_scene',
-  'gentle_wish',
   'reflective_observation',
   'language_play',
   'good_news',
@@ -95,6 +95,14 @@ const SYNTHETIC_POOL = [
     constraints: ['gentle_observational_humor', 'no_user_facts'],
   },
   {
+    id: 'synthetic_everyday_lifehack_1',
+    type: 'everyday_lifehack',
+    priority: 33,
+    facts: {},
+    source: 'creative',
+    constraints: ['practical_household_or_style_tip', 'one_sentence', 'no_command_tone'],
+  },
+  {
     id: 'synthetic_riddle_1',
     type: 'riddle',
     priority: 20,
@@ -135,14 +143,6 @@ const SYNTHETIC_POOL = [
     constraints: ['clearly_imagined', 'no_user_or_location_assumptions', 'one_sentence'],
   },
   {
-    id: 'synthetic_gentle_wish_1',
-    type: 'gentle_wish',
-    priority: 22,
-    facts: {},
-    source: 'creative',
-    constraints: ['kind', 'not_motivational_quote', 'not_coaching'],
-  },
-  {
     id: 'synthetic_reflective_observation_1',
     type: 'reflective_observation',
     priority: 21,
@@ -173,11 +173,11 @@ const DEFAULT_TYPE_CAP = 2;
 const CREATIVE_FILLER_BLUEPRINTS = [
   { id: 'creative_filler_free_ai_thought_standalone_v1', type: 'free_ai_thought', constraints: ['standalone_observation', 'no_user_facts'] },
   { id: 'creative_filler_humor_gentle_observational_v1', type: 'humor', constraints: ['gentle_observational_humor', 'no_user_facts'] },
+  { id: 'creative_filler_everyday_lifehack_v1', type: 'everyday_lifehack', constraints: ['practical_household_or_style_tip', 'one_sentence', 'no_command_tone'] },
   { id: 'creative_filler_riddle_no_answer_v1', type: 'riddle', constraints: ['no_answer_required', 'not_a_question'] },
   { id: 'creative_filler_everyday_object_v1', type: 'everyday_observation', constraints: ['ordinary_object_or_routine', 'no_user_facts', 'no_physical_context_claims'] },
   { id: 'creative_filler_playful_light_v1', type: 'playful_thought', constraints: ['lightly_playful', 'no_external_facts', 'not_motivational'] },
   { id: 'creative_filler_tiny_scene_v1', type: 'tiny_imagined_scene', constraints: ['clearly_imagined', 'no_user_or_location_assumptions', 'one_sentence'] },
-  { id: 'creative_filler_gentle_wish_v1', type: 'gentle_wish', constraints: ['kind', 'not_motivational_quote', 'not_coaching'] },
   { id: 'creative_filler_reflective_observation_v1', type: 'reflective_observation', constraints: ['no_question', 'no_advice', 'no_therapy_language'] },
   { id: 'creative_filler_language_play_v1', type: 'language_play', constraints: ['only_if_natural_in_target_language', 'no_required_answer', 'avoid_untranslatable_puns'] },
 ];
@@ -319,7 +319,11 @@ function bankItemToCandidate(item, index = 0) {
     id: item && item.id ? `bank_${item.id}` : stableCandidateId(`bank_${type}`, text),
     topic_key: stableCandidateId(`bank_topic_${type}`, normalizedText),
     type,
-    priority: type === 'holiday' || type === 'history_today' ? 70 : 48,
+    priority: type === 'holiday' || type === 'history_today'
+      ? 70
+      : type === 'word_learning'
+        ? 78
+        : 48,
     // word_learning's facts.word must carry the server-selected word/expression
     // itself (Server = WHAT, OpenAI = HOW) -- the idiom bank item's
     // content_text already IS that self-contained word+meaning, so it is
@@ -534,15 +538,20 @@ function antiRepeatPenalty(candidate, memoryIndex) {
 // prompt instruction in buildSystemPrompt). See HANDOFF_2 interests
 // personalization follow-up.
 //
-// Exactly six interest ids exist today (Android SurveyInterestsActivity /
-// ProfileActivity, sent verbatim as the wire values in RegisterRequest):
-// sport, work, family, self_development, mindfulness, creative_arts. Each
-// maps to one existing content type -- used here purely as a compatibility
-// check ("is this already-selected slot's type a genuine fit for this
-// interest"), never to invent or force a connection a slot's own facts
-// don't support.
+// Android currently sends the first six stable ids below; the extra aliases
+// let newer clients add practical topics (auto/tech/style) without another
+// server migration. Each maps to one existing content type -- used here
+// purely as a compatibility check ("is this already-selected slot's type a
+// genuine fit for this interest"), never to invent or force a connection a
+// slot's own facts don't support.
 const INTEREST_TYPE_MAP = {
   sport: 'unusual_fact',
+  auto: 'technology',
+  cars: 'technology',
+  technology: 'technology',
+  tech: 'technology',
+  style: 'everyday_lifehack',
+  fashion: 'everyday_lifehack',
   work: 'money_economics',
   family: 'culture',
   self_development: 'science',
@@ -561,11 +570,19 @@ function parseDeviceInterests(rawInterests) {
     return [];
   }
   if (Array.isArray(rawInterests)) {
-    return rawInterests.filter((item) => typeof item === 'string');
+    return rawInterests
+      .filter((item) => typeof item === 'string')
+      .map((item) => item.trim().toLowerCase())
+      .filter(Boolean);
   }
   try {
     const parsed = JSON.parse(rawInterests);
-    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string') : [];
+    return Array.isArray(parsed)
+      ? parsed
+        .filter((item) => typeof item === 'string')
+        .map((item) => item.trim().toLowerCase())
+        .filter(Boolean)
+      : [];
   } catch (err) {
     return [];
   }
