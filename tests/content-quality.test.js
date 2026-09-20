@@ -67,7 +67,7 @@ function assertFinalBatch(items) {
   assert.strictEqual(new Set(normalizedTexts(items)).size, BATCH_SIZE, 'final texts must be unique');
   for (const item of items) {
     assert(item.text && item.text.length <= 65, 'final text must be nonempty and within max length');
-    assert(item.text.trim().split(/\s+/).length <= 10, 'final text must fit the lock-screen word budget');
+    assert(item.text.trim().split(/\s+/).length <= 8, 'final text must fit the lock-screen word budget');
     assert(STYLE_IDS.includes(item.style_id), `style_id must be valid: ${item.style_id}`);
   }
   assert.strictEqual(new Set(items.map((item) => item.style_id)).size, BATCH_SIZE, 'final styles must be unique');
@@ -130,6 +130,22 @@ async function main() {
     1,
     'local textFilter must reject postcard filler without spending tokens'
   );
+  for (const badPostcard of [
+    'Пусть ночи будут спокойными.',
+    'Чайник улыбается вечернему свету.',
+    'Вечер как фея над городом.',
+    'Малиновый солнце обещает чудеса.',
+    'Свет в окне манит счастьем.',
+  ]) {
+    assert.strictEqual(
+      contentTest.assembleBatchFromGeneratedPhrases(
+        [...validGeneratedPhrases().slice(0, 11), phrase(badPostcard)],
+        'ru'
+      ).rejectionReasons.blocked_phrase,
+      1,
+      `postcard garbage must be blocked: ${badPostcard}`
+    );
+  }
 
   const validTwelve = validGeneratedPhrases();
   const successAssembly = contentTest.assembleBatchFromGeneratedPhrases(validTwelve, 'ru');
@@ -296,7 +312,7 @@ async function main() {
 
   // BATTERY
   const batteryEcho = contentTest.assembleBatchFromGeneratedPhrases(
-    [...validTwelve.slice(0, 11), phrase('75% заряда. Умная батарея всегда готова к следующему вызову.')],
+    [...validTwelve.slice(0, 11), phrase('75% заряда осталось в батарее.')],
     'ru',
     { signals: { battery_level: 75 } }
   );
@@ -304,7 +320,7 @@ async function main() {
   assert.strictEqual(batteryEcho.rejectionReasons.telemetry_echo, 1, 'exact battery percentage echo must be rejected');
 
   const irrelevantNumberNotBattery = contentTest.assembleBatchFromGeneratedPhrases(
-    [...validTwelve.slice(0, 11), phrase('До ближайшего города 75 километров по трассе.')],
+    [...validTwelve.slice(0, 11), phrase('До города 75 километров трассы.')],
     'ru',
     { signals: { battery_level: 75 } }
   );
@@ -375,7 +391,7 @@ async function main() {
   const mixedBatch = [
     ...validTwelve.slice(0, 8),
     phrase('Завтра пятница, выходные уже рядом.'),
-    phrase('75% заряда. Умная батарея всегда готова к следующему вызову.'),
+    phrase('75% заряда осталось в батарее.'),
     phrase('В пробке подкаст звучит полезнее радио.'),
     phrase('Попробуй что-то новое.'),
   ];

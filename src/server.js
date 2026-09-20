@@ -50,6 +50,7 @@ app.get('/health', (req, res) => {
   res.status(200).json({
     ok: true,
     openai_configured: Boolean(process.env.OPENAI_API_KEY),
+    commit: process.env.RENDER_GIT_COMMIT || process.env.COMMIT_SHA || null,
   });
 });
 
