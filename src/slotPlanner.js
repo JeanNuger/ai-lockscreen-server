@@ -169,6 +169,7 @@ const TYPE_CAPS = {
   humor: 2,
   free_ai_thought: 2,
   phone_trend: 1,
+  learning_recall: 1,
 };
 
 const DEFAULT_TYPE_CAP = 2;
@@ -242,6 +243,10 @@ function createCandidate(candidate) {
     constraints: Array.isArray(candidate.constraints) ? candidate.constraints : [],
     group: candidate.group || null,
     bank_category: candidate.bank_category || null,
+    // Server-only reference to a device_learning_memory row (Phase 4 recall).
+    // Never included in the OpenAI payload (see addSlotIds/buildContextPrompt) --
+    // used only by the post-generation hook to mark the right row recalled.
+    learning_memory_id: Number.isFinite(candidate.learning_memory_id) ? candidate.learning_memory_id : null,
   };
 }
 
@@ -252,7 +257,11 @@ function mapBankItemType(item) {
   if (item.category === 'holiday') return 'holiday';
   if (item.category === 'on_this_day') return 'history_today';
   if (item.category === 'humor') return 'humor';
-  if (item.category === 'idiom') return 'foreign_word_or_expression';
+  // idiom bank items are already a self-contained "word/expression + meaning"
+  // piece of content -- the server-selected word_learning grounding, not a
+  // separate content source. foreign_word_or_expression currently has no
+  // other bank category feeding it (accepted trade-off, see HANDOFF_2 Phase 4).
+  if (item.category === 'idiom') return 'word_learning';
   if (item.category === 'statistic') return 'unusual_fact';
   if (item.category === 'quote') return 'culture';
 
@@ -309,7 +318,11 @@ function bankItemToCandidate(item, index = 0) {
     topic_key: stableCandidateId(`bank_topic_${type}`, normalizedText),
     type,
     priority: type === 'holiday' || type === 'history_today' ? 70 : 48,
-    facts: { text },
+    // word_learning's facts.word must carry the server-selected word/expression
+    // itself (Server = WHAT, OpenAI = HOW) -- the idiom bank item's
+    // content_text already IS that self-contained word+meaning, so it is
+    // reused as-is rather than parsed down to a bare token (Phase 4 decision).
+    facts: type === 'word_learning' ? { word: text } : { text },
     source: 'daily_bank',
     constraints: ['use_only_given_fact', 'date_stable', 'not_encyclopedia_card'],
     bank_category: item.category,
@@ -353,7 +366,7 @@ function normalizePhoneTrends(phoneTrends = {}) {
 
 function collectCandidates(input = {}) {
   const candidates = [];
-  const { device = {}, window, dateContext, weather, bankItems = [], phoneTrends = {} } = input;
+  const { device = {}, window, dateContext, weather, bankItems = [], phoneTrends = {}, recallCandidate = null } = input;
   const semanticPhoneTrends = normalizePhoneTrends(phoneTrends);
 
   if (window === 'morning') {
@@ -425,6 +438,24 @@ function collectCandidates(input = {}) {
       facts: semanticPhoneTrends,
       source: 'phone_analytics',
       constraints: ['non_moralizing', 'no_exact_counts', 'no_psychological_claims', 'no_productivity_or_addiction_framing', 'no_causal_claims'],
+    }));
+  }
+
+  // recallCandidate is resolved by the caller (learningMemory.getRecallCandidate)
+  // before planSlots runs, same pattern as bankItems/recentContentMemory --
+  // keeps this module DB-free. Only ever one candidate (or none): a word can
+  // be recalled at most once, so there is nothing to rank among here.
+  if (recallCandidate && recallCandidate.word_text) {
+    candidates.push(createCandidate({
+      id: `learning_recall_${recallCandidate.id}`,
+      content_key: `learning_recall_${recallCandidate.id}`,
+      topic_key: recallCandidate.word_key || null,
+      type: 'learning_recall',
+      priority: 30,
+      facts: { word: recallCandidate.word_text },
+      source: 'learning_memory',
+      constraints: ['reference_previously_taught_word', 'no_new_fact_invention'],
+      learning_memory_id: recallCandidate.id,
     }));
   }
 
@@ -556,6 +587,9 @@ function addSlotIds(candidates) {
     source: candidate.source,
     bank_category: candidate.bank_category || undefined,
     constraints: candidate.constraints,
+    // Server-only; buildContextPrompt hand-picks {slot_id, type, facts,
+    // constraints} for the OpenAI payload and does not include this field.
+    learning_memory_id: candidate.learning_memory_id,
   }));
 }
 

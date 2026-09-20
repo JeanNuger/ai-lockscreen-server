@@ -9,6 +9,11 @@ const {
   getRecentContentMemory,
   recordShownContentMemory,
 } = require('./contentMemory');
+const {
+  getRecallCandidate,
+  recordLearnedWords,
+  recordRecalledWords,
+} = require('./learningMemory');
 const { planSlots } = require('./slotPlanner');
 
 const LOCK_SCREEN_TEXT_MAX_LENGTH = 140;
@@ -1239,6 +1244,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {})
     countryCode
   );
   const recentContentMemory = getRecentContentMemory(device.device_id);
+  const recallCandidate = getRecallCandidate(device.device_id);
   const { slots } = planSlots({
     device,
     window,
@@ -1246,6 +1252,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {})
     weather,
     bankItems,
     phoneTrends,
+    recallCandidate,
   }, { recentContentMemory });
 
   const context = buildContextPrompt(device, window, signals, weather, languageCode, slots, dateContext);
@@ -1339,6 +1346,8 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {})
   const usedCategories = extractUsedCategoriesFromSlots(slots);
   recordShownCategories(device.device_id, deviceLocalDate, usedCategories);
   recordShownContentMemory(device.device_id, slots, assembly.generatedSlotIds);
+  recordLearnedWords(device.device_id, slots, assembly.generatedSlotIds);
+  recordRecalledWords(device.device_id, slots, assembly.generatedSlotIds);
 
   return buildLoggedOpenAiResult(assembly, context);
 }

@@ -124,6 +124,24 @@ db.exec(`
     ON device_content_memory(device_id, content_key);
   CREATE INDEX IF NOT EXISTS idx_device_content_memory_topic
     ON device_content_memory(device_id, topic_key);
+
+  -- device_learning_memory: Phase 4 "word of the day" -> "remember the word X?"
+  -- recall memory. Deliberately separate from device_content_memory (which is
+  -- a broad anti-repeat log) -- this table drives a specific recall queue
+  -- (2-14 day eligibility window, at most one successful recall per learned
+  -- word), not generic repeat avoidance. See HANDOFF_2 Phase 4.
+  CREATE TABLE IF NOT EXISTS device_learning_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    word_key TEXT NOT NULL,
+    word_text TEXT NOT NULL,
+    learned_at TEXT NOT NULL DEFAULT (datetime('now')),
+    recalled_at TEXT,
+    FOREIGN KEY (device_id) REFERENCES devices(device_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_device_learning_memory_recall
+    ON device_learning_memory(device_id, recalled_at, learned_at);
 `);
 
 // One-off migration: devices.name is new as of 2026-09-12. This project has no
