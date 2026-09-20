@@ -76,10 +76,13 @@ Legacy implementation этих полей в Android/server должна быт�
 
 ## 9. Current implementation / roadmap
 
-**Phase 1 — COMPLETED and committed:** `3cd8495` (`Implement server-side content slot planning`). Server-side SlotPlanner / slot-based OpenAI pipeline реализован; Server = WHAT, OpenAI = HOW; 1 batch = 1 OpenAI request = exactly 12 phrases. Затрагивает `src/contentGenerator.js`, `src/slotPlanner.js`, тесты. Перед любой новой серверной задачей — проверить `git status` и реальный diff, не полагаться на этот документ как на источник актуального implementation status (источник истины — код).
+**Phase 1 — COMPLETED and committed:** `3cd8495` (`Implement server-side content slot planning`). Server-side SlotPlanner / slot-based OpenAI pipeline реализован; Server = WHAT, OpenAI = HOW; 1 batch = 1 OpenAI request = exactly 12 phrases.
 
-После Phase 1 (порядок ориентировочный, не жёсткий):
-- **Phase 2** — server-side phone aggregates (перестать полагаться на raw telemetry в prompt).
+**Phase 2 — COMPLETED and committed:** `72dc775` (`Implement server-side phone trend analytics`). Server-side phone signal history добавлена — хранит ТОЛЬКО `unlocks_since_last_batch` и `steps_since_last_batch` (`battery_level`/`ambient_light`/`screen_on_duration_seconds` для аналитики НЕ хранятся), retention 45 дней, сравнение с тем же окном вчера. Наружу отдаются только семантические тренды (`unlocks_vs_yesterday`/`steps_vs_yesterday` = higher/lower); normal/insufficient-данные опускаются. Сырая telemetry в OpenAI editorial payload не отправляется. `phone_trend` — опциональный contextual slot, max 1 на batch. Android-изменений не потребовалось. Инвариант не нарушен: 1 batch = ровно 1 OpenAI generation request = ровно 12 phrases. Production проверен на Render: commit `72dc775`, HTTP 200, `{"ok":true,"openai_configured":true}`.
+
+Перед любой новой серверной задачей — проверить `git status` и реальный diff, не полагаться на этот документ как на источник актуального implementation status (источник истины — код).
+
+После Phase 2 (порядок ориентировочный, не жёсткий):
 - **Phase 3** — Content Memory.
 - **Phase 4** — Learning Memory + learning flows.
 - **Phase 5** — Daily Bank / content sources improvement.
