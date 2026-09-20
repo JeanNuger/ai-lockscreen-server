@@ -18,6 +18,8 @@ const BANK_CATEGORIES = [
   'technology',
   'economics',
   'fact',
+  'country_fact',
+  'good_news',
 ];
 
 // Bank categories that are NOT tied to a specific calendar date, so a static
@@ -26,6 +28,15 @@ const BANK_CATEGORIES = [
 // date-verified web-search accuracy (see buildBankPrompt) that no static
 // catalog entry could honestly claim; if today's bank lacks them, the
 // product prefers omitting them over risking a stale/wrong date claim.
+// good_news is excluded for the same reason: it is a claim about a recent,
+// current development, and a static catalog entry could only ever present
+// old news as if it were new -- omitting it on a day the live bank has none
+// is correct, not a gap to paper over. country_fact IS included: it is not
+// date-sensitive, only country-sensitive, so a static entry is honest as
+// long as it is genuinely tagged with a real country -- no fabricated
+// country_fact entries are added to the seed catalog just to fill this
+// category (see evergreenContentBank.js); if none exist for a given
+// country, selectBankItemsForDevice simply has nothing to offer there.
 const EVERGREEN_COMPATIBLE_CATEGORIES = new Set([
   'humor',
   'idiom',
@@ -35,6 +46,7 @@ const EVERGREEN_COMPATIBLE_CATEGORIES = new Set([
   'technology',
   'economics',
   'fact',
+  'country_fact',
 ]);
 
 // How many bank items to ask the model for. Not a hard contract with the
@@ -81,12 +93,12 @@ function buildBankPrompt(bankDate) {
   return `Search the web for what's notable about ${bankDate} and put together a varied global "content bank" for a phone lock screen app.
 Return STRICTLY a JSON array (no wrapper object, no explanations) of ${TARGET_BANK_SIZE} objects.
 Each object: {"category": one of [${BANK_CATEGORIES.join(', ')}], "content_text": "a short, self-contained piece of content in English, up to 200 characters", "tags": ["lowercase", "keyword", "tags"]}.
-Cover a genuine mix across ALL the listed categories, not just one or two -- include: real holidays/observances for ${bankDate}, "on this day in history" facts, notable quotes, interesting statistics, an interesting idiom or expression with its meaning, and light humor only if it localizes cleanly.
-Choose "category" precisely -- it is used directly to decide what this item is, not just a label: "science" is for a science fact (physics, biology, space, chemistry, etc.); "technology" is for a technology/computing fact; "economics" is for a money/economics fact; "fact" is only for a genuinely miscellaneous interesting fact that does not belong in science, technology, or economics. Do not put a science/technology/economics fact under "fact".
+Cover a genuine mix across ALL the listed categories, not just one or two -- include: real holidays/observances for ${bankDate}, "on this day in history" facts, notable quotes, interesting statistics, an interesting idiom or expression with its meaning, a fact about one specific country, a genuinely positive and recent news development, and light humor only if it localizes cleanly.
+Choose "category" precisely -- it is used directly to decide what this item is, not just a label: "science" is for a science fact (physics, biology, space, chemistry, etc.); "technology" is for a technology/computing fact; "economics" is for a money/economics fact; "fact" is only for a genuinely miscellaneous interesting fact that does not belong in science, technology, or economics; "country_fact" is a fact specifically about ONE particular country (not a generic global fact), and must always carry that country's ISO code in tags; "good_news" is a genuinely positive, real, verifiable development from roughly the last few days -- never invented, never old news presented as new. Do not put a science/technology/economics fact under "fact".
 Keep the bank international and reusable for users in many countries: do not make it US-centric or Russia-centric.
-Prioritize accuracy from web search for date-specific items (holiday, on_this_day) -- they must match ${bankDate}; do not invent fake historical events or holidays.
+Prioritize accuracy from web search for date-specific items (holiday, on_this_day, good_news) -- holiday/on_this_day must match ${bankDate}; good_news must be a real, recent, verifiable development; do not invent fake historical events, holidays, or news.
 Keep every content_text glanceable and self-contained (no "as mentioned above", no follow-up questions).
-For global/international items, add "global" to tags. For country-specific items, add the ISO country code tag such as "KZ", "FR", or "JP". Avoid country-specific politics.
+For global/international items, add "global" to tags. For country-specific items -- including every "country_fact" item, which must always have one -- add the ISO country code tag such as "KZ", "FR", or "JP". Avoid country-specific politics.
 Do not generate self-help, motivational coaching, psychology tips, productivity advice, or generic wishes.
 Respond with the JSON array only, nothing else.`;
 }

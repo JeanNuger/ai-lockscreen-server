@@ -7,12 +7,10 @@ const CONTENT_TYPES = [
   'history_today',
   'science',
   'country_fact',
-  'city_fact',
   'word_learning',
   'learning_recall',
   'foreign_word_or_expression',
   'humor',
-  'useful_knowledge',
   'technology',
   'money_economics',
   'culture',
@@ -41,11 +39,9 @@ const FACTUAL_TYPES = new Set([
   'history_today',
   'science',
   'country_fact',
-  'city_fact',
   'word_learning',
   'learning_recall',
   'foreign_word_or_expression',
-  'useful_knowledge',
   'technology',
   'money_economics',
   'culture',
@@ -272,6 +268,10 @@ function mapBankItemType(item) {
   if (item.category === 'technology') return 'technology';
   if (item.category === 'economics') return 'money_economics';
   if (item.category === 'fact') return 'unusual_fact';
+  // country_fact/good_news added in the same direct-mapping style, no
+  // keyword inference (see HANDOFF_2 content-diversity follow-up).
+  if (item.category === 'country_fact') return 'country_fact';
+  if (item.category === 'good_news') return 'good_news';
   return 'unusual_fact';
 }
 

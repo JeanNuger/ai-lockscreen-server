@@ -19,6 +19,8 @@ const {
   _test: bankTest,
 } = require('../src/dailyContentBank');
 const {
+  CONTENT_TYPES,
+  FACTUAL_TYPES,
   _test: plannerTest,
 } = require('../src/slotPlanner');
 const {
@@ -28,6 +30,7 @@ const {
 const EXPECTED_CATEGORIES = [
   'holiday', 'on_this_day', 'humor', 'idiom', 'statistic',
   'quote', 'science', 'technology', 'economics', 'fact',
+  'country_fact', 'good_news',
 ];
 
 const EXPECTED_MAPPING = {
@@ -41,6 +44,8 @@ const EXPECTED_MAPPING = {
   technology: 'technology',
   economics: 'money_economics',
   fact: 'unusual_fact',
+  country_fact: 'country_fact',
+  good_news: 'good_news',
 };
 
 function insertBankRow(bankDate, category, contentText, tags = ['global']) {
@@ -80,6 +85,69 @@ async function main() {
     assert.strictEqual(type, 'unusual_fact', `"fact" category must always map to unusual_fact regardless of keywords: "${content_text}"`);
   }
 
+  // --- country_fact: reuses existing country-tag filtering, no per-country
+  // generation call -- the exact same isBankItemAllowedForCountry mechanism
+  // that already gates every other category ---
+  {
+    const kzFact = { category: 'country_fact', content_text: 'Kazakhstan is the largest landlocked country in the world.', tags: ['KZ'] };
+    assert(bankTest.isBankItemAllowedForCountry(kzFact, 'KZ'), 'a KZ-tagged country_fact must be allowed for a KZ device');
+    assert(!bankTest.isBankItemAllowedForCountry(kzFact, 'FR'), 'a KZ-tagged country_fact must be rejected for a device in a different country');
+  }
+
+  // --- good_news must be excluded from evergreen compatibility, and
+  // evergreen backfill must never fabricate a good_news item ---
+  {
+    assert(!EVERGREEN_COMPATIBLE_CATEGORIES.has('good_news'), 'good_news must not be evergreen-compatible (it is a claim about recency)');
+    const backfill = bankTest.getEvergreenBackfillRows(new Set(), null);
+    assert(!backfill.some((row) => row.category === 'good_news'), 'evergreen backfill must never fabricate a good_news item, even when every category is missing');
+  }
+
+  // --- good_news can come from today's live Daily Bank (fresh-only, never evergreen) ---
+  {
+    const bankDate = getBankDateString();
+    insertBankRow(bankDate, 'good_news', 'LIVE_GOOD_NEWS_UNIQUE_TEXT');
+    const selected = selectBankItemsForDevice('device-good-news-live', bankDate, '2026-09-21', null, null, 20);
+    const goodNewsItems = selected.filter((item) => item.category === 'good_news');
+    assert.strictEqual(goodNewsItems.length, 1, 'exactly one good_news item must be selectable when live has one today');
+    assert.strictEqual(goodNewsItems[0].content_text, 'LIVE_GOOD_NEWS_UNIQUE_TEXT', 'good_news must come from the live row, not an evergreen substitute');
+  }
+
+  // --- when live has NO good_news today, it must simply be omitted, never
+  // backfilled from evergreen ---
+  {
+    const failedBankDate = 'no-bank-rows-for-good-news-test';
+    const selected = selectBankItemsForDevice('device-good-news-missing', failedBankDate, '2026-09-21', null, null, 20);
+    assert(
+      !selected.some((item) => item.category === 'good_news'),
+      'good_news must be omitted (not evergreen-backfilled) when today\'s live bank has none'
+    );
+  }
+
+  // --- city_fact and useful_knowledge are no longer active content types ---
+  {
+    assert(!CONTENT_TYPES.includes('city_fact'), 'city_fact must be removed from CONTENT_TYPES');
+    assert(!CONTENT_TYPES.includes('useful_knowledge'), 'useful_knowledge must be removed from CONTENT_TYPES');
+    assert(!FACTUAL_TYPES.has('city_fact'), 'city_fact must be removed from FACTUAL_TYPES');
+    assert(!FACTUAL_TYPES.has('useful_knowledge'), 'useful_knowledge must be removed from FACTUAL_TYPES');
+    // No production code path can produce these types anymore either --
+    // any bank item with an unrecognized/removed category degrades to the
+    // safe default, never to a removed type.
+    assert.strictEqual(plannerTest.mapBankItemType({ category: 'city_fact', content_text: 'x' }), 'unusual_fact');
+    assert.strictEqual(plannerTest.mapBankItemType({ category: 'useful_knowledge', content_text: 'x' }), 'unusual_fact');
+  }
+
+  // --- repo has no unexpected runtime dependency on the removed types ---
+  {
+    const slotPlannerSource = fs.readFileSync(path.join(__dirname, '../src/slotPlanner.js'), 'utf8');
+    const dailyBankSource = fs.readFileSync(path.join(__dirname, '../src/dailyContentBank.js'), 'utf8');
+    const contentGeneratorSource = fs.readFileSync(path.join(__dirname, '../src/contentGenerator.js'), 'utf8');
+    for (const removedType of ['city_fact', 'useful_knowledge']) {
+      assert(!slotPlannerSource.includes(removedType), `slotPlanner.js must not reference removed type "${removedType}"`);
+      assert(!dailyBankSource.includes(removedType), `dailyContentBank.js must not reference removed type "${removedType}"`);
+      assert(!contentGeneratorSource.includes(removedType), `contentGenerator.js must not reference removed type "${removedType}"`);
+    }
+  }
+
   // --- D/F: live category content is preferred over evergreen; evergreen
   // only fills categories with zero live rows today ---
   {
@@ -97,12 +165,17 @@ async function main() {
       'live science content must be preferred over the evergreen science fallback'
     );
     // Every other evergreen-compatible category had zero live rows today, so
-    // they must all have been evergreen-backfilled and selectable.
+    // they must all have been evergreen-backfilled and selectable -- except
+    // country_fact, which is architecturally evergreen-compatible but has no
+    // seed catalog entries in this task by explicit product decision (no
+    // invented country facts were added just to fill it), so it is expected
+    // to be legitimately absent here, not a bug.
     const nonScienceCategories = new Set(selected.map((item) => item.category));
     for (const category of EVERGREEN_COMPATIBLE_CATEGORIES) {
-      if (category === 'science') continue;
+      if (category === 'science' || category === 'country_fact') continue;
       assert(nonScienceCategories.has(category), `evergreen must backfill missing category "${category}" when live has none today`);
     }
+    assert(!nonScienceCategories.has('country_fact'), 'country_fact must not appear when the seed catalog has no entries for it (no fabricated country facts)');
   }
 
   // --- evergreen backfill occurs ONLY for missing evergreen-compatible categories ---
@@ -136,7 +209,15 @@ async function main() {
       'a failed bank day must never fabricate holiday/on_this_day content via evergreen'
     );
     const categoriesSeen = new Set(selected.map((item) => item.category));
-    assert(categoriesSeen.size >= EVERGREEN_COMPATIBLE_CATEGORIES.size, 'a failed bank day should surface every evergreen-compatible category');
+    // country_fact is architecturally evergreen-compatible but intentionally
+    // has zero seed catalog entries in this task (no invented country facts),
+    // so it is correctly absent here even on a fully failed bank day.
+    assert(
+      categoriesSeen.size >= EVERGREEN_COMPATIBLE_CATEGORIES.size - 1,
+      'a failed bank day should surface every evergreen-compatible category that actually has seed content'
+    );
+    assert(!categoriesSeen.has('country_fact'), 'country_fact must not appear on a failed bank day when the seed catalog has no entries for it');
+    assert(!categoriesSeen.has('good_news'), 'good_news must never appear via evergreen, even on a fully failed bank day');
   }
 
   // --- evergreen IDs/content keys are deterministic across days/runs ---

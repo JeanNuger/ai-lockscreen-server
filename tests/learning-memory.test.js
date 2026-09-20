@@ -174,7 +174,7 @@ async function main() {
         source: 'learning_memory',
         learning_memory_id: recallCandidateId,
       }),
-      ...['science', 'technology', 'culture', 'useful_knowledge', 'money_economics', 'country_fact'].flatMap((type, i) => ([
+      ...['science', 'technology', 'culture', 'good_news', 'money_economics', 'country_fact'].flatMap((type, i) => ([
         plannerTest.createCandidate({ id: `filler_${type}_a`, type, priority: 10, facts: { text: `filler ${type} a ${i}` } }),
         plannerTest.createCandidate({ id: `filler_${type}_b`, type, priority: 10, facts: { text: `filler ${type} b ${i}` } }),
       ])),

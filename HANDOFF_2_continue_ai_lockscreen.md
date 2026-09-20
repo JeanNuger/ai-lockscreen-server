@@ -89,6 +89,14 @@ Legacy implementation этих полей в Android/server должна быт�
 - **Later** — city events/афиша через cache, дальнейшие расширения.
 - Prompt/token optimization — вместе с новой slot-архитектурой, без дополнительных OpenAI calls.
 
+**Phase 3 — COMPLETED:** Content Memory / anti-repeat (`device_content_memory`, cooldown 45 дней, content_key/topic_key).
+
+**Phase 4 — COMPLETED:** Learning Memory + recall (`device_learning_memory`, 2–14 дней окно, `word_learning`/`learning_recall`, `idiom` bank category — источник).
+
+**Phase 5 — COMPLETED:** Daily Bank / content sources improvement. `BANK_CATEGORIES` теперь прямо маппятся в SlotPlanner type без regex/keyword inference (`mapBankItemType`). Добавлен evergreen fallback (`src/evergreenContentBank.js`, маленький version-controlled каталог, НЕ SQLite) — backfill только для категорий без live rows сегодня, никогда не заменяет live-контент, никогда не покрывает `holiday`/`on_this_day`. Убран мёртвый `advice`/gender-tag код (`genderAdviceTag`, `category === 'advice'`) — намеренно удалённая фича, не путать с legacy §7.
+
+**Content-diversity follow-up (после Phase 5) — COMPLETED:** добавлены `country_fact` и `good_news` в тот же shared Daily Bank call (прямой mapping, без per-country/per-city вызовов, без дополнительных OpenAI calls). `country_fact` — evergreen-compatible архитектурно, но seed-каталог намеренно НЕ пополнялся выдуманными country facts в этой задаче: если для страны пользователя нет evergreen-элемента, категория просто пропускается. `good_news` — date-sensitive/fresh-only, НИКОГДА не покрывается evergreen (как `holiday`/`on_this_day`): если сегодня в live bank нет good_news, слот просто пропускается, а не подменяется старой новостью. `city_fact` и `useful_knowledge` удалены из `CONTENT_TYPES`/`FACTUAL_TYPES` как активные типы: `city_fact` требует per-city данных, которых сейчас нет (страна/город устройства не хранятся, `city` резолвится только эфемерно из IP на каждый batch-запрос — см. `weather.js`), поэтому отложен вместе с city events/cache; `useful_knowledge` не имел смысла, отличного от `fact` или намеренно убранной категории `advice`, замены не вводились.
+
 ### Ниже приоритетом, не начинать без запроса
 
 - Android "часть B" — проверка читаемости часов на не-Samsung устройстве/эмулятор Pixel.
