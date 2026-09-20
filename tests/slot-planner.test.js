@@ -522,7 +522,7 @@ async function main() {
     nightSlots[nightSlots.length - 1].slot_id,
     'rejected night goodnight fallback must remain last'
   );
-  assert(/^Good night\./.test(nightRejected.phrases[nightRejected.phrases.length - 1].text), 'night fallback must be goodnight-specific');
+  assert(/phone needs rest/i.test(nightRejected.phrases[nightRejected.phrases.length - 1].text), 'night fallback must be rest-specific');
 
   const badSlotIds = contentTest.assembleBatchFromGeneratedPhrases(
     [
