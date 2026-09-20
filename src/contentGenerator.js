@@ -1210,9 +1210,10 @@ Make the batch varied in wording and feel, but do not change the selected slot t
  * @param {string} window - 'morning' | 'day' | 'evening' | 'night'
  * @param {object} [signals] - optional device signals from deviceSignals.js
  * @param {object} [weather] - optional weather from weather.js (resolveWeather)
+ * @param {object} [phoneTrends] - semantic phone trends from phoneAnalytics.js
  * @returns {Promise<{phrases: Array<{text: string, style_id: string}>, source: 'openai'|'fallback'}>}
  */
-async function generateBatch(device, window, signals, weather) {
+async function generateBatch(device, window, signals, weather, phoneTrends = {}) {
   const apiKey = process.env.OPENAI_API_KEY;
   const languageCode = resolveTargetLanguageCode(signals);
   const { dateContext, unavailableReason } = resolveLocalDateContext(device.timezone);
@@ -1248,6 +1249,7 @@ async function generateBatch(device, window, signals, weather) {
     weather,
     bankItems,
     shownCategories,
+    phoneTrends,
   });
 
   const context = buildContextPrompt(device, window, signals, weather, languageCode, slots, shownCategories, dateContext);

@@ -4,6 +4,7 @@ const { WINDOWS } = require('../constants');
 const { generateBatch } = require('../contentGenerator');
 const { consumePendingMessages } = require('../adminMessages');
 const { parseDeviceSignals } = require('../deviceSignals');
+const { computePhoneTrends, recordPhoneSignalSample } = require('../phoneAnalytics');
 const { resolveWeather } = require('../weather');
 
 const router = express.Router();
@@ -53,7 +54,9 @@ router.get('/batch', async (req, res, next) => {
     const device = getDeviceStatement.get(device_id) || { device_id };
     insertStubDeviceStatement.run(device_id);
 
-    const { phrases, source, context } = await generateBatch(device, window, signals, weather);
+    const phoneTrends = computePhoneTrends(device, window, signals);
+    const { phrases, source, context } = await generateBatch(device, window, signals, weather, phoneTrends);
+    recordPhoneSignalSample(device, window, signals);
     const adminPhrases = consumePendingMessages(device_id);
     const combinedPhrases = [...phrases, ...adminPhrases];
 

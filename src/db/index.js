@@ -92,6 +92,22 @@ db.exec(`
     PRIMARY KEY (device_id, shown_date, category),
     FOREIGN KEY (device_id) REFERENCES devices(device_id)
   );
+
+  CREATE TABLE IF NOT EXISTS phone_signal_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    window TEXT NOT NULL,
+    device_local_date TEXT NOT NULL,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    unlocks_since_last_batch INTEGER,
+    steps_since_last_batch INTEGER,
+    FOREIGN KEY (device_id) REFERENCES devices(device_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_phone_signal_samples_history
+    ON phone_signal_samples(device_id, window, device_local_date);
+  CREATE INDEX IF NOT EXISTS idx_phone_signal_samples_recorded_at
+    ON phone_signal_samples(recorded_at);
 `);
 
 // One-off migration: devices.name is new as of 2026-09-12. This project has no

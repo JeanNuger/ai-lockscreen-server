@@ -168,6 +168,7 @@ const TYPE_CAPS = {
   riddle: 1,
   humor: 2,
   free_ai_thought: 2,
+  phone_trend: 1,
 };
 
 const DEFAULT_TYPE_CAP = 2;
@@ -283,9 +284,29 @@ function computeAge(birthDate, now = new Date()) {
   return age >= 0 ? age : null;
 }
 
+const PHONE_TREND_KEYS = new Set([
+  'unlocks_vs_yesterday',
+  'steps_vs_yesterday',
+]);
+const PHONE_TREND_VALUES = new Set(['higher', 'lower']);
+
+function normalizePhoneTrends(phoneTrends = {}) {
+  const normalized = {};
+  if (!phoneTrends || typeof phoneTrends !== 'object' || Array.isArray(phoneTrends)) {
+    return normalized;
+  }
+  for (const [key, value] of Object.entries(phoneTrends)) {
+    if (PHONE_TREND_KEYS.has(key) && PHONE_TREND_VALUES.has(value)) {
+      normalized[key] = value;
+    }
+  }
+  return normalized;
+}
+
 function collectCandidates(input = {}) {
   const candidates = [];
   const { device = {}, window, dateContext, weather, bankItems = [], phoneTrends = {} } = input;
+  const semanticPhoneTrends = normalizePhoneTrends(phoneTrends);
 
   if (window === 'morning') {
     const facts = {};
@@ -348,14 +369,14 @@ function collectCandidates(input = {}) {
     }));
   }
 
-  if (phoneTrends && Object.keys(phoneTrends).length > 0) {
+  if (Object.keys(semanticPhoneTrends).length > 0) {
     candidates.push(createCandidate({
       id: 'phone_trend_semantic',
       type: 'phone_trend',
-      priority: 42,
-      facts: phoneTrends,
+      priority: 28,
+      facts: semanticPhoneTrends,
       source: 'phone_analytics',
-      constraints: ['non_moralizing', 'no_exact_counts', 'no_psychological_claims'],
+      constraints: ['non_moralizing', 'no_exact_counts', 'no_psychological_claims', 'no_productivity_or_addiction_framing', 'no_causal_claims'],
     }));
   }
 
@@ -499,5 +520,6 @@ module.exports = {
     bankItemToCandidate,
     createCandidate,
     mapBankItemType,
+    normalizePhoneTrends,
   },
 };

@@ -103,6 +103,64 @@ async function main() {
   assert(candidates.some((candidate) => candidate.source === 'daily_bank' && candidate.type === 'history_today'), 'on_this_day bank item must become history_today candidate');
   assert(candidates.some((candidate) => candidate.source === 'daily_bank' && candidate.type === 'science'), 'science-tagged bank fact must become science candidate');
 
+  const noPhoneTrendCandidates = collectCandidates({
+    ...baseInput,
+    phoneTrends: {
+      unlocks_since_last_batch: 65,
+      steps_since_last_batch: 4217,
+      unlocks_vs_yesterday: 'normal',
+    },
+  });
+  assert(!noPhoneTrendCandidates.some((candidate) => candidate.type === 'phone_trend'), 'phone_trend candidate must require meaningful semantic trend facts');
+
+  const phoneTrendCandidates = collectCandidates({
+    ...baseInput,
+    phoneTrends: {
+      unlocks_vs_yesterday: 'higher',
+      steps_vs_yesterday: 'lower',
+      raw_count: 999,
+    },
+  });
+  const phoneTrendCandidate = phoneTrendCandidates.find((candidate) => candidate.type === 'phone_trend');
+  assert(phoneTrendCandidate, 'semantic phone trends must create one phone_trend candidate');
+  assert.deepStrictEqual(
+    phoneTrendCandidate.facts,
+    { unlocks_vs_yesterday: 'higher', steps_vs_yesterday: 'lower' },
+    'phone_trend candidate must keep only semantic facts'
+  );
+  assert(phoneTrendCandidate.constraints.includes('no_exact_counts'), 'phone_trend must explicitly forbid exact counts');
+
+  const phoneTrendSlots = planSlots({
+    device: { device_id: 'phone-trend-device' },
+    window: 'day',
+    dateContext: null,
+    weather: null,
+    bankItems: [],
+    phoneTrends: { unlocks_vs_yesterday: 'higher', steps_vs_yesterday: 'lower' },
+  }, { seed: 'phone-trend-seed' }).slots;
+  assert(
+    phoneTrendSlots.filter((slot) => slot.type === 'phone_trend').length <= 1,
+    'planner must cap phone_trend at one slot per batch'
+  );
+  assert.strictEqual(
+    phoneTrendSlots.filter((slot) => slot.type === 'phone_trend').length,
+    1,
+    'meaningful semantic phone trend must be reachable as a selected slot in a controlled sparse batch'
+  );
+
+  const noPhoneTrendSlots = planSlots({
+    device: { device_id: 'no-phone-trend-device' },
+    window: 'day',
+    dateContext: null,
+    weather: null,
+    bankItems: [],
+  }, { seed: 'phone-trend-seed' }).slots;
+  assert.strictEqual(
+    noPhoneTrendSlots.filter((slot) => slot.type === 'phone_trend').length,
+    0,
+    'planner must not select phone_trend when no semantic phoneTrends exist'
+  );
+
   const counts = slotTypeCounts(planned.slots);
   for (const [type, count] of counts.entries()) {
     assert(count <= 2, `planner must avoid excessive concentration of one type: ${type}=${count}`);
@@ -303,8 +361,16 @@ async function main() {
         tone: 'humorous',
       },
       'morning',
-      { system_language: 'en' },
-      { countryCode: 'KZ', city: 'Almaty', temperatureC: 12, description: 'rain' }
+      {
+        system_language: 'en',
+        battery_level: 73,
+        ambient_light: 15.5,
+        screen_on_duration_seconds: 83,
+        unlocks_since_last_batch: 65,
+        steps_since_last_batch: 4217,
+      },
+      { countryCode: 'KZ', city: 'Almaty', temperatureC: 12, description: 'rain' },
+      { unlocks_vs_yesterday: 'higher' }
     );
 
     assert.strictEqual(openAiCallCount, 1, 'normal batch generation must make exactly one OpenAI call');
@@ -318,6 +384,19 @@ async function main() {
     assert(!('personal_goal' in (payload.profile || {})), 'OpenAI payload must not include personal_goal');
     assert(!('tone' in (payload.profile || {})), 'OpenAI payload must not include tone');
     assert(!('interests' in (payload.profile || {})), 'OpenAI payload must not include interests');
+    const payloadText = JSON.stringify(payload);
+    for (const rawKey of [
+      'battery_level',
+      'ambient_light',
+      'screen_on_duration_seconds',
+      'unlocks_since_last_batch',
+      'steps_since_last_batch',
+    ]) {
+      assert(!payloadText.includes(rawKey), `OpenAI payload must not include raw telemetry key: ${rawKey}`);
+    }
+    for (const rawValue of ['73', '15.5', '83', '65', '4217']) {
+      assert(!payloadText.includes(rawValue), `OpenAI payload must not include raw telemetry value: ${rawValue}`);
+    }
   } finally {
     Module._load = originalLoad;
     delete process.env.OPENAI_API_KEY;
