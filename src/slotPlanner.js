@@ -517,6 +517,120 @@ function antiRepeatPenalty(candidate, memoryIndex) {
   return penalty;
 }
 
+// Interests personalization (server-selects WHAT gets an interest angle,
+// OpenAI only handles HOW -- same "Server = WHAT, OpenAI = HOW" split as the
+// rest of this file). Deliberately NOT a selection-time score nudge (an
+// earlier version of this file did that, and was replaced): a score boost
+// can only make a slot MORE LIKELY to be picked, it can never guarantee the
+// generated text is actually about the interest, because OpenAI never
+// received the interest at all. Instead: run the exact same, completely
+// unmodified candidate selection as always (this is what keeps interests
+// fully subordinate to mandatory slots/learning recall/anti-repeat/country
+// eligibility/factual grounding/Daily Bank freshness/type caps -- nothing
+// here can touch WHICH candidates get chosen), then, only after the 12
+// slots are already final, tag at most MAX_INTEREST_AWARE_SLOTS of them
+// with a compact interest_hint that DOES reach the OpenAI payload for just
+// those slots (see buildContextPrompt in contentGenerator.js and the static
+// prompt instruction in buildSystemPrompt). See HANDOFF_2 interests
+// personalization follow-up.
+//
+// Exactly six interest ids exist today (Android SurveyInterestsActivity /
+// ProfileActivity, sent verbatim as the wire values in RegisterRequest):
+// sport, work, family, self_development, mindfulness, creative_arts. Each
+// maps to one existing content type -- used here purely as a compatibility
+// check ("is this already-selected slot's type a genuine fit for this
+// interest"), never to invent or force a connection a slot's own facts
+// don't support.
+const INTEREST_TYPE_MAP = {
+  sport: 'unusual_fact',
+  work: 'money_economics',
+  family: 'culture',
+  self_development: 'science',
+  mindfulness: 'reflective_observation',
+  creative_arts: 'culture',
+};
+
+// Hard, structural cap on how many of the final BATCH_SIZE slots may ever
+// carry an interest_hint -- "approximately 3-4 of 12, never the whole
+// batch" enforced by construction (selectInterestAwareSlots below never
+// assigns more than this many hints), not left to chance.
+const MAX_INTEREST_AWARE_SLOTS = 4;
+
+function parseDeviceInterests(rawInterests) {
+  if (!rawInterests) {
+    return [];
+  }
+  if (Array.isArray(rawInterests)) {
+    return rawInterests.filter((item) => typeof item === 'string');
+  }
+  try {
+    const parsed = JSON.parse(rawInterests);
+    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string') : [];
+  } catch (err) {
+    return [];
+  }
+}
+
+// Picks which of the already-final slots (post-selection, post-type-caps,
+// post-anti-repeat -- these slots are settled) get an interest_hint, and
+// which interest each one represents. Returns a Map<slot.id, interest_id>.
+//
+// Distribution: walks the user's interests in Android's fixed send order,
+// giving each a genuinely type-compatible, not-yet-used slot before any
+// interest gets a second one -- so 2 selected interests with compatible
+// slots available produce 2 different hints, not the same interest twice,
+// while a single selected interest can still fill up to the cap if enough
+// compatible slots exist. An interest with no type-compatible slot among
+// the final 12 (e.g. its mapped type didn't get selected this batch, or
+// none of the selected candidates of that type have facts that genuinely
+// fit) is simply skipped for this batch -- never forced onto an unrelated
+// slot.
+function selectInterestAwareSlots(finalSlots, rawInterests) {
+  const interests = parseDeviceInterests(rawInterests);
+  const hints = new Map();
+  if (interests.length === 0) {
+    return hints;
+  }
+
+  const slotsByType = new Map();
+  for (const slot of finalSlots) {
+    if (!slotsByType.has(slot.type)) {
+      slotsByType.set(slot.type, []);
+    }
+    slotsByType.get(slot.type).push(slot);
+  }
+
+  const used = new Set();
+  const assignNextRound = () => {
+    let assignedAny = false;
+    for (const interest of interests) {
+      if (hints.size >= MAX_INTEREST_AWARE_SLOTS) {
+        return assignedAny;
+      }
+      const compatibleType = INTEREST_TYPE_MAP[interest];
+      if (!compatibleType) {
+        continue;
+      }
+      const candidates = slotsByType.get(compatibleType) || [];
+      const pick = candidates.find((slot) => !used.has(slot.id));
+      if (pick) {
+        hints.set(pick.id, interest);
+        used.add(pick.id);
+        assignedAny = true;
+      }
+    }
+    return assignedAny;
+  };
+
+  // Round 1 distributes one slot per distinct interest before round 2+
+  // lets any interest take a second/third/fourth slot, up to the cap.
+  while (hints.size < MAX_INTEREST_AWARE_SLOTS && assignNextRound()) {
+    // loop continues until either the cap is hit or a full round assigns nothing
+  }
+
+  return hints;
+}
+
 function candidateWeight(candidate, rng, memoryIndex = buildRecentMemoryIndex()) {
   return candidate.priority + rng() * 20 - antiRepeatPenalty(candidate, memoryIndex);
 }
@@ -592,6 +706,11 @@ function addSlotIds(candidates) {
     // Server-only; buildContextPrompt hand-picks {slot_id, type, facts,
     // constraints} for the OpenAI payload and does not include this field.
     learning_memory_id: candidate.learning_memory_id,
+    // Set below, after selection, by selectInterestAwareSlots -- for the
+    // vast majority of slots this stays undefined and is dropped entirely
+    // by JSON.stringify, so a non-personalized slot's payload shape is
+    // byte-identical to before interests personalization existed.
+    interest_hint: undefined,
   }));
 }
 
@@ -623,9 +742,24 @@ function planSlots(input = {}, options = {}) {
   ordered.push(...middle);
   if (mandatoryLast) ordered.push(mandatoryLast);
 
+  const slots = addSlotIds(ordered.slice(0, BATCH_SIZE));
+
+  // Interest hints are assigned only now, after the 12 slots are already
+  // final -- selection above ran completely unaware of interests, so
+  // mandatory slots/learning recall/anti-repeat/country eligibility/
+  // factual grounding/Daily Bank freshness/type caps were never at risk of
+  // being overridden by personalization.
+  const interestHints = selectInterestAwareSlots(slots, input.device && input.device.interests);
+  for (const slot of slots) {
+    const hint = interestHints.get(slot.id);
+    if (hint) {
+      slot.interest_hint = hint;
+    }
+  }
+
   return {
     candidates,
-    slots: addSlotIds(ordered.slice(0, BATCH_SIZE)),
+    slots,
   };
 }
 
@@ -642,5 +776,10 @@ module.exports = {
     mapBankItemType,
     normalizePhoneTrends,
     normalizeTextForTopicKey,
+    parseDeviceInterests,
+    selectInterestAwareSlots,
+    candidateWeight,
+    INTEREST_TYPE_MAP,
+    MAX_INTEREST_AWARE_SLOTS,
   },
 };

@@ -220,15 +220,151 @@ async function main() {
   const night = planSlots({ ...baseInput, window: 'night' }, { seed: 'night-seed' });
   assert.strictEqual(night.slots[night.slots.length - 1].type, 'goodnight', 'night last slot must be goodnight');
 
-  const noLegacyProfileInput = {
+  // personal_goal/tone remain removed-from-personalization (onboarding UI
+  // fields, product decision) -- the planner must produce byte-identical
+  // output whether or not they're present, with interests held constant.
+  const noPersonalGoalToneInput = {
     ...baseInput,
-    device: { device_id: 'planner-device', name: 'Aruzhan', birth_date: '1995-05-20', gender: 'female' },
+    device: {
+      device_id: 'planner-device',
+      name: 'Aruzhan',
+      birth_date: '1995-05-20',
+      gender: 'female',
+      interests: baseInput.device.interests,
+    },
   };
   assert.deepStrictEqual(
     planSlots(baseInput, { seed: 'legacy-profile-seed' }).slots,
-    planSlots(noLegacyProfileInput, { seed: 'legacy-profile-seed' }).slots,
-    'planner must not depend on personal_goal/tone/interests'
+    planSlots(noPersonalGoalToneInput, { seed: 'legacy-profile-seed' }).slots,
+    'planner must not depend on personal_goal/tone'
   );
+
+  // interests, unlike personal_goal/tone, NOW deliberately do influence
+  // planning (see the dedicated interests-personalization section below for
+  // the precise, deterministic proof) -- this block only confirms a device
+  // with zero interests at all (old client, or user selected none) still
+  // plans a complete, valid batch, i.e. nothing breaks/degrades when the
+  // field is entirely absent.
+  const noInterestsAtAllInput = {
+    ...baseInput,
+    device: {
+      device_id: 'planner-device',
+      name: 'Aruzhan',
+      birth_date: '1995-05-20',
+      gender: 'female',
+    },
+  };
+  const noInterestsPlanned = planSlots(noInterestsAtAllInput, { seed: 'legacy-profile-seed' });
+  assert.strictEqual(noInterestsPlanned.slots.length, BATCH_SIZE, 'a device with no interests at all must still plan a full, normal batch');
+
+  // --- interests personalization (post-selection interest_hint tagging) ---
+  // Selection itself (candidateWeight/selectNonMandatory) is now completely
+  // unaware of interests -- selectInterestAwareSlots only tags already-final
+  // slots, so it structurally cannot override mandatory/learning-recall/
+  // anti-repeat/country/factual-grounding/Daily-Bank-freshness/type-cap
+  // decisions, all of which already happened before it ever runs.
+  {
+    const buildTaggedPool = (extra = []) => [
+      plannerTest.createCandidate({ id: 'money_economics_a', type: 'money_economics', priority: 48, facts: { text: 'work fact a' } }),
+      plannerTest.createCandidate({ id: 'money_economics_b', type: 'money_economics', priority: 48, facts: { text: 'work fact b' } }),
+      plannerTest.createCandidate({ id: 'science_a', type: 'science', priority: 48, facts: { text: 'self-development fact a' } }),
+      plannerTest.createCandidate({ id: 'science_b', type: 'science', priority: 48, facts: { text: 'self-development fact b' } }),
+      plannerTest.createCandidate({ id: 'humor_a', type: 'humor', priority: 30, facts: {} }),
+      plannerTest.createCandidate({ id: 'humor_b', type: 'humor', priority: 30, facts: {} }),
+      plannerTest.createCandidate({ id: 'technology_a', type: 'technology', priority: 30, facts: { text: 'tech fact' } }),
+      plannerTest.createCandidate({ id: 'everyday_observation_a', type: 'everyday_observation', priority: 20, facts: {} }),
+      plannerTest.createCandidate({ id: 'playful_thought_a', type: 'playful_thought', priority: 20, facts: {} }),
+      plannerTest.createCandidate({ id: 'tiny_imagined_scene_a', type: 'tiny_imagined_scene', priority: 20, facts: {} }),
+      plannerTest.createCandidate({ id: 'gentle_wish_a', type: 'gentle_wish', priority: 15, facts: {} }),
+      plannerTest.createCandidate({ id: 'language_play_a', type: 'language_play', priority: 10, facts: {} }),
+      ...extra,
+    ];
+
+    // 1 & 2: multiple selected interests are distributed across at most
+    // MAX_INTEREST_AWARE_SLOTS slots, not all piled onto one interest.
+    const planned = planSlots(
+      { device: { device_id: 'interest-hint-device', interests: JSON.stringify(['work', 'self_development']) }, window: 'day' },
+      { seed: 'interest-hint-seed', candidates: buildTaggedPool() }
+    );
+    assert.strictEqual(planned.slots.length, BATCH_SIZE);
+    const hinted = planned.slots.filter((slot) => slot.interest_hint);
+    assert(hinted.length > 0, 'at least one slot should receive an interest_hint when compatible candidates exist');
+    assert(hinted.length <= plannerTest.MAX_INTEREST_AWARE_SLOTS, `interest-hinted slots (${hinted.length}) must never exceed MAX_INTEREST_AWARE_SLOTS`);
+    const hintValues = new Set(hinted.map((slot) => slot.interest_hint));
+    assert(
+      [...hintValues].every((v) => v === 'work' || v === 'self_development'),
+      'only the user\'s own selected interests may ever appear as a hint'
+    );
+    if (hinted.length >= 2) {
+      assert(hintValues.size >= 1, 'sanity: at least one distinct interest represented');
+    }
+
+    // 3: every slot NOT chosen for personalization has no interest_hint at all.
+    const unhinted = planned.slots.filter((slot) => !hinted.includes(slot));
+    assert(unhinted.every((slot) => slot.interest_hint === undefined), 'non-personalized slots must carry no interest_hint');
+
+    // Direct unit-level proof of distribution across 2 distinct interests
+    // when 2+ compatible slots exist for each (deterministic, no planSlots
+    // randomness involved at all).
+    const directHints = plannerTest.selectInterestAwareSlots(
+      buildTaggedPool().map((c, i) => ({ ...c, slot_id: `s${i + 1}` })),
+      JSON.stringify(['work', 'self_development'])
+    );
+    const distinctInterestsUsed = new Set(directHints.values());
+    assert.strictEqual(distinctInterestsUsed.size, 2, 'round 1 must give each distinct compatible interest one slot before any interest gets a second');
+    assert(directHints.size <= plannerTest.MAX_INTEREST_AWARE_SLOTS, 'direct call must also respect the hard cap');
+
+    // A single selected interest CAN still fill more than one slot (up to
+    // the cap) when enough compatible candidates exist -- distribution only
+    // means "not always the same interest when others qualify," not "cap
+    // each interest at one slot forever."
+    const singleInterestHints = plannerTest.selectInterestAwareSlots(
+      buildTaggedPool().map((c, i) => ({ ...c, slot_id: `s${i + 1}` })),
+      JSON.stringify(['work'])
+    );
+    assert.strictEqual(singleInterestHints.size, 2, 'a single interest with 2 compatible candidates should use both, still within the cap');
+    assert([...singleInterestHints.values()].every((v) => v === 'work'));
+
+    // 4: a device with no interests gets a completely normal batch -- zero
+    // hints, and selection is untouched (interests can no longer influence
+    // scoring at all, so this is byte-identical to the pre-interests planner).
+    const noInterestPlanned = planSlots(
+      { device: { device_id: 'interest-hint-device-none' }, window: 'day' },
+      { seed: 'interest-hint-seed', candidates: buildTaggedPool() }
+    );
+    assert.strictEqual(noInterestPlanned.slots.length, BATCH_SIZE);
+    assert(noInterestPlanned.slots.every((slot) => slot.interest_hint === undefined), 'a device with no interests must receive zero interest_hints');
+    assert.deepStrictEqual(
+      noInterestPlanned.slots.map((s) => ({ id: s.id, type: s.type })),
+      planned.slots.map((s) => ({ id: s.id, type: s.type })),
+      'selection itself (which candidates win which slots) must be identical with vs without interests -- only the post-hoc hint differs'
+    );
+
+    // Safe degradation: malformed/empty/unknown interests never throw and
+    // never assign a hint.
+    assert.strictEqual(plannerTest.selectInterestAwareSlots(planned.slots, null).size, 0);
+    assert.strictEqual(plannerTest.selectInterestAwareSlots(planned.slots, JSON.stringify([])).size, 0);
+    assert.strictEqual(plannerTest.selectInterestAwareSlots(planned.slots, 'not valid json').size, 0);
+    assert.strictEqual(plannerTest.selectInterestAwareSlots(planned.slots, JSON.stringify(['not_a_real_interest'])).size, 0);
+
+    // 8: factual grounding wins -- an interest never invents or alters a
+    // slot's facts; tagging only ever adds interest_hint, facts are the
+    // exact same object/content before and after.
+    for (const slot of hinted) {
+      const original = planned.candidates.find((c) => c.id === slot.id);
+      assert.deepStrictEqual(slot.facts, original.facts, 'an interest_hint must never change/add to a slot\'s grounded facts');
+    }
+
+    // IMPORTANT DAILY BANK RULE: an interest with NO type-compatible slot in
+    // the final batch must simply be skipped, never forced onto an
+    // unrelated slot.
+    const noCompatiblePool = [
+      plannerTest.createCandidate({ id: 'humor_only_a', type: 'humor', priority: 30, facts: {} }),
+      plannerTest.createCandidate({ id: 'humor_only_b', type: 'humor', priority: 30, facts: {} }),
+    ].map((c, i) => ({ ...c, slot_id: `s${i + 1}` }));
+    const noCompatibleHints = plannerTest.selectInterestAwareSlots(noCompatiblePool, JSON.stringify(['work']));
+    assert.strictEqual(noCompatibleHints.size, 0, 'an interest with no compatible slot in the final batch must be skipped, never forced onto an unrelated one');
+  }
 
   const candidates = collectCandidates(baseInput);
   assert(candidates.some((candidate) => candidate.source === 'daily_bank' && candidate.type === 'history_today'), 'on_this_day bank item must become history_today candidate');
@@ -438,6 +574,14 @@ async function main() {
   assert(weatherSlot.constraints.includes('do_not_state_exact_temperature'), 'weather slot must explicitly forbid exact temperature output');
   assert(/never state exact temperature/i.test(contentTest.buildSystemPrompt('en')), 'prompt must forbid exact weather temperature output');
 
+  // 7: the static/cached system prompt must explicitly forbid revealing the
+  // interest_hint personalization mechanism to the user.
+  const systemPromptText = contentTest.buildSystemPrompt('en');
+  assert(/interest_hint/i.test(systemPromptText), 'system prompt must document interest_hint semantics');
+  assert(/never name, quote, or reveal/i.test(systemPromptText), 'system prompt must explicitly forbid revealing the hint itself');
+  assert(/since you like/i.test(systemPromptText), 'system prompt must explicitly forbid profile-revealing phrasing like "since you like X"');
+  assert(/never invent a fact/i.test(systemPromptText), 'system prompt must forbid inventing facts/connections to satisfy an interest hint');
+
   const bankDate = getBankDateString();
   db.prepare(`
     INSERT INTO daily_content_bank (bank_date, category, content_text, tags)
@@ -519,8 +663,23 @@ async function main() {
     assert(!JSON.stringify(payload).includes('Unselected extra bank item'), 'OpenAI payload must not include the whole candidate pool/bank');
     assert(!('personal_goal' in (payload.profile || {})), 'OpenAI payload must not include personal_goal');
     assert(!('tone' in (payload.profile || {})), 'OpenAI payload must not include tone');
-    assert(!('interests' in (payload.profile || {})), 'OpenAI payload must not include interests');
+    assert(!('interests' in (payload.profile || {})), 'OpenAI payload must not include the full interests list as a profile field');
     const payloadText = JSON.stringify(payload);
+    // Interests personalization (this device has interests: ['work']) must
+    // stay compact and bounded: the interest id MAY appear, but only inside
+    // a small number of per-slot interest_hint fields (see the interests-
+    // personalization section above for the full mechanism) -- never as a
+    // verbose profile field, and never redundantly attached to every slot.
+    const interestHintCount = (payloadText.match(/"interest_hint":/g) || []).length;
+    assert(
+      interestHintCount <= plannerTest.MAX_INTEREST_AWARE_SLOTS,
+      `interest_hint must appear on at most ${plannerTest.MAX_INTEREST_AWARE_SLOTS} slots, found ${interestHintCount}`
+    );
+    for (const slot of payload.slots) {
+      if ('interest_hint' in slot) {
+        assert.strictEqual(slot.interest_hint, 'work', 'this device only selected the "work" interest, so any hint present must be exactly that id');
+      }
+    }
     for (const rawKey of [
       'battery_level',
       'ambient_light',

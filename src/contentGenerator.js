@@ -1152,6 +1152,13 @@ function buildContextPrompt(device, window, signals, weather, languageCode, slot
         type: slot.type,
         facts: slot.facts || {},
         constraints: slot.constraints || [],
+        // Only present on the small, server-selected subset of slots
+        // SlotPlanner picked as interest-aware (see selectInterestAwareSlots
+        // in slotPlanner.js) -- omitted (not even an empty/false value) for
+        // every other slot, so this never grows the per-slot payload shape
+        // for the common case, and never carries the user's full interests
+        // list, only the one compact tag relevant to this specific slot.
+        interest_hint: slot.interest_hint || undefined,
       }))
       : [],
   };
@@ -1197,6 +1204,7 @@ Hard rules:
 - do not make psychological, medical, moral, or addiction claims from phone behavior
 - if profile.name exists, use it at most once in the whole batch
 - gender/age context is optional and rare; avoid stereotypes
+- a few slots may include an interest_hint (a short topic tag, e.g. "sport"): when present, let that one slot's phrasing lean naturally toward that topic only if it genuinely fits the slot's own facts/type; never name, quote, or reveal the hint itself, never say or imply "since you like/are interested in/told me about X" or anything similar -- the personalization must stay invisible; a factual slot must still only use the facts actually given, never invent a fact or a connection just to satisfy the hint, and slots with no interest_hint need no interest angle at all
 - each text must be at most ${LOCK_SCREEN_TEXT_MAX_LENGTH} characters
 
 Make the batch varied in wording and feel, but do not change the selected slot types. Output only the structured JSON requested by the schema.`;
