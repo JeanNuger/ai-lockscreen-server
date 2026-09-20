@@ -430,7 +430,12 @@ async function main() {
 
   const counts = slotTypeCounts(planned.slots);
   for (const [type, count] of counts.entries()) {
-    assert(count <= 2, `planner must avoid excessive concentration of one type: ${type}=${count}`);
+    const maxAllowed = type === 'everyday_lifehack'
+      ? plannerTest.TYPE_CAPS.everyday_lifehack
+      : type === 'free_ai_thought'
+        ? plannerTest.TYPE_CAPS.free_ai_thought
+        : 2;
+    assert(count <= maxAllowed, `planner must avoid excessive concentration of one type: ${type}=${count}`);
   }
 
   assert.deepStrictEqual(
@@ -556,10 +561,11 @@ async function main() {
   assertFactualSlotsAreGrounded(sparseCreativeOnly.slots);
   assert((sparseCounts.get('riddle') || 0) <= 1, 'empty-input planner must cap riddle at 1');
   assert((sparseCounts.get('humor') || 0) <= 2, 'empty-input planner must cap humor at 2');
-  assert((sparseCounts.get('free_ai_thought') || 0) <= 2, 'empty-input planner must cap free_ai_thought at 2');
+  assert((sparseCounts.get('free_ai_thought') || 0) <= plannerTest.TYPE_CAPS.free_ai_thought, 'empty-input planner must cap free_ai_thought');
+  assert((sparseCounts.get('everyday_lifehack') || 0) > 0, 'empty-input planner must include practical lifehack slots');
   assert(
-    new Set(sparseCreativeOnly.slots.map((slot) => slot.type)).size >= 6,
-    'creative fallback strategy must include enough different non-factual intents'
+    !sparseCreativeOnly.slots.some((slot) => ['tiny_imagined_scene', 'playful_thought', 'language_play'].includes(slot.type)),
+    'creative fallback strategy must avoid poetic/imaginative filler types'
   );
   assert.deepStrictEqual(sparseCreativeOnly.slots, sparseCreativeOnlyAgain.slots, 'empty-input planner must be deterministic for the same seed');
   assert.deepStrictEqual(
