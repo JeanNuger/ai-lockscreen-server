@@ -83,6 +83,137 @@ async function main() {
   assert.strictEqual(new Set(planned.slots.map((slot) => slot.slot_id)).size, BATCH_SIZE, 'slot IDs must be unique');
   assertFactualSlotsAreGrounded(planned.slots);
 
+  assert.strictEqual(
+    plannerTest.antiRepeatPenalty(
+      plannerTest.createCandidate({ id: 'recent-content', type: 'science', priority: 50, facts: { text: 'Recent' } }),
+      { contentKeys: new Set(['recent-content']), topicKeys: new Set() }
+    ),
+    45,
+    'recent content_key must receive an anti-repeat penalty'
+  );
+  assert.strictEqual(
+    plannerTest.antiRepeatPenalty(
+      plannerTest.createCandidate({ id: 'weather_current_safe', type: 'weather', priority: 50, facts: { temperature_c: 20 } }),
+      { contentKeys: new Set(['weather_current_safe']), topicKeys: new Set() }
+    ),
+    0,
+    'contextual weather content must not receive normal content cooldown'
+  );
+
+  // Uses type: 'riddle' (TYPE_CAPS.riddle = 1) rather than 'science' (default
+  // cap 2, which both candidates would satisfy trivially) so this actually
+  // exercises the SELECTION decision the anti-repeat penalty is meant to
+  // influence. Checking final slot ORDER instead (as an earlier version of
+  // this test did) doesn't work: selectNonMandatory's last line always
+  // returns `shuffle(selected, rng)` (pre-existing, unrelated to Phase 3) --
+  // a genuine reorder of whatever got selected, so which of two same-type
+  // selected candidates appears first in `slots` is never a promise this
+  // function makes, penalty or not. Set membership (was the penalized
+  // candidate excluded at all?) is the only claim antiRepeatPenalty actually
+  // supports.
+  const freshVsRecent = planSlots({
+    device: { device_id: 'memory-device' },
+    window: 'day',
+  }, {
+    seed: 'memory-ranking-seed',
+    rng: () => 0,
+    recentContentMemory: [{ content_key: 'recent_riddle' }],
+    candidates: [
+      plannerTest.createCandidate({ id: 'recent_riddle', type: 'riddle', priority: 50, facts: { text: 'recent' } }),
+      plannerTest.createCandidate({ id: 'fresh_riddle', type: 'riddle', priority: 50, facts: { text: 'fresh' } }),
+    ],
+  });
+  const riddleSlots = freshVsRecent.slots.filter((slot) => slot.type === 'riddle');
+  assert.strictEqual(riddleSlots.length, 1, 'riddle type cap (1) must still apply with anti-repeat candidates present');
+  assert.strictEqual(riddleSlots[0].id, 'fresh_riddle', 'fresh candidate must win the capped slot over recently-shown content');
+
+  const allRecent = planSlots({
+    device: { device_id: 'all-recent-device' },
+    window: 'day',
+  }, {
+    seed: 'all-recent-seed',
+    rng: () => 0,
+    recentContentMemory: Array.from({ length: BATCH_SIZE }, (_, index) => ({ content_key: `recent_candidate_${index + 1}` })),
+    candidates: Array.from({ length: BATCH_SIZE }, (_, index) => plannerTest.createCandidate({
+      id: `recent_candidate_${index + 1}`,
+      type: index % 2 === 0 ? 'science' : 'technology',
+      priority: 50 - index,
+      facts: { text: `recent ${index + 1}` },
+    })),
+  });
+  assert.strictEqual(allRecent.slots.length, BATCH_SIZE, 'recent candidates must remain eligible when needed to fill the batch');
+  assert(
+    allRecent.slots.some((slot) => slot.id && slot.id.startsWith('recent_candidate_')),
+    'soft anti-repeat must not hard-exclude recent candidates'
+  );
+
+  // Daily Bank rows are freshly INSERTed every day (see dailyContentBank.js),
+  // so item.id (and therefore content_key = `bank_${item.id}`) is NEVER the
+  // same across two different days even for byte-identical fact text -- only
+  // topic_key (a hash of the normalized text itself, independent of the row
+  // id) can catch that repeat. Both claims -- "same text/type always yields
+  // the same topic_key" and "a different row id does NOT defeat that match"
+  // -- need their own coverage; a passing antiRepeatPenalty test alone
+  // wouldn't reveal it if topic_key were left unset (as it initially was).
+  const bankCandidateDay1 = plannerTest.bankItemToCandidate({ id: 101, category: 'quote', content_text: 'Same fact, different day.' });
+  const bankCandidateDay2 = plannerTest.bankItemToCandidate({ id: 999, category: 'quote', content_text: '  Same fact, different day.  ' });
+  assert.notStrictEqual(bankCandidateDay1.id, bankCandidateDay2.id, 'bank content_key is expected to differ across bank rows (by design)');
+  assert.strictEqual(bankCandidateDay1.topic_key, bankCandidateDay2.topic_key, 'bank topic_key must be deterministic for the same fact text regardless of row id');
+  const bankCandidateDifferentText = plannerTest.bankItemToCandidate({ id: 102, category: 'quote', content_text: 'A completely different fact.' });
+  assert.notStrictEqual(bankCandidateDay1.topic_key, bankCandidateDifferentText.topic_key, 'different fact text must produce a different topic_key');
+
+  // normalizeTextForTopicKey itself: case, whitespace, punctuation
+  // (multi-language, not just ASCII . ! ?) and Unicode NFKC equivalence must
+  // not create a new topic, but two genuinely different facts still must.
+  const moonPeriod = plannerTest.normalizeTextForTopicKey('The Moon is moving away from Earth.');
+  const moonBang = plannerTest.normalizeTextForTopicKey('The Moon is moving away from Earth!');
+  const moonBare = plannerTest.normalizeTextForTopicKey('The Moon is moving away from Earth');
+  const moonUpper = plannerTest.normalizeTextForTopicKey('THE MOON IS MOVING AWAY FROM EARTH.');
+  const moonSpaced = plannerTest.normalizeTextForTopicKey('  The   Moon  is moving\taway from Earth.  ');
+  const moonQuotedComma = plannerTest.normalizeTextForTopicKey('"The Moon," is moving, away from Earth."');
+  assert.strictEqual(moonPeriod, moonBang, 'trailing . vs ! must normalize to the same topic_key input');
+  assert.strictEqual(moonPeriod, moonBare, 'trailing punctuation vs none must normalize to the same topic_key input');
+  assert.strictEqual(moonPeriod, moonUpper, 'case differences must normalize to the same topic_key input');
+  assert.strictEqual(moonPeriod, moonSpaced, 'extra/irregular whitespace must normalize to the same topic_key input');
+  assert.strictEqual(moonPeriod, moonQuotedComma, 'quotes and commas must normalize to the same topic_key input');
+  assert.notStrictEqual(
+    moonPeriod,
+    plannerTest.normalizeTextForTopicKey('The Sun is moving away from Earth.'),
+    'a genuinely different fact must still normalize to different text'
+  );
+
+  const punctuationBankA = plannerTest.bankItemToCandidate({ id: 201, category: 'quote', content_text: 'The Moon is moving away from Earth.' });
+  const punctuationBankB = plannerTest.bankItemToCandidate({ id: 202, category: 'quote', content_text: 'The Moon is moving away from Earth!' });
+  const punctuationBankC = plannerTest.bankItemToCandidate({ id: 203, category: 'quote', content_text: '"The Moon," is moving, away from Earth"' });
+  assert.strictEqual(punctuationBankA.topic_key, punctuationBankB.topic_key, 'bank topic_key must ignore terminal punctuation differences (. vs !)');
+  assert.strictEqual(punctuationBankA.topic_key, punctuationBankC.topic_key, 'bank topic_key must ignore quote/comma punctuation differences');
+
+  // Unicode (Russian) must survive normalization as real letters, not get
+  // stripped down to an ASCII-only (or empty) string -- the app is
+  // multi-language, so an ASCII-only cleanup would silently break topic_key
+  // for every non-Latin-script bank fact.
+  const russianPeriod = plannerTest.normalizeTextForTopicKey('Луна медленно удаляется от Земли.');
+  const russianBang = plannerTest.normalizeTextForTopicKey('ЛУНА МЕДЛЕННО УДАЛЯЕТСЯ ОТ ЗЕМЛИ!');
+  assert.strictEqual(russianPeriod, russianBang, 'Russian case/punctuation differences must normalize to the same topic_key input');
+  assert(/[а-яё]/.test(russianPeriod), 'Cyrillic letters must survive normalization, not be stripped to ASCII-only/empty');
+  assert.notStrictEqual(russianPeriod.trim(), '', 'normalized Unicode text must not collapse to an empty string');
+
+  const freshVsRecentTopic = planSlots({
+    device: { device_id: 'topic-memory-device' },
+    window: 'day',
+  }, {
+    seed: 'topic-ranking-seed',
+    rng: () => 0,
+    recentContentMemory: [{ content_key: 'unrelated_row_id', topic_key: bankCandidateDay1.topic_key }],
+    candidates: [
+      plannerTest.createCandidate({ ...bankCandidateDay2, type: 'riddle' }),
+      plannerTest.createCandidate({ id: 'unrelated_fresh_riddle', type: 'riddle', priority: 50, facts: { text: 'fresh' } }),
+    ],
+  });
+  const topicRiddleSlots = freshVsRecentTopic.slots.filter((slot) => slot.type === 'riddle');
+  assert.strictEqual(topicRiddleSlots.length, 1, 'riddle type cap must still apply in the topic_key scenario');
+  assert.strictEqual(topicRiddleSlots[0].id, 'unrelated_fresh_riddle', 'topic_key match on a DIFFERENT content_key/row id must still lose the capped slot to genuinely fresh content');
+
   const morning = planSlots({ ...baseInput, window: 'morning' }, { seed: 'morning-seed' });
   assert.strictEqual(morning.slots[0].type, 'greeting', 'morning first slot must be greeting');
 
@@ -295,6 +426,11 @@ async function main() {
     'creative fallback strategy must include enough different non-factual intents'
   );
   assert.deepStrictEqual(sparseCreativeOnly.slots, sparseCreativeOnlyAgain.slots, 'empty-input planner must be deterministic for the same seed');
+  assert.deepStrictEqual(
+    sparseCreativeOnly.slots.map((slot) => slot.id),
+    sparseCreativeOnlyAgain.slots.map((slot) => slot.id),
+    'creative filler IDs must be stable across independent planning calls'
+  );
 
   const weatherSlots = planSlots(baseInput, { seed: 'weather-constraint-seed' }).slots;
   const weatherSlot = weatherSlots.find((slot) => slot.type === 'weather');

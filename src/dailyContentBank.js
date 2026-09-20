@@ -26,7 +26,7 @@ const insertBankItemStatement = db.prepare(`
 `);
 
 const selectBankRowsForDateStatement = db.prepare(`
-  SELECT category, content_text, tags FROM daily_content_bank WHERE bank_date = ?
+  SELECT id, category, content_text, tags FROM daily_content_bank WHERE bank_date = ?
 `);
 
 const selectShownCategoriesStatement = db.prepare(`
@@ -265,7 +265,7 @@ function selectBankItemsForDevice(
       }
     }
     const pick = rowsInCategory[Math.floor(Math.random() * rowsInCategory.length)];
-    selected.push({ category: pick.category, content_text: pick.content_text });
+    selected.push({ id: pick.id, category: pick.category, content_text: pick.content_text });
   }
 
   return selected;

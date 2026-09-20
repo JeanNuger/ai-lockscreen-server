@@ -108,6 +108,22 @@ db.exec(`
     ON phone_signal_samples(device_id, window, device_local_date);
   CREATE INDEX IF NOT EXISTS idx_phone_signal_samples_recorded_at
     ON phone_signal_samples(recorded_at);
+
+  CREATE TABLE IF NOT EXISTS device_content_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    content_key TEXT NOT NULL,
+    topic_key TEXT,
+    shown_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (device_id) REFERENCES devices(device_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_device_content_memory_recent
+    ON device_content_memory(device_id, shown_at);
+  CREATE INDEX IF NOT EXISTS idx_device_content_memory_content
+    ON device_content_memory(device_id, content_key);
+  CREATE INDEX IF NOT EXISTS idx_device_content_memory_topic
+    ON device_content_memory(device_id, topic_key);
 `);
 
 // One-off migration: devices.name is new as of 2026-09-12. This project has no

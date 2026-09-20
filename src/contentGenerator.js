@@ -2,10 +2,13 @@ const { STYLE_IDS, BATCH_SIZE } = require('./constants');
 const {
   selectBankItemsForDevice,
   recordShownCategories,
-  getShownCategories,
   getBankDateString,
   BANK_CATEGORIES,
 } = require('./dailyContentBank');
+const {
+  getRecentContentMemory,
+  recordShownContentMemory,
+} = require('./contentMemory');
 const { planSlots } = require('./slotPlanner');
 
 const LOCK_SCREEN_TEXT_MAX_LENGTH = 140;
@@ -795,6 +798,7 @@ function assembleBatchFromGeneratedPhrases(phrases, languageCode, validationCont
   return {
     phrases: assembled,
     generatedCount: generated.length,
+    generatedSlotIds: generated.map((item) => item.slot_id),
     rejectedCount: collected.rejectedCount,
     fallbackFillCount,
     rejectionReasons: collected.rejectionReasons,
@@ -1084,14 +1088,11 @@ function computeAge(birthDate) {
 // have to map an ISO code itself.
 // slots: exactly BATCH_SIZE planner-selected editorial tasks. The full
 // candidate pool/bank is deliberately not sent.
-// shownCategories (optional): category names already shown to this device
-// today (see dailyContentBank.js's getShownCategories) — listed so the model
-// has a light repeat-avoidance hint without re-sending past phrases.
 function windowContextFor(window) {
   return WINDOW_CONTEXT[window] || { id: window };
 }
 
-function buildContextPrompt(device, window, signals, weather, languageCode, slots, shownCategories, dateContext) {
+function buildContextPrompt(device, window, signals, weather, languageCode, slots, dateContext) {
   const profile = {};
   if (device.name) profile.name = device.name;
   if (device.gender) profile.gender = device.gender;
@@ -1150,10 +1151,6 @@ function buildContextPrompt(device, window, signals, weather, languageCode, slot
       : [],
   };
   if (Object.keys(profile).length === 0) delete ctx.profile;
-
-  if (Array.isArray(shownCategories) && shownCategories.length > 0) {
-    ctx.already_shown = shownCategories;
-  }
 
   return JSON.stringify(ctx);
 }
@@ -1241,18 +1238,17 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {})
     device.gender,
     countryCode
   );
-  const shownCategories = getShownCategories(device.device_id, deviceLocalDate);
+  const recentContentMemory = getRecentContentMemory(device.device_id);
   const { slots } = planSlots({
     device,
     window,
     dateContext,
     weather,
     bankItems,
-    shownCategories,
     phoneTrends,
-  });
+  }, { recentContentMemory });
 
-  const context = buildContextPrompt(device, window, signals, weather, languageCode, slots, shownCategories, dateContext);
+  const context = buildContextPrompt(device, window, signals, weather, languageCode, slots, dateContext);
   const validationContext = {
     dateContext,
     signals,
@@ -1342,6 +1338,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {})
   // repeat-avoidance signal comes from selected slots rather than model labels.
   const usedCategories = extractUsedCategoriesFromSlots(slots);
   recordShownCategories(device.device_id, deviceLocalDate, usedCategories);
+  recordShownContentMemory(device.device_id, slots, assembly.generatedSlotIds);
 
   return buildLoggedOpenAiResult(assembly, context);
 }
@@ -1359,6 +1356,7 @@ module.exports = {
     resolveTargetLanguageCode,
     windowContextFor,
     resolveLocalDateContext,
+    buildContextPrompt,
     buildSystemPrompt,
     SUPPORTED_LANGUAGES,
   },

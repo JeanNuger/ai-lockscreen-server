@@ -174,16 +174,26 @@ const TYPE_CAPS = {
 const DEFAULT_TYPE_CAP = 2;
 
 const CREATIVE_FILLER_BLUEPRINTS = [
-  { type: 'free_ai_thought', constraints: ['standalone_observation', 'no_user_facts'] },
-  { type: 'humor', constraints: ['gentle_observational_humor', 'no_user_facts'] },
-  { type: 'riddle', constraints: ['no_answer_required', 'not_a_question'] },
-  { type: 'everyday_observation', constraints: ['ordinary_object_or_routine', 'no_user_facts', 'no_physical_context_claims'] },
-  { type: 'playful_thought', constraints: ['lightly_playful', 'no_external_facts', 'not_motivational'] },
-  { type: 'tiny_imagined_scene', constraints: ['clearly_imagined', 'no_user_or_location_assumptions', 'one_sentence'] },
-  { type: 'gentle_wish', constraints: ['kind', 'not_motivational_quote', 'not_coaching'] },
-  { type: 'reflective_observation', constraints: ['no_question', 'no_advice', 'no_therapy_language'] },
-  { type: 'language_play', constraints: ['only_if_natural_in_target_language', 'no_required_answer', 'avoid_untranslatable_puns'] },
+  { id: 'creative_filler_free_ai_thought_standalone_v1', type: 'free_ai_thought', constraints: ['standalone_observation', 'no_user_facts'] },
+  { id: 'creative_filler_humor_gentle_observational_v1', type: 'humor', constraints: ['gentle_observational_humor', 'no_user_facts'] },
+  { id: 'creative_filler_riddle_no_answer_v1', type: 'riddle', constraints: ['no_answer_required', 'not_a_question'] },
+  { id: 'creative_filler_everyday_object_v1', type: 'everyday_observation', constraints: ['ordinary_object_or_routine', 'no_user_facts', 'no_physical_context_claims'] },
+  { id: 'creative_filler_playful_light_v1', type: 'playful_thought', constraints: ['lightly_playful', 'no_external_facts', 'not_motivational'] },
+  { id: 'creative_filler_tiny_scene_v1', type: 'tiny_imagined_scene', constraints: ['clearly_imagined', 'no_user_or_location_assumptions', 'one_sentence'] },
+  { id: 'creative_filler_gentle_wish_v1', type: 'gentle_wish', constraints: ['kind', 'not_motivational_quote', 'not_coaching'] },
+  { id: 'creative_filler_reflective_observation_v1', type: 'reflective_observation', constraints: ['no_question', 'no_advice', 'no_therapy_language'] },
+  { id: 'creative_filler_language_play_v1', type: 'language_play', constraints: ['only_if_natural_in_target_language', 'no_required_answer', 'avoid_untranslatable_puns'] },
 ];
+
+const CONTENT_MEMORY_EXEMPT_TYPES = new Set([
+  'greeting',
+  'goodnight',
+  'weather',
+  'seasonal',
+  'phone_trend',
+  'age_context',
+  'gender_context',
+]);
 
 function hashString(input) {
   let hash = 2166136261;
@@ -218,8 +228,11 @@ function stableCandidateId(prefix, text) {
 }
 
 function createCandidate(candidate) {
+  const id = candidate.id;
   return {
-    id: candidate.id,
+    id,
+    content_key: candidate.content_key || id,
+    topic_key: candidate.topic_key || null,
     type: CONTENT_TYPES.includes(candidate.type) ? candidate.type : 'unusual_fact',
     priority: Number.isFinite(candidate.priority) ? candidate.priority : 10,
     facts: candidate.facts || {},
@@ -251,14 +264,49 @@ function mapBankItemType(item) {
   return 'unusual_fact';
 }
 
+// Deterministic, cheap (no embeddings/fuzzy matching) text normalization for
+// Daily Bank topic_key generation -- two renderings of the same underlying
+// fact that differ only in case, spacing, or trailing/embedded punctuation
+// ("The Moon is moving away from Earth." vs "...Earth!" vs "...Earth") must
+// collapse to the same topic_key, since a fresh OpenAI-web-search bank
+// generation on a later day has no reason to reproduce the exact same
+// punctuation. NFKC first so visually/semantically equivalent Unicode
+// sequences (full-width vs half-width forms, composed vs decomposed
+// accents) compare equal before case-folding. Strips Unicode punctuation
+// (\p{P}, e.g. . ! ? , " « ») and symbols (\p{S}, e.g. $ + =) rather than
+// an ASCII-only blacklist, since bank content is multi-language (ru, zh,
+// ja, ar, etc. punctuation is not ASCII) -- \p{L}/\p{N}/\p{M} (letters,
+// numbers, combining marks) and whitespace are deliberately left untouched
+// so every language's actual word characters survive intact.
+function normalizeTextForTopicKey(text) {
+  return String(text || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\p{P}\p{S}]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function bankItemToCandidate(item, index = 0) {
   const text = item && typeof item.content_text === 'string' ? item.content_text.trim() : '';
   if (!text) {
     return null;
   }
   const type = mapBankItemType(item);
+  // content_key uses item.id (daily_content_bank's own row id) when available,
+  // which is unique to that one row -- daily_content_bank rows are always
+  // freshly INSERTed per bank_date (see dailyContentBank.js), so item.id never
+  // repeats across different days even for the exact same fact text. That
+  // makes content_key alone useless for cross-day repeat detection of bank
+  // facts specifically -- topic_key is a separate, content-derived hash (same
+  // formula the old id used to be, pre-content_memory) that DOES match across
+  // days when the underlying fact text repeats, independent of which row id
+  // carried it this time. See normalizeTextForTopicKey for why punctuation/
+  // case/whitespace differences must not defeat the match.
+  const normalizedText = normalizeTextForTopicKey(text);
   return createCandidate({
-    id: stableCandidateId(`bank_${type}_${index}`, text),
+    id: item && item.id ? `bank_${item.id}` : stableCandidateId(`bank_${type}`, text),
+    topic_key: stableCandidateId(`bank_topic_${type}`, normalizedText),
     type,
     priority: type === 'holiday' || type === 'history_today' ? 70 : 48,
     facts: { text },
@@ -405,8 +453,39 @@ function collectCandidates(input = {}) {
   return candidates;
 }
 
-function candidateWeight(candidate, rng) {
-  return candidate.priority + rng() * 20;
+function buildRecentMemoryIndex(recentContentMemory = []) {
+  const contentKeys = new Set();
+  const topicKeys = new Set();
+  if (!Array.isArray(recentContentMemory)) {
+    return { contentKeys, topicKeys };
+  }
+  for (const item of recentContentMemory) {
+    if (item && item.content_key) {
+      contentKeys.add(item.content_key);
+    }
+    if (item && item.topic_key) {
+      topicKeys.add(item.topic_key);
+    }
+  }
+  return { contentKeys, topicKeys };
+}
+
+function antiRepeatPenalty(candidate, memoryIndex) {
+  if (!candidate || CONTENT_MEMORY_EXEMPT_TYPES.has(candidate.type)) {
+    return 0;
+  }
+  let penalty = 0;
+  if (candidate.content_key && memoryIndex.contentKeys.has(candidate.content_key)) {
+    penalty += 45;
+  }
+  if (candidate.topic_key && memoryIndex.topicKeys.has(candidate.topic_key)) {
+    penalty += 18;
+  }
+  return penalty;
+}
+
+function candidateWeight(candidate, rng, memoryIndex = buildRecentMemoryIndex()) {
+  return candidate.priority + rng() * 20 - antiRepeatPenalty(candidate, memoryIndex);
 }
 
 function typeCap(type) {
@@ -421,11 +500,11 @@ function recordType(typeCounts, type) {
   typeCounts.set(type, (typeCounts.get(type) || 0) + 1);
 }
 
-function selectNonMandatory(candidates, count, rng) {
+function selectNonMandatory(candidates, count, rng, memoryIndex = buildRecentMemoryIndex()) {
   const selected = [];
   const typeCounts = new Map();
   const shuffled = shuffle(candidates, rng)
-    .map((candidate) => ({ candidate, score: candidateWeight(candidate, rng) }))
+    .map((candidate) => ({ candidate, score: candidateWeight(candidate, rng, memoryIndex) }))
     .sort((a, b) => b.score - a.score);
 
   for (const entry of shuffled) {
@@ -443,6 +522,7 @@ function selectNonMandatory(candidates, count, rng) {
   let fillerIndex = 0;
   while (selected.length < count) {
     const blueprint = CREATIVE_FILLER_BLUEPRINTS[fillerIndex % CREATIVE_FILLER_BLUEPRINTS.length];
+    const blueprintUseIndex = Math.floor(fillerIndex / CREATIVE_FILLER_BLUEPRINTS.length) + 1;
     const type = blueprint.type;
     fillerIndex += 1;
     if (!canAddType(typeCounts, type)) {
@@ -452,7 +532,7 @@ function selectNonMandatory(candidates, count, rng) {
       continue;
     }
     selected.push(createCandidate({
-      id: `filler_${type}_${fillerIndex}`,
+      id: `filler_${blueprint.id}_${blueprintUseIndex}`,
       type,
       priority: 1,
       facts: {},
@@ -469,6 +549,8 @@ function addSlotIds(candidates) {
   return candidates.map((candidate, index) => ({
     slot_id: `s${index + 1}`,
     id: candidate.id,
+    content_key: candidate.content_key || candidate.id,
+    topic_key: candidate.topic_key || undefined,
     type: candidate.type,
     facts: candidate.facts,
     source: candidate.source,
@@ -486,6 +568,7 @@ function planSlots(input = {}, options = {}) {
     input.dateContext && input.dateContext.time,
   ].filter(Boolean).join('|');
   const rng = options.rng || createSeededRng(seed || 'slot-planner');
+  const memoryIndex = buildRecentMemoryIndex(options.recentContentMemory);
 
   const mandatoryFirst = input.window === 'morning'
     ? candidates.find((candidate) => candidate.type === 'greeting')
@@ -497,7 +580,7 @@ function planSlots(input = {}, options = {}) {
   const mandatoryIds = new Set([mandatoryFirst, mandatoryLast].filter(Boolean).map((candidate) => candidate.id));
   const remainingCandidates = candidates.filter((candidate) => !mandatoryIds.has(candidate.id));
   const remainingCount = BATCH_SIZE - (mandatoryFirst ? 1 : 0) - (mandatoryLast ? 1 : 0);
-  const middle = selectNonMandatory(remainingCandidates, remainingCount, rng);
+  const middle = selectNonMandatory(remainingCandidates, remainingCount, rng, memoryIndex);
 
   const ordered = [];
   if (mandatoryFirst) ordered.push(mandatoryFirst);
@@ -519,7 +602,9 @@ module.exports = {
   _test: {
     bankItemToCandidate,
     createCandidate,
+    antiRepeatPenalty,
     mapBankItemType,
     normalizePhoneTrends,
+    normalizeTextForTopicKey,
   },
 };

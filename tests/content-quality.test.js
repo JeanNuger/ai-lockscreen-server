@@ -21,6 +21,11 @@ const {
   BANK_CATEGORIES,
   _test: bankTest,
 } = require('../src/dailyContentBank');
+const {
+  getRecentContentMemory,
+  recordShownContentMemory,
+  pruneOldContentMemory,
+} = require('../src/contentMemory');
 
 function phrase(text, style_id = 'A1') {
   return { text, style_id };
@@ -488,6 +493,123 @@ async function main() {
   assertFinalBatch(noKeyLogs.result.phrases);
   assert.strictEqual(noKeyLogs.result.source, 'fallback');
   assert(noKeyLogs.logs.some((line) => line.includes('reason=no_api_key_fallback')), 'no API key path should log reason');
+  assert.strictEqual(
+    db.prepare('SELECT COUNT(*) AS count FROM device_content_memory WHERE device_id = ?').get('device-no-key').count,
+    0,
+    'global no-api-key fallback must not write content memory'
+  );
+
+  db.prepare('INSERT OR IGNORE INTO devices (device_id) VALUES (?)').run('memory-device-a');
+  assert.strictEqual(recordShownContentMemory('memory-device-a', [
+    { slot_id: 's1', content_key: 'memory-content-a' },
+  ], ['s1']), 1, 'direct memory write helper should record generated slot content');
+  assert.deepStrictEqual(
+    getRecentContentMemory('memory-device-b').map((row) => row.content_key),
+    [],
+    'content memory must be per-device'
+  );
+  assert.deepStrictEqual(
+    getRecentContentMemory('memory-device-a').map((row) => row.content_key),
+    ['memory-content-a'],
+    'content memory should be readable for the same device'
+  );
+
+  db.prepare('INSERT OR IGNORE INTO devices (device_id) VALUES (?)').run('old-memory-device');
+  db.prepare(`
+    INSERT INTO device_content_memory (device_id, content_key, topic_key, shown_at)
+    VALUES (?, ?, ?, datetime('now', '-46 days'))
+  `).run('old-memory-device', 'old-content', null);
+  db.prepare(`
+    INSERT INTO device_content_memory (device_id, content_key, topic_key, shown_at)
+    VALUES (?, ?, ?, datetime('now', '-44 days'))
+  `).run('old-memory-device', 'recent-content', null);
+  assert.deepStrictEqual(
+    getRecentContentMemory('old-memory-device').map((row) => row.content_key),
+    ['recent-content'],
+    'records older than 45 days must no longer affect selection'
+  );
+  pruneOldContentMemory();
+  assert.strictEqual(
+    db.prepare('SELECT COUNT(*) AS count FROM device_content_memory WHERE content_key = ?').get('old-content').count,
+    0,
+    'records older than 45 days must be pruned'
+  );
+
+  process.env.OPENAI_API_KEY = 'test-key-content-memory';
+  let memoryOpenAiCallCount = 0;
+  let memoryCapturedRequest = null;
+  const originalMemoryLoad = Module._load;
+  Module._load = function patchedMemoryLoad(request, parent, isMain) {
+    if (request === 'openai') {
+      return class MockOpenAI {
+        constructor() {
+          this.chat = {
+            completions: {
+              create: async (requestBody) => {
+                memoryOpenAiCallCount += 1;
+                memoryCapturedRequest = requestBody;
+                const payload = JSON.parse(requestBody.messages[1].content);
+                return {
+                  choices: [{
+                    message: {
+                      content: JSON.stringify({
+                        phrases: payload.slots.map((slot, index) => ({
+                          slot_id: slot.slot_id,
+                          text: index === payload.slots.length - 1
+                            ? 'Это вопрос?'
+                            : `Конкретная строка памяти ${index + 1}`,
+                          style_id: STYLE_IDS[index],
+                        })),
+                      }),
+                    },
+                  }],
+                };
+              },
+            },
+          };
+        }
+      };
+    }
+    return originalMemoryLoad.call(this, request, parent, isMain);
+  };
+  try {
+    db.prepare('INSERT OR IGNORE INTO devices (device_id, timezone, created_at) VALUES (?, ?, ?)')
+      .run('memory-generation-device', 'Asia/Almaty', '2026-09-17 00:00:00');
+    db.prepare(`
+      INSERT INTO device_content_memory (device_id, content_key, topic_key)
+      VALUES (?, ?, ?)
+    `).run('memory-generation-device', 'raw-history-secret-key', null);
+
+    const memoryResult = await generateBatch(
+      {
+        device_id: 'memory-generation-device',
+        timezone: 'Asia/Almaty',
+        created_at: '2026-09-17 00:00:00',
+      },
+      'day',
+      { system_language: 'ru' },
+      null
+    );
+
+    assert.strictEqual(memoryOpenAiCallCount, 1, 'content-memory generation must still make exactly one OpenAI call');
+    assert.strictEqual(memoryResult.source, 'openai');
+    assertFinalBatch(memoryResult.phrases);
+    const memoryRows = db.prepare(`
+      SELECT content_key FROM device_content_memory
+      WHERE device_id = ? AND content_key != ?
+    `).all('memory-generation-device', 'raw-history-secret-key');
+    assert.strictEqual(
+      memoryRows.length,
+      BATCH_SIZE - 1,
+      'only slots with actual valid OpenAI text should write content memory'
+    );
+    const payloadText = memoryCapturedRequest.messages.map((message) => message.content).join('\n');
+    assert(!payloadText.includes('raw-history-secret-key'), 'raw content memory must not be added to OpenAI payload');
+    assert(!payloadText.includes('already_shown'), 'device_shown_categories history must not be sent as a prompt history blob');
+  } finally {
+    Module._load = originalMemoryLoad;
+    delete process.env.OPENAI_API_KEY;
+  }
 
   process.env.OPENAI_API_KEY = 'test-key-no-network';
   const originalLoad = Module._load;
