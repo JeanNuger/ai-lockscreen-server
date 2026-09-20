@@ -708,11 +708,11 @@ function validateFinalBatch(items) {
 }
 
 function fallbackTextForSlot(slot, languageCode) {
-  if (slot && slot.type === 'goodnight') {
+  if (slot && slot.type === 'goodnight_care') {
     if (languageCode === 'ru') return 'Телефону тоже нужен отдых';
     return 'Even a phone needs rest';
   }
-  if (slot && slot.type === 'greeting') {
+  if (slot && slot.type === 'greeting_name') {
     if (languageCode === 'ru') return 'Доброе утро. Один точный шаг экономит час';
     return 'Good morning. One precise step saves an hour';
   }
@@ -945,6 +945,7 @@ async function regenerateRejectedSlots(client, basePayload, slots, rejectedSlotI
       facts: slot.facts || {},
       constraints: slot.constraints || [],
       interest_hint: slot.interest_hint || undefined,
+      gender_lean_hint: slot.gender_lean_hint || undefined,
     })),
   };
   const response = await createOpenAiBatch(
@@ -1252,6 +1253,11 @@ function buildContextPrompt(device, window, signals, weather, languageCode, slot
         // for the common case, and never carries the user's full interests
         // list, only the one compact tag relevant to this specific slot.
         interest_hint: slot.interest_hint || undefined,
+        // Same shape/timing as interest_hint, but from selectGenderLeanSlot
+        // -- present on at most ONE slot in the whole batch (see that
+        // function's own comment for why a hard single-slot cap matters
+        // here specifically: gender must stay rare, not a recurring theme).
+        gender_lean_hint: slot.gender_lean_hint || undefined,
       }))
       : [],
   };
@@ -1279,12 +1285,13 @@ function buildContextPrompt(device, window, signals, weather, languageCode, slot
 // in generateBatch, not described in this text -- see the call site for why.
 function buildSystemPrompt(languageCode) {
   const languageName = SUPPORTED_LANGUAGES[languageCode].name;
-  return `Ты — живой, наблюдательный и добрый AI-компаньон на экране блокировки. Давай короткие мысли монологом: 1 предложение, емко, полезно, разнообразно.
+  return `Ты — добрый, умный и внимательный AI-компаньон на экране блокировки, не quote/trivia/coach-приложение. Давай короткие мысли монологом: 1 предложение, емко, полезно, разнообразно, с теплом и вниманием к дню человека.
 Язык: ${languageName}. На каждый slot_id верни ровно одну строку и уникальный style_id.
-Запрет: ?, «пусть», открытки, уют/чай/тихий свет/мысли/мечты/магия/чудеса/счастье/фея/чайник, ночная поэзия про ночь/луну/звезды/тишину/покой/шорох/фонари/небо/свечи/гирлянды, «верь в себя», «ты справишься», вода, коучинг, команды, выдуманные факты.
+Запрет: ?, «пусть», открытки, уют/чай/тихий свет/мысли/мечты/магия/чудеса/счастье/фея/чайник, ночная поэзия про ночь/луну/звезды/тишину/покой/шорох/фонари/небо/свечи/гирлянды, «верь в себя», «ты справишься», вода, коучинг, выдуманные факты, выдуманные названия мероприятий/фильмов/выставок.
 ЗАПРЕЩЕНО использовать повелительное наклонение и команды (используй, выбери, держи, создай, читай, проверяй). Пиши в формате короткого факта или наблюдения.
 Пиши ультра-коротко (до 8 слов). Экономь слова. Смысл должен считываться за 1 секунду.
-Только факты из slot/profile/now; погода житейски без точных градусов; утром можно имя 1 раз; gender/age дают только аккуратный практичный оттенок; interest_hint используй незаметно, без «since you like».
+По типу slot: greeting_name — тёплое личное приветствие по имени (если оно есть в profile) и лёгкое светлое напутствие на день, каждый день другими словами; goodnight_care — мягкое пожелание доброго отдыха по имени (если есть), без потока «тишина/звёзды/фонари»; weather_lifehack — погода житейски, через одежду/зонт/обувь, без точных градусов; context_signal — тёплая, заботливая реакция на facts.signal (низкий заряд/много разблокировок/поздний час), без чисел и без тревожности; holiday_today/history_today — коротко и по делу, не энциклопедия; smart_humor_observation — тонкое ироничное наблюдение об обыденной жизни, не анекдот и не насмешка; city_afisha — только общее наблюдение о городской жизни/сезоне (парки, вечерние прогулки, привычки города), НИКОГДА не выдумывай конкретное название события/фильма/выставки или дату; free_ai_thought — одна короткая, по-настоящему интересная мысль о людях или цифровом мире.
+Только факты из slot/profile/now; погода житейски без точных градусов; утром можно имя 1 раз; gender/age дают только аккуратный практичный оттенок, без стереотипов и обращений вроде «для настоящих мужчин» или «для девочек»; interest_hint и gender_lean_hint используй незаметно, без «since you like».
 До 60 символов, hard cap ${LOCK_SCREEN_TEXT_MAX_LENGTH}. Только JSON по схеме.`;
 }
 
@@ -1339,6 +1346,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {})
     bankItems,
     phoneTrends,
     recallCandidate,
+    signals,
   }, { recentContentMemory });
 
   const context = buildContextPrompt(device, window, signals, weather, languageCode, slots, dateContext);

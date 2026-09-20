@@ -85,7 +85,7 @@ async function main() {
 
   assert.strictEqual(
     plannerTest.antiRepeatPenalty(
-      plannerTest.createCandidate({ id: 'recent-content', type: 'science', priority: 50, facts: { text: 'Recent' } }),
+      plannerTest.createCandidate({ id: 'recent-content', type: 'science_tech', priority: 50, facts: { text: 'Recent' } }),
       { contentKeys: new Set(['recent-content']), topicKeys: new Set() }
     ),
     45,
@@ -93,14 +93,18 @@ async function main() {
   );
   assert.strictEqual(
     plannerTest.antiRepeatPenalty(
-      plannerTest.createCandidate({ id: 'weather_current_safe', type: 'weather', priority: 50, facts: { temperature_c: 20 } }),
+      plannerTest.createCandidate({ id: 'weather_current_safe', type: 'weather_lifehack', priority: 50, facts: { temperature_c: 20 } }),
       { contentKeys: new Set(['weather_current_safe']), topicKeys: new Set() }
     ),
     0,
     'contextual weather content must not receive normal content cooldown'
   );
 
-  // Uses type: 'riddle' (TYPE_CAPS.riddle = 1) rather than 'science' (default
+  // Uses type: 'learning_recall' (TYPE_CAPS.learning_recall = 1, and NOT one of
+  // CREATIVE_FILLER_BLUEPRINTS' types, so the capsExhausted overflow path in
+  // selectNonMandatory's filler loop -- needed here since this test supplies
+  // only 2 explicit candidates and the planner must still fill 12 -- never
+  // re-adds this type past its cap) rather than 'science_tech' (default
   // cap 2, which both candidates would satisfy trivially) so this actually
   // exercises the SELECTION decision the anti-repeat penalty is meant to
   // influence. Checking final slot ORDER instead (as an earlier version of
@@ -117,14 +121,14 @@ async function main() {
   }, {
     seed: 'memory-ranking-seed',
     rng: () => 0,
-    recentContentMemory: [{ content_key: 'recent_riddle' }],
+    recentContentMemory: [{ content_key: 'recent_riddle' }], // key name kept generic; value is what matters
     candidates: [
-      plannerTest.createCandidate({ id: 'recent_riddle', type: 'riddle', priority: 50, facts: { text: 'recent' } }),
-      plannerTest.createCandidate({ id: 'fresh_riddle', type: 'riddle', priority: 50, facts: { text: 'fresh' } }),
+      plannerTest.createCandidate({ id: 'recent_riddle', type: 'learning_recall', priority: 50, facts: { text: 'recent' } }),
+      plannerTest.createCandidate({ id: 'fresh_riddle', type: 'learning_recall', priority: 50, facts: { text: 'fresh' } }),
     ],
   });
-  const riddleSlots = freshVsRecent.slots.filter((slot) => slot.type === 'riddle');
-  assert.strictEqual(riddleSlots.length, 1, 'riddle type cap (1) must still apply with anti-repeat candidates present');
+  const riddleSlots = freshVsRecent.slots.filter((slot) => slot.type === 'learning_recall');
+  assert.strictEqual(riddleSlots.length, 1, 'learning_recall type cap (1) must still apply with anti-repeat candidates present');
   assert.strictEqual(riddleSlots[0].id, 'fresh_riddle', 'fresh candidate must win the capped slot over recently-shown content');
 
   const allRecent = planSlots({
@@ -136,7 +140,7 @@ async function main() {
     recentContentMemory: Array.from({ length: BATCH_SIZE }, (_, index) => ({ content_key: `recent_candidate_${index + 1}` })),
     candidates: Array.from({ length: BATCH_SIZE }, (_, index) => plannerTest.createCandidate({
       id: `recent_candidate_${index + 1}`,
-      type: index % 2 === 0 ? 'science' : 'technology',
+      type: index % 2 === 0 ? 'science_tech' : 'unusual_fact',
       priority: 50 - index,
       facts: { text: `recent ${index + 1}` },
     })),
@@ -206,19 +210,19 @@ async function main() {
     rng: () => 0,
     recentContentMemory: [{ content_key: 'unrelated_row_id', topic_key: bankCandidateDay1.topic_key }],
     candidates: [
-      plannerTest.createCandidate({ ...bankCandidateDay2, type: 'riddle' }),
-      plannerTest.createCandidate({ id: 'unrelated_fresh_riddle', type: 'riddle', priority: 50, facts: { text: 'fresh' } }),
+      plannerTest.createCandidate({ ...bankCandidateDay2, type: 'learning_recall' }),
+      plannerTest.createCandidate({ id: 'unrelated_fresh_riddle', type: 'learning_recall', priority: 50, facts: { text: 'fresh' } }),
     ],
   });
-  const topicRiddleSlots = freshVsRecentTopic.slots.filter((slot) => slot.type === 'riddle');
-  assert.strictEqual(topicRiddleSlots.length, 1, 'riddle type cap must still apply in the topic_key scenario');
+  const topicRiddleSlots = freshVsRecentTopic.slots.filter((slot) => slot.type === 'learning_recall');
+  assert.strictEqual(topicRiddleSlots.length, 1, 'learning_recall type cap must still apply in the topic_key scenario');
   assert.strictEqual(topicRiddleSlots[0].id, 'unrelated_fresh_riddle', 'topic_key match on a DIFFERENT content_key/row id must still lose the capped slot to genuinely fresh content');
 
   const morning = planSlots({ ...baseInput, window: 'morning' }, { seed: 'morning-seed' });
-  assert.strictEqual(morning.slots[0].type, 'greeting', 'morning first slot must be greeting');
+  assert.strictEqual(morning.slots[0].type, 'greeting_name', 'morning first slot must be greeting_name');
 
   const night = planSlots({ ...baseInput, window: 'night' }, { seed: 'night-seed' });
-  assert.strictEqual(night.slots[night.slots.length - 1].type, 'goodnight', 'night last slot must be goodnight');
+  assert.strictEqual(night.slots[night.slots.length - 1].type, 'goodnight_care', 'night last slot must be goodnight_care');
 
   // personal_goal/tone remain removed-from-personalization (onboarding UI
   // fields, product decision) -- the planner must produce byte-identical
@@ -267,11 +271,11 @@ async function main() {
     const buildTaggedPool = (extra = []) => [
       plannerTest.createCandidate({ id: 'money_economics_a', type: 'money_economics', priority: 48, facts: { text: 'work fact a' } }),
       plannerTest.createCandidate({ id: 'money_economics_b', type: 'money_economics', priority: 48, facts: { text: 'work fact b' } }),
-      plannerTest.createCandidate({ id: 'science_a', type: 'science', priority: 48, facts: { text: 'self-development fact a' } }),
-      plannerTest.createCandidate({ id: 'science_b', type: 'science', priority: 48, facts: { text: 'self-development fact b' } }),
-      plannerTest.createCandidate({ id: 'humor_a', type: 'humor', priority: 30, facts: {} }),
-      plannerTest.createCandidate({ id: 'humor_b', type: 'humor', priority: 30, facts: {} }),
-      plannerTest.createCandidate({ id: 'technology_a', type: 'technology', priority: 30, facts: { text: 'tech fact' } }),
+      plannerTest.createCandidate({ id: 'science_a', type: 'science_tech', priority: 48, facts: { text: 'self-development fact a' } }),
+      plannerTest.createCandidate({ id: 'science_b', type: 'science_tech', priority: 48, facts: { text: 'self-development fact b' } }),
+      plannerTest.createCandidate({ id: 'humor_a', type: 'smart_humor_observation', priority: 30, facts: {} }),
+      plannerTest.createCandidate({ id: 'humor_b', type: 'smart_humor_observation', priority: 30, facts: {} }),
+      plannerTest.createCandidate({ id: 'technology_a', type: 'science_tech', priority: 30, facts: { text: 'tech fact' } }),
       plannerTest.createCandidate({ id: 'everyday_observation_a', type: 'everyday_observation', priority: 20, facts: {} }),
       plannerTest.createCandidate({ id: 'playful_thought_a', type: 'playful_thought', priority: 20, facts: {} }),
       plannerTest.createCandidate({ id: 'tiny_imagined_scene_a', type: 'tiny_imagined_scene', priority: 20, facts: {} }),
@@ -368,7 +372,7 @@ async function main() {
 
   const candidates = collectCandidates(baseInput);
   assert(candidates.some((candidate) => candidate.source === 'daily_bank' && candidate.type === 'history_today'), 'on_this_day bank item must become history_today candidate');
-  assert(candidates.some((candidate) => candidate.source === 'daily_bank' && candidate.type === 'science'), 'a science-category bank item must become a science candidate (Phase 5: direct mapping, not keyword inference)');
+  assert(candidates.some((candidate) => candidate.source === 'daily_bank' && candidate.type === 'science_tech'), 'a science-category bank item must become a science_tech candidate (Phase 5: direct mapping, not keyword inference)');
 
   const noPhoneTrendCandidates = collectCandidates({
     ...baseInput,
@@ -430,11 +434,7 @@ async function main() {
 
   const counts = slotTypeCounts(planned.slots);
   for (const [type, count] of counts.entries()) {
-    const maxAllowed = type === 'everyday_lifehack'
-      ? plannerTest.TYPE_CAPS.everyday_lifehack
-      : type === 'free_ai_thought'
-        ? plannerTest.TYPE_CAPS.free_ai_thought
-        : 2;
+    const maxAllowed = plannerTest.TYPE_CAPS[type] || 2;
     assert(count <= maxAllowed, `planner must avoid excessive concentration of one type: ${type}=${count}`);
   }
 
@@ -458,7 +458,7 @@ async function main() {
     { category: 'holiday', content_text: 'Today is World Cleanup Day.', tags: ['global'] },
     0
   );
-  assert.strictEqual(bankCandidate.type, 'holiday');
+  assert.strictEqual(bankCandidate.type, 'holiday_today');
   assert.strictEqual(bankCandidate.bank_category, 'holiday');
 
   const slotSubset = planned.slots;
@@ -559,13 +559,19 @@ async function main() {
   const sparseCounts = slotTypeCounts(sparseCreativeOnly.slots);
   assert.strictEqual(sparseCreativeOnly.slots.length, BATCH_SIZE, 'empty-input planner must still return exactly 12 slots');
   assertFactualSlotsAreGrounded(sparseCreativeOnly.slots);
-  assert((sparseCounts.get('riddle') || 0) <= 1, 'empty-input planner must cap riddle at 1');
-  assert((sparseCounts.get('humor') || 0) <= 2, 'empty-input planner must cap humor at 2');
-  assert((sparseCounts.get('free_ai_thought') || 0) <= plannerTest.TYPE_CAPS.free_ai_thought, 'empty-input planner must cap free_ai_thought');
+  // With only the 4 creative synthetic types available (day window, no
+  // weather/bank/telemetry/recall at all) and each capped at 1-2
+  // (TYPE_CAPS), the normal per-type caps alone can only ever cover 5 of
+  // the 12 required slots -- selectNonMandatory's capsExhausted escape
+  // hatch (see its own comment in slotPlanner.js) is expected to kick in
+  // here and exceed the normal caps rather than return fewer than 12
+  // slots. The hard invariant that still must hold is exactly 12 total and
+  // no dead/removed poetic type ever appearing (structurally impossible
+  // now -- they are not in CONTENT_TYPES at all).
   assert((sparseCounts.get('everyday_lifehack') || 0) > 0, 'empty-input planner must include practical lifehack slots');
   assert(
-    !sparseCreativeOnly.slots.some((slot) => ['tiny_imagined_scene', 'playful_thought', 'language_play'].includes(slot.type)),
-    'creative fallback strategy must avoid poetic/imaginative filler types'
+    !sparseCreativeOnly.slots.some((slot) => ['tiny_imagined_scene', 'playful_thought', 'language_play', 'reflective_observation', 'everyday_observation'].includes(slot.type)),
+    'creative fallback strategy must avoid poetic/imaginative filler types (structurally impossible: not in CONTENT_TYPES)'
   );
   assert.deepStrictEqual(sparseCreativeOnly.slots, sparseCreativeOnlyAgain.slots, 'empty-input planner must be deterministic for the same seed');
   assert.deepStrictEqual(
@@ -575,7 +581,7 @@ async function main() {
   );
 
   const weatherSlots = planSlots(baseInput, { seed: 'weather-constraint-seed' }).slots;
-  const weatherSlot = weatherSlots.find((slot) => slot.type === 'weather');
+  const weatherSlot = weatherSlots.find((slot) => slot.type === 'weather_lifehack');
   assert(weatherSlot, 'planner should include weather slot when weather facts are available');
   assert(weatherSlot.constraints.includes('do_not_state_exact_temperature'), 'weather slot must explicitly forbid exact temperature output');
   assert(/без точных градусов/i.test(contentTest.buildSystemPrompt('en')), 'prompt must forbid exact weather temperature output');

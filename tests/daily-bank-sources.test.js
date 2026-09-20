@@ -34,14 +34,14 @@ const EXPECTED_CATEGORIES = [
 ];
 
 const EXPECTED_MAPPING = {
-  holiday: 'holiday',
+  holiday: 'holiday_today',
   on_this_day: 'history_today',
-  humor: 'humor',
+  humor: 'smart_humor_observation',
   idiom: 'word_learning',
   statistic: 'unusual_fact',
   quote: 'culture',
-  science: 'science',
-  technology: 'technology',
+  science: 'science_tech',
+  technology: 'science_tech',
   economics: 'money_economics',
   fact: 'unusual_fact',
   country_fact: 'country_fact',

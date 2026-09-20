@@ -1,58 +1,61 @@
 const { BATCH_SIZE } = require('./constants');
 
+// Rebuilt content matrix (see HANDOFF_2 "kind/smart/attentive companion"
+// rebuild, task dated after commit 82ce638): mandatory named anchors
+// (greeting_name/goodnight_care), a telemetry-reaction type (context_signal),
+// and a leaner, less lifehack-dominated creative pool. Dead poetic types
+// (playful_thought/tiny_imagined_scene/reflective_observation/language_play/
+// everyday_observation) and never-implemented types (personal_context,
+// foreign_word_or_expression, the old city_event) are removed outright
+// rather than kept as unreachable declarations -- createCandidate below
+// silently coerces any candidate.type not in this list to 'unusual_fact',
+// so a stale/removed type name would otherwise fail quietly instead of
+// loudly.
 const CONTENT_TYPES = [
-  'greeting',
-  'weather',
-  'holiday',
+  'greeting_name',
+  'goodnight_care',
+  'weather_lifehack',
+  'context_signal',
+  'holiday_today',
   'history_today',
-  'science',
-  'country_fact',
   'word_learning',
   'learning_recall',
-  'foreign_word_or_expression',
-  'humor',
-  'everyday_lifehack',
-  'technology',
+  'science_tech',
   'money_economics',
-  'culture',
   'unusual_fact',
-  'riddle',
-  'everyday_observation',
-  'playful_thought',
-  'tiny_imagined_scene',
-  'reflective_observation',
-  'language_play',
+  'country_fact',
   'good_news',
+  'city_afisha',
+  'everyday_lifehack',
+  'smart_humor_observation',
+  'free_ai_thought',
+  'culture',
   'seasonal',
   'phone_trend',
-  'personal_context',
   'age_context',
-  'gender_context',
-  'city_event',
-  'free_ai_thought',
-  'goodnight',
 ];
 
 const FACTUAL_TYPES = new Set([
-  'weather',
-  'holiday',
+  'weather_lifehack',
+  'context_signal',
+  'holiday_today',
   'history_today',
-  'science',
-  'country_fact',
   'word_learning',
   'learning_recall',
-  'foreign_word_or_expression',
-  'technology',
+  'science_tech',
   'money_economics',
-  'culture',
   'unusual_fact',
+  'country_fact',
   'good_news',
   'phone_trend',
   'age_context',
-  'gender_context',
-  'city_event',
 ]);
 
+// Creative (non-factual) synthetic candidates -- always available regardless
+// of weather/bank/telemetry, so the planner can still complete a batch on a
+// 'day' window with a bare-minimum device. Kept to 4 distinct types (see
+// TYPE_CAPS below for why each is capped low) rather than the old wide
+// poetic-leaning pool the "final purge" commit (2523b99) removed.
 const SYNTHETIC_POOL = [
   {
     id: 'synthetic_free_ai_thought_1',
@@ -81,7 +84,7 @@ const SYNTHETIC_POOL = [
   {
     id: 'synthetic_everyday_lifehack_1',
     type: 'everyday_lifehack',
-    priority: 44,
+    priority: 30,
     facts: {},
     source: 'creative',
     constraints: ['practical_household_or_style_tip', 'one_sentence', 'no_command_tone', 'no_poetry'],
@@ -89,26 +92,66 @@ const SYNTHETIC_POOL = [
   {
     id: 'synthetic_everyday_lifehack_2',
     type: 'everyday_lifehack',
-    priority: 37,
+    priority: 24,
     facts: {},
     source: 'creative',
     constraints: ['practical_phone_or_commute_tip', 'one_sentence', 'no_command_tone', 'no_poetry'],
   },
   {
-    id: 'synthetic_everyday_lifehack_3',
-    type: 'everyday_lifehack',
-    priority: 35,
+    id: 'synthetic_smart_humor_1',
+    type: 'smart_humor_observation',
+    priority: 28,
     facts: {},
     source: 'creative',
-    constraints: ['practical_clothes_or_bag_tip', 'one_sentence', 'no_command_tone', 'no_poetry'],
+    constraints: ['ironic_everyday_observation', 'no_anecdote', 'no_mocking', 'one_sentence'],
+  },
+  {
+    id: 'synthetic_smart_humor_2',
+    type: 'smart_humor_observation',
+    priority: 22,
+    facts: {},
+    source: 'creative',
+    constraints: ['ironic_digital_life_observation', 'no_anecdote', 'no_mocking', 'one_sentence'],
+  },
+  {
+    id: 'synthetic_city_afisha_1',
+    type: 'city_afisha',
+    priority: 16,
+    facts: {},
+    source: 'creative',
+    // No fabricated event/film/exhibition names or dates -- there is no real
+    // city-events data source wired up yet (see HANDOFF_2). Only general,
+    // non-invented city-life/season observations are allowed.
+    constraints: ['general_city_life_observation', 'season_appropriate', 'no_specific_event_names', 'no_fabricated_dates'],
   },
 ];
 
+// Rare/one-off types (mandatory anchors, telemetry reaction) are capped at
+// 1 so they stay a genuine accent, not a recurring bucket. The four
+// "always available" creative types (smart_humor_observation/city_afisha/
+// free_ai_thought/everyday_lifehack) are capped low but NOT at 1 each:
+// with only these 4 types as guaranteed filler, a strict 1/1/1/1 (or the
+// first attempt here, 1/1/1/2) sums to well under BATCH_SIZE whenever the
+// real (weather/bank/telemetry) candidate pool is also sparse -- verified
+// directly against the baseInput test fixture, which has only ~10
+// selectable real+synthetic candidates once each singleton factual type
+// (weather/age/history_today/science_tech/seasonal) is capped at 1 by
+// having just 1 candidate -- that shortfall forced selectNonMandatory's
+// capsExhausted escape hatch (see its own comment) to trigger even in a
+// normally-populated batch, not just the genuinely-empty edge case it's
+// meant for. 2/2/2/3 gives enough headroom to reach 12 from creative
+// candidates alone without relying on that escape hatch in ordinary
+// conditions, while still cutting everyday_lifehack down hard from the
+// pre-rebuild TYPE_CAPS.everyday_lifehack = 8 (which is what let 7 of 12
+// slots in a real batch turn into dry cable/container/pillow tips).
 const TYPE_CAPS = {
-  riddle: 1,
-  humor: 2,
-  everyday_lifehack: 8,
-  free_ai_thought: 4,
+  greeting_name: 1,
+  goodnight_care: 1,
+  context_signal: 1,
+  smart_humor_observation: 2,
+  city_afisha: 2,
+  free_ai_thought: 2,
+  everyday_lifehack: 3,
   phone_trend: 1,
   learning_recall: 1,
 };
@@ -117,19 +160,19 @@ const DEFAULT_TYPE_CAP = 2;
 
 const CREATIVE_FILLER_BLUEPRINTS = [
   { id: 'creative_filler_everyday_lifehack_v1', type: 'everyday_lifehack', constraints: ['practical_household_or_style_tip', 'one_sentence', 'no_command_tone', 'no_poetry'] },
-  { id: 'creative_filler_everyday_lifehack_v2', type: 'everyday_lifehack', constraints: ['practical_phone_or_commute_tip', 'one_sentence', 'no_command_tone', 'no_poetry'] },
   { id: 'creative_filler_free_ai_thought_standalone_v1', type: 'free_ai_thought', constraints: ['practical_neutral_observation', 'no_user_facts', 'no_poetry'] },
-  { id: 'creative_filler_free_ai_thought_standalone_v2', type: 'free_ai_thought', constraints: ['useful_everyday_observation', 'no_user_facts', 'no_poetry'] },
+  { id: 'creative_filler_smart_humor_v1', type: 'smart_humor_observation', constraints: ['ironic_everyday_observation', 'no_anecdote', 'no_mocking', 'one_sentence'] },
+  { id: 'creative_filler_city_afisha_v1', type: 'city_afisha', constraints: ['general_city_life_observation', 'season_appropriate', 'no_specific_event_names', 'no_fabricated_dates'] },
 ];
 
 const CONTENT_MEMORY_EXEMPT_TYPES = new Set([
-  'greeting',
-  'goodnight',
-  'weather',
+  'greeting_name',
+  'goodnight_care',
+  'weather_lifehack',
+  'context_signal',
   'seasonal',
   'phone_trend',
   'age_context',
-  'gender_context',
 ]);
 
 function hashString(input) {
@@ -190,9 +233,9 @@ function mapBankItemType(item) {
   if (!item || typeof item.category !== 'string') {
     return 'unusual_fact';
   }
-  if (item.category === 'holiday') return 'holiday';
+  if (item.category === 'holiday') return 'holiday_today';
   if (item.category === 'on_this_day') return 'history_today';
-  if (item.category === 'humor') return 'humor';
+  if (item.category === 'humor') return 'smart_humor_observation';
   // idiom bank items are already a self-contained "word/expression + meaning"
   // piece of content -- the server-selected word_learning grounding, not a
   // separate content source. foreign_word_or_expression currently has no
@@ -200,12 +243,11 @@ function mapBankItemType(item) {
   if (item.category === 'idiom') return 'word_learning';
   if (item.category === 'statistic') return 'unusual_fact';
   if (item.category === 'quote') return 'culture';
-  // Direct, deterministic mapping as of Phase 5 -- the Daily Bank source
-  // (generateDailyBank's prompt, see dailyContentBank.js) now owns choosing
-  // the precise category itself; SlotPlanner only validates/maps it, no
-  // longer infers it from content_text/tags keywords.
-  if (item.category === 'science') return 'science';
-  if (item.category === 'technology') return 'technology';
+  // science and technology bank categories both fold into one science_tech
+  // content type (rebuild task) -- there was never a meaningfully different
+  // prompt treatment between the two on the client side anyway.
+  if (item.category === 'science') return 'science_tech';
+  if (item.category === 'technology') return 'science_tech';
   if (item.category === 'economics') return 'money_economics';
   if (item.category === 'fact') return 'unusual_fact';
   // country_fact/good_news added in the same direct-mapping style, no
@@ -259,7 +301,7 @@ function bankItemToCandidate(item, index = 0) {
     id: item && item.id ? `bank_${item.id}` : stableCandidateId(`bank_${type}`, text),
     topic_key: stableCandidateId(`bank_topic_${type}`, normalizedText),
     type,
-    priority: type === 'holiday' || type === 'history_today'
+    priority: type === 'holiday_today' || type === 'history_today'
       ? 70
       : type === 'word_learning'
         ? 78
@@ -310,9 +352,39 @@ function normalizePhoneTrends(phoneTrends = {}) {
   return normalized;
 }
 
+// Telemetry-reaction thresholds (context_signal). Battery/unlocks come
+// straight from the per-request device signals (deviceSignals.js) -- NOT
+// phoneAnalytics.js's 45-day trend aggregates, a separate, already-existing
+// mechanism (phone_trend). Only a semantic flag ('low_battery'/
+// 'many_unlocks'/'late_hour') ever becomes a candidate's facts -- the raw
+// number is read here, in this function, and discarded; it is never stored
+// on the candidate, so it can never reach the OpenAI payload (see
+// contentGenerator.test's explicit "no raw telemetry key/value in payload"
+// assertions, which this must keep satisfying).
+const BATTERY_LOW_THRESHOLD = 20;
+const MANY_UNLOCKS_THRESHOLD = 30;
+const LATE_HOUR_START = 23;
+const LATE_HOUR_END = 5;
+
+function resolveContextSignal(signals, dateContext) {
+  if (signals && typeof signals.battery_level === 'number' && signals.battery_level < BATTERY_LOW_THRESHOLD) {
+    return 'low_battery';
+  }
+  if (signals && typeof signals.unlocks_since_last_batch === 'number' && signals.unlocks_since_last_batch > MANY_UNLOCKS_THRESHOLD) {
+    return 'many_unlocks';
+  }
+  if (dateContext && typeof dateContext.time === 'string') {
+    const hour = parseInt(dateContext.time.split(':')[0], 10);
+    if (Number.isFinite(hour) && (hour >= LATE_HOUR_START || hour < LATE_HOUR_END)) {
+      return 'late_hour';
+    }
+  }
+  return null;
+}
+
 function collectCandidates(input = {}) {
   const candidates = [];
-  const { device = {}, window, dateContext, weather, bankItems = [], phoneTrends = {}, recallCandidate = null } = input;
+  const { device = {}, window, dateContext, weather, bankItems = [], phoneTrends = {}, recallCandidate = null, signals = {} } = input;
   const semanticPhoneTrends = normalizePhoneTrends(phoneTrends);
 
   if (window === 'morning') {
@@ -320,22 +392,24 @@ function collectCandidates(input = {}) {
     if (device.name) facts.name = device.name;
     candidates.push(createCandidate({
       id: 'mandatory_morning_greeting',
-      type: 'greeting',
+      type: 'greeting_name',
       priority: 100,
       facts,
       source: 'editorial',
-      constraints: ['warm', 'one_per_batch', 'no_fixed_template'],
+      constraints: ['warm', 'one_per_batch', 'no_fixed_template', 'name_if_known', 'light_send_off_for_the_day'],
     }));
   }
 
   if (window === 'night') {
+    const facts = {};
+    if (device.name) facts.name = device.name;
     candidates.push(createCandidate({
       id: 'mandatory_night_goodnight',
-      type: 'goodnight',
+      type: 'goodnight_care',
       priority: 100,
-      facts: {},
+      facts,
       source: 'editorial',
-      constraints: ['warm', 'calm', 'no_claim_user_is_sleeping'],
+      constraints: ['warm', 'calm', 'no_claim_user_is_sleeping', 'name_if_known'],
     }));
   }
 
@@ -345,11 +419,23 @@ function collectCandidates(input = {}) {
     if (weather.description) facts.condition = weather.description;
     candidates.push(createCandidate({
       id: 'weather_current_safe',
-      type: 'weather',
+      type: 'weather_lifehack',
       priority: 62,
       facts,
       source: 'weather',
-      constraints: ['avoid_exact_right_now', 'safe_for_batch_delay', 'temperature_grounding_only', 'do_not_state_exact_temperature'],
+      constraints: ['avoid_exact_right_now', 'safe_for_batch_delay', 'temperature_grounding_only', 'do_not_state_exact_temperature', 'clothing_or_umbrella_framing'],
+    }));
+  }
+
+  const contextSignal = resolveContextSignal(signals, dateContext);
+  if (contextSignal) {
+    candidates.push(createCandidate({
+      id: `context_signal_${contextSignal}`,
+      type: 'context_signal',
+      priority: 40,
+      facts: { signal: contextSignal },
+      source: 'device_signal',
+      constraints: ['no_exact_numbers', 'caring_not_alarming', 'no_medical_claims'],
     }));
   }
 
@@ -362,17 +448,6 @@ function collectCandidates(input = {}) {
       facts: { age },
       source: 'profile',
       constraints: ['rare', 'avoid_stereotypes'],
-    }));
-  }
-
-  if (device.gender) {
-    candidates.push(createCandidate({
-      id: 'gender_context_soft',
-      type: 'gender_context',
-      priority: 8,
-      facts: { gender: device.gender },
-      source: 'profile',
-      constraints: ['rare', 'only_if_naturally_relevant', 'avoid_stereotypes'],
     }));
   }
 
@@ -486,16 +561,16 @@ function antiRepeatPenalty(candidate, memoryIndex) {
 // slot's own facts don't support.
 const INTEREST_TYPE_MAP = {
   sport: 'unusual_fact',
-  auto: 'technology',
-  cars: 'technology',
-  technology: 'technology',
-  tech: 'technology',
+  auto: 'science_tech',
+  cars: 'science_tech',
+  technology: 'science_tech',
+  tech: 'science_tech',
   style: 'everyday_lifehack',
   fashion: 'everyday_lifehack',
   work: 'money_economics',
   family: 'culture',
-  self_development: 'science',
-  mindfulness: 'reflective_observation',
+  self_development: 'science_tech',
+  mindfulness: 'culture',
   creative_arts: 'culture',
 };
 
@@ -588,6 +663,48 @@ function selectInterestAwareSlots(finalSlots, rawInterests) {
   return hints;
 }
 
+// Gender-lean personalization (soft topic-weighting, product decision
+// during the "kind companion" rebuild -- see task history): gender must
+// stay "rare, careful, without stereotypes" (HANDOFF_2 §7's original rule).
+// Implemented with EXACTLY the same post-selection-only philosophy as
+// interest_hint above and for the identical reason: selection itself stays
+// completely gender-blind (mandatory slots/anti-repeat/type caps/factual
+// grounding can never be overridden by this), and at most ONE already-final
+// slot -- never more -- gets tagged with a gender_lean_hint, only if a
+// type-compatible slot already exists in this batch on its own merits.
+// This makes "not exclusive, capped at 1 slot per batch" a structural
+// guarantee, not a probabilistic one, and avoids the separate, more
+// invasive alternative (nudging candidateWeight for every matching
+// candidate) which could not cheaply guarantee the same hard cap.
+const GENDER_LEAN_TYPE_MAP = {
+  male: ['science_tech', 'unusual_fact', 'everyday_lifehack', 'money_economics'],
+  female: ['everyday_lifehack', 'science_tech', 'culture'],
+};
+
+function normalizeGenderForLean(rawGender) {
+  const value = typeof rawGender === 'string' ? rawGender.trim().toLowerCase() : '';
+  return value === 'male' || value === 'female' ? value : null;
+}
+
+// Picks at most one already-selected, already-final slot whose type leans
+// toward the device's gender. rng is the SAME seeded rng planSlots already
+// uses for everything else, so which compatible slot (when more than one
+// exists) gets the hint stays deterministic per seed, exactly like the rest
+// of this module -- never Math.random() inside planSlots' own call path.
+function selectGenderLeanSlot(finalSlots, rawGender, rng = Math.random) {
+  const gender = normalizeGenderForLean(rawGender);
+  if (!gender) {
+    return null;
+  }
+  const leanTypes = GENDER_LEAN_TYPE_MAP[gender];
+  const compatible = finalSlots.filter((slot) => leanTypes.includes(slot.type));
+  if (compatible.length === 0) {
+    return null;
+  }
+  const pick = compatible[Math.floor(rng() * compatible.length)];
+  return { slotId: pick.id, gender };
+}
+
 function candidateWeight(candidate, rng, memoryIndex = buildRecentMemoryIndex()) {
   return candidate.priority + rng() * 20 - antiRepeatPenalty(candidate, memoryIndex);
 }
@@ -623,17 +740,31 @@ function selectNonMandatory(candidates, count, rng, memoryIndex = buildRecentMem
     recordType(typeCounts, type);
   }
 
+  // Creative filler, last resort. capsExhausted starts false so normal/rich
+  // batches still respect TYPE_CAPS' diversity intent (e.g. never more than
+  // 1 smart_humor_observation) even in this loop. But BATCH_SIZE slots is a
+  // hard product invariant (see constants.js/validateFinalBatch in
+  // contentGenerator.js) that must never fail just because a sparse/
+  // degenerate input (e.g. a 'day' window with no weather/bank/telemetry/
+  // recall at all) ran out of distinct safe filler types under the new,
+  // deliberately tighter per-type caps (TYPE_CAPS.everyday_lifehack was
+  // lowered from 8 to 2 in this same rebuild) -- once every filler
+  // blueprint type has been tried enough times to hit its cap and slots are
+  // STILL unfilled, this switches to ignoring the cap and just completes
+  // the batch, rather than returning fewer than BATCH_SIZE slots.
   let fillerIndex = 0;
+  let capsExhausted = false;
   while (selected.length < count) {
     const blueprint = CREATIVE_FILLER_BLUEPRINTS[fillerIndex % CREATIVE_FILLER_BLUEPRINTS.length];
     const blueprintUseIndex = Math.floor(fillerIndex / CREATIVE_FILLER_BLUEPRINTS.length) + 1;
     const type = blueprint.type;
     fillerIndex += 1;
-    if (!canAddType(typeCounts, type)) {
+    if (!capsExhausted && !canAddType(typeCounts, type)) {
       if (fillerIndex > CREATIVE_FILLER_BLUEPRINTS.length * (DEFAULT_TYPE_CAP + 2)) {
-        break;
+        capsExhausted = true;
+      } else {
+        continue;
       }
-      continue;
     }
     selected.push(createCandidate({
       id: `filler_${blueprint.id}_${blueprintUseIndex}`,
@@ -663,11 +794,12 @@ function addSlotIds(candidates) {
     // Server-only; buildContextPrompt hand-picks {slot_id, type, facts,
     // constraints} for the OpenAI payload and does not include this field.
     learning_memory_id: candidate.learning_memory_id,
-    // Set below, after selection, by selectInterestAwareSlots -- for the
-    // vast majority of slots this stays undefined and is dropped entirely
-    // by JSON.stringify, so a non-personalized slot's payload shape is
-    // byte-identical to before interests personalization existed.
+    // Set below, after selection, by selectInterestAwareSlots/
+    // selectGenderLeanSlot -- for the vast majority of slots these stay
+    // undefined and are dropped entirely by JSON.stringify, so a
+    // non-personalized slot's payload shape is unchanged.
     interest_hint: undefined,
+    gender_lean_hint: undefined,
   }));
 }
 
@@ -683,10 +815,10 @@ function planSlots(input = {}, options = {}) {
   const memoryIndex = buildRecentMemoryIndex(options.recentContentMemory);
 
   const mandatoryFirst = input.window === 'morning'
-    ? candidates.find((candidate) => candidate.type === 'greeting')
+    ? candidates.find((candidate) => candidate.type === 'greeting_name')
     : null;
   const mandatoryLast = input.window === 'night'
-    ? candidates.find((candidate) => candidate.type === 'goodnight')
+    ? candidates.find((candidate) => candidate.type === 'goodnight_care')
     : null;
 
   const mandatoryIds = new Set([mandatoryFirst, mandatoryLast].filter(Boolean).map((candidate) => candidate.id));
@@ -714,6 +846,16 @@ function planSlots(input = {}, options = {}) {
     }
   }
 
+  // Gender lean hint: same post-selection-only timing as interest hints
+  // above, but capped at exactly one slot regardless of interests.
+  const genderLean = selectGenderLeanSlot(slots, input.device && input.device.gender, rng);
+  if (genderLean) {
+    const slot = slots.find((s) => s.id === genderLean.slotId);
+    if (slot) {
+      slot.gender_lean_hint = genderLean.gender;
+    }
+  }
+
   return {
     candidates,
     slots,
@@ -735,8 +877,11 @@ module.exports = {
     normalizeTextForTopicKey,
     parseDeviceInterests,
     selectInterestAwareSlots,
+    selectGenderLeanSlot,
+    resolveContextSignal,
     candidateWeight,
     INTEREST_TYPE_MAP,
+    GENDER_LEAN_TYPE_MAP,
     TYPE_CAPS,
     MAX_INTEREST_AWARE_SLOTS,
   },
