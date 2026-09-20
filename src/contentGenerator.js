@@ -6,6 +6,7 @@ const {
   getBankDateString,
   BANK_CATEGORIES,
 } = require('./dailyContentBank');
+const { planSlots } = require('./slotPlanner');
 
 const LOCK_SCREEN_TEXT_MAX_LENGTH = 140;
 
@@ -586,12 +587,14 @@ function incrementReason(reasonCounts, reason) {
   reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
 }
 
-function collectUsablePhrases(phrases, languageCode, validationContext = {}) {
+function collectUsablePhrases(phrases, languageCode, validationContext = {}, expectedSlotIds = null) {
   if (!Array.isArray(phrases)) {
     return null;
   }
 
   const seenTexts = new Set();
+  const seenSlotIds = new Set();
+  const expectedSlotSet = Array.isArray(expectedSlotIds) ? new Set(expectedSlotIds) : null;
   const accepted = [];
   let rejectedCount = 0;
   const rejectionReasons = {};
@@ -600,6 +603,14 @@ function collectUsablePhrases(phrases, languageCode, validationContext = {}) {
       rejectedCount += 1;
       incrementReason(rejectionReasons, 'schema');
       continue;
+    }
+    if (expectedSlotSet) {
+      if (typeof phrase.slot_id !== 'string' || !expectedSlotSet.has(phrase.slot_id) || seenSlotIds.has(phrase.slot_id)) {
+        rejectedCount += 1;
+        incrementReason(rejectionReasons, 'slot_id');
+        continue;
+      }
+      seenSlotIds.add(phrase.slot_id);
     }
     const text = phrase.text.trim();
     const reason = rejectionReasonForText(text, languageCode, validationContext);
@@ -623,6 +634,7 @@ function collectUsablePhrases(phrases, languageCode, validationContext = {}) {
     seenTexts.add(normalized);
 
     accepted.push({
+      slot_id: phrase.slot_id,
       text,
       style_id: STYLE_IDS.includes(phrase.style_id) ? phrase.style_id : null,
     });
@@ -675,6 +687,62 @@ function validateFinalBatch(items) {
   return true;
 }
 
+function fallbackTextForSlot(slot, languageCode) {
+  if (slot && slot.type === 'goodnight') {
+    if (languageCode === 'ru') return 'Спокойной ночи. Пусть остаток дня станет мягче и тише';
+    return 'Good night. Let the rest of the day land softly';
+  }
+  if (slot && slot.type === 'greeting') {
+    if (languageCode === 'ru') return 'Доброе утро. Пусть день начнется спокойно и по-доброму';
+    return 'Good morning. Let the day start gently and kindly';
+  }
+  return null;
+}
+
+function pickFallbackTextForSlot(slot, languageCode, seenTexts, fallbackTexts) {
+  const slotFallback = fallbackTextForSlot(slot, languageCode);
+  if (slotFallback) {
+    const normalized = normalizeTextForDedupe(slotFallback);
+    if (!isUnusableLockScreenText(slotFallback) && !seenTexts.has(normalized)) {
+      return slotFallback;
+    }
+  }
+
+  for (const text of fallbackTexts) {
+    const trimmed = text.trim();
+    const normalized = normalizeTextForDedupe(trimmed);
+    if (!isUnusableLockScreenText(trimmed) && !seenTexts.has(normalized)) {
+      return trimmed;
+    }
+  }
+  return null;
+}
+
+function assembleByExpectedSlotOrder(generated, languageCode, expectedSlots) {
+  const fallbackPhrases = FALLBACK_PHRASES[languageCode] || FALLBACK_PHRASES[DEFAULT_LANGUAGE_CODE];
+  const shuffledFallback = [...fallbackPhrases].sort(() => Math.random() - 0.5);
+  const generatedBySlot = new Map(generated.map((item) => [item.slot_id, item]));
+  const seenTexts = new Set(generated.map((item) => normalizeTextForDedupe(item.text)));
+
+  const result = expectedSlots.map((slot) => {
+    const generatedItem = generatedBySlot.get(slot.slot_id);
+    if (generatedItem) {
+      return generatedItem;
+    }
+    const fallbackText = pickFallbackTextForSlot(slot, languageCode, seenTexts, shuffledFallback);
+    if (!fallbackText) {
+      return null;
+    }
+    seenTexts.add(normalizeTextForDedupe(fallbackText));
+    return { slot_id: slot.slot_id, text: fallbackText, style_id: null };
+  });
+
+  if (result.some((item) => !item)) {
+    return null;
+  }
+  return assignUniqueStyleIds(result);
+}
+
 function fillWithFallbackPhrases(generated, languageCode) {
   const result = [...generated];
   const seenTexts = new Set(result.map((item) => normalizeTextForDedupe(item.text)));
@@ -693,23 +761,25 @@ function fillWithFallbackPhrases(generated, languageCode) {
     seenTexts.add(normalized);
     result.push({ text: trimmed, style_id: null });
   }
-
   if (result.length !== BATCH_SIZE) {
     return null;
   }
   return assignUniqueStyleIds(result);
 }
 
-function assembleBatchFromGeneratedPhrases(phrases, languageCode, validationContext = {}) {
-  const collected = collectUsablePhrases(phrases, languageCode, validationContext);
+function assembleBatchFromGeneratedPhrases(phrases, languageCode, validationContext = {}, expectedSlots = null) {
+  const expectedSlotIds = Array.isArray(expectedSlots) ? expectedSlots.map((slot) => slot.slot_id) : null;
+  const collected = collectUsablePhrases(phrases, languageCode, validationContext, expectedSlotIds);
   if (!collected) {
     return null;
   }
   const generated = collected.accepted.slice(0, BATCH_SIZE);
   const fallbackFillCount = BATCH_SIZE - generated.length;
-  const assembled = fallbackFillCount > 0
-    ? fillWithFallbackPhrases(generated, languageCode)
-    : assignUniqueStyleIds(generated);
+  const assembled = Array.isArray(expectedSlots)
+    ? assembleByExpectedSlotOrder(generated, languageCode, expectedSlots)
+    : fallbackFillCount > 0
+      ? fillWithFallbackPhrases(generated, languageCode)
+      : assignUniqueStyleIds(generated);
 
   if (!assembled || !validateFinalBatch(assembled)) {
     return {
@@ -764,7 +834,8 @@ function buildLoggedFallbackResult(languageCode, context, reason, rejectedCount 
 
 function buildLoggedOpenAiResult(assembly, context) {
   logBatchResult(assembly);
-  return { phrases: assembly.phrases, source: assembly.generatedCount > 0 ? 'openai' : 'fallback', context };
+  const phrases = assembly.phrases.map((item) => ({ text: item.text, style_id: item.style_id }));
+  return { phrases, source: assembly.generatedCount > 0 ? 'openai' : 'fallback', context };
 }
 
 function buildLoggedFinalAssemblyFallback(languageCode, context, assembly) {
@@ -791,9 +862,11 @@ function parseOpenAiBatchResponse(response) {
   return parsed;
 }
 
-function extractUsedCategories(parsed) {
-  return Array.isArray(parsed.used_categories)
-    ? parsed.used_categories.filter((c) => BANK_CATEGORIES.includes(c))
+function extractUsedCategoriesFromSlots(slots) {
+  return Array.isArray(slots)
+    ? slots
+      .map((slot) => slot.bank_category)
+      .filter((category) => BANK_CATEGORIES.includes(category))
     : [];
 }
 // languageCode is expected to already be a resolved, known key of
@@ -1002,48 +1075,28 @@ function computeAge(birthDate) {
   return age >= 0 ? age : null;
 }
 
-// Builds the compact user-context object sent to the model, JSON-stringified
-// as the user message. Deliberately excludes anything not already agreed in
-// PRODUCT_REBUILD_PLAN.md §5.1 — no location, no notification/app data (see
-// the plan's data-source list).
-//
-// Kept as a nested object (profile/now/signals/weather/today_content/
-// already_shown) with only present fields included, rather than the old
-// long "; "-joined sentence: shorter per request (fewer tokens for signals
-// that don't apply to a given device/moment) and nothing here duplicates
-// what's already fixed in the static system prompt.
+// Builds the compact slot-based user payload sent to the model. The planner
+// has already decided WHAT the batch should cover; this payload asks OpenAI
+// only to write one phrase for each selected slot.
 //
 // languageCode: the already-resolved target language (resolveTargetLanguageCode's
 // output) — reported in `now.language` as a human name so the model doesn't
 // have to map an ISO code itself.
-// bankItems (optional): the subset of today's daily_content_bank rows chosen
-// for this device by selectBankItemsForDevice (see dailyContentBank.js) --
-// already filtered to categories the device hasn't seen yet today.
+// slots: exactly BATCH_SIZE planner-selected editorial tasks. The full
+// candidate pool/bank is deliberately not sent.
 // shownCategories (optional): category names already shown to this device
 // today (see dailyContentBank.js's getShownCategories) — listed so the model
-// avoids repeating them, without re-sending the actual past phrases.
+// has a light repeat-avoidance hint without re-sending past phrases.
 function windowContextFor(window) {
   return WINDOW_CONTEXT[window] || { id: window };
 }
 
-function buildContextPrompt(device, window, signals, weather, languageCode, bankItems, shownCategories, dateContext) {
+function buildContextPrompt(device, window, signals, weather, languageCode, slots, shownCategories, dateContext) {
   const profile = {};
   if (device.name) profile.name = device.name;
   if (device.gender) profile.gender = device.gender;
   const age = computeAge(device.birth_date);
   if (age !== null) profile.age = age;
-  if (device.interests) {
-    try {
-      const interests = JSON.parse(device.interests);
-      if (Array.isArray(interests) && interests.length) {
-        profile.interests = interests;
-      }
-    } catch (_) {
-      // malformed stored JSON — skip rather than fail the whole request
-    }
-  }
-  if (device.personal_goal) profile.personal_goal = device.personal_goal;
-  if (device.tone) profile.tone = device.tone;
 
   // `language` is the resolved GENERATION target (resolveTargetLanguageCode's
   // output, e.g. falls back to English if the device's own language isn't
@@ -1083,29 +1136,20 @@ function buildContextPrompt(device, window, signals, weather, languageCode, bank
     }
   }
 
-  const signalsOut = {};
-  if (signals) {
-    if (signals.steps_since_last_batch !== undefined) signalsOut.steps = signals.steps_since_last_batch;
-    if (signals.unlocks_since_last_batch !== undefined) signalsOut.unlocks = signals.unlocks_since_last_batch;
-    if (signals.battery_level !== undefined) signalsOut.battery_pct = signals.battery_level;
-    if (signals.ambient_light !== undefined) signalsOut.ambient_light_lux = signals.ambient_light;
-    if (signals.screen_on_duration_seconds !== undefined) signalsOut.screen_on_duration_sec = signals.screen_on_duration_seconds;
-  }
-
-  const ctx = { profile, now };
+  const ctx = {
+    lang: languageCode,
+    profile,
+    now,
+    slots: Array.isArray(slots)
+      ? slots.map((slot) => ({
+        slot_id: slot.slot_id,
+        type: slot.type,
+        facts: slot.facts || {},
+        constraints: slot.constraints || [],
+      }))
+      : [],
+  };
   if (Object.keys(profile).length === 0) delete ctx.profile;
-  if (Object.keys(signalsOut).length > 0) ctx.signals = signalsOut;
-
-  if (weather && typeof weather.temperatureC === 'number') {
-    const weatherOut = { temperature_c: Math.round(weather.temperatureC) };
-    if (weather.city) weatherOut.city = weather.city;
-    if (weather.description) weatherOut.condition = weather.description;
-    ctx.weather = weatherOut;
-  }
-
-  if (Array.isArray(bankItems) && bankItems.length > 0) {
-    ctx.today_content = bankItems.map((item) => ({ category: item.category, text: item.content_text }));
-  }
 
   if (Array.isArray(shownCategories) && shownCategories.length > 0) {
     ctx.already_shown = shownCategories;
@@ -1128,51 +1172,32 @@ function buildContextPrompt(device, window, signals, weather, languageCode, bank
 // conservative (general-knowledge, uncontested facts only) since this path
 // has no web search, unlike dailyContentBank.js's Responses API call.
 //
-// Shape of the output (exactly BATCH_SIZE {text, style_id} objects plus
-// used_categories) is enforced via the Structured Outputs json_schema passed
-// to the API call in generateBatch, not described in this text -- see the
-// call site for why.
+// Shape of the output (exactly BATCH_SIZE {slot_id, text, style_id} objects)
+// is enforced via the Structured Outputs json_schema passed to the API call
+// in generateBatch, not described in this text -- see the call site for why.
 function buildSystemPrompt(languageCode) {
   const languageName = SUPPORTED_LANGUAGES[languageCode].name;
-  return `You are a proactive personal AI companion on a phone lock screen (live wallpaper).
-The user cannot reply from the lock screen. Speak first with short one-way remarks that feel natural, personal, and context-aware -- not like a chat, trivia feed, quote app, encyclopedia, translated joke list, coach, therapist, motivational quote app, productivity assistant, or mindfulness app.
-Most messages should sound like the AI noticed something worth saying, not like it is assigning the user an action. Prefer concrete observations, specific relevant facts, subtle personalization, natural humor, unexpected but grounded thoughts, and concise context-aware remarks.
-Create exactly ${BATCH_SIZE} distinct lock-screen messages in ${languageName}. Give each message a different style_id from the enum -- do not reuse the same style_id twice within this batch.
+  return `You write for a proactive AI companion on a phone lock screen. The server already chose exactly ${BATCH_SIZE} editorial slots; your job is only to write one short natural message for each slot.
+Write entirely in ${languageName}. Return exactly one phrase per input slot, preserving every slot_id. Use a different style_id for every phrase.
 
-Never ask the user a question. Never request a reply, choice, confirmation, reflection, or answer. Do not end phrases with question marks. Rewrite question-shaped ideas as statements, observations, suggestions, or short remarks.
-Avoid advice, commands, life coaching, generic encouragement, vague wisdom, and filler. Avoid advice openings such as "try", "start with", "notice", "focus on", "remember", "you should", "you can start", "small steps", "today is a good day for", "you do not need", or their equivalents in ${languageName}.
+Voice: warm, kind, alive, concise, interesting, lightly personal when the slot supports it. The user cannot reply from the lock screen, so every line must stand alone.
+This is not a chat, quote app, trivia feed, encyclopedia, coach, therapist, mindfulness app, productivity assistant, or moralizer.
 
-Every message must earn its place: a concrete observation, relevant context, useful specific information, natural humor, a date/event item, or a real connection to interests/goals/signals. Nothing filler.
-Each message must be understandable by itself. Avoid vague wisdom, unfinished thoughts, meaningless metaphors, generic encouragement, and statements with no concrete referent. Bad examples: "There is probably one thing worth doing first", "Small improvements still change the shape", "The day has room for a sharper angle", "The next action does not need ceremony". If a line could fit almost anyone on almost any day unchanged, it is usually too generic.
-When profile/context is rich enough, about 4-5 of the ${BATCH_SIZE} messages should feel personal through one or more factors: interests, personal_goal, age/life context, name, relevant behavior/device context, weather/time, or today_content. Do not force telemetry just to hit a quota.
-If profile.name is present, use the name about once in the whole batch. Do not use it more often unless there is a strong natural reason. Never invent a name.
-Do not assume an unlock means the user needs to put the phone away, pause, breathe, calm down, reset, or reduce screen time. Use that kind of message only when the profile/context genuinely supports it.
+Hard rules:
+- never ask the user for an answer, reply, choice, confirmation, or reflection; no question marks
+- no commands, life coaching, generic motivation, vague wisdom, or filler
+- do not invent facts, names, holidays, dates, events, physical location, commuting/work/home/sleep state, or user feelings
+- use only facts present in the slot/profile/now context; free_ai_thought may use timeless general observation, not user facts
+- weather and date claims must stay safe for a delayed batch display; weather temperature is grounding only, never state exact temperature in generated text
+- prefer stable weather wording from available facts, such as rain expected or broad conditions; do not invent warmer/cooler comparisons without comparison data
+- avoid "right now" and exact transient telemetry
+- do not expose exact battery, unlock, screen-time, step, or sensor values
+- do not make psychological, medical, moral, or addiction claims from phone behavior
+- if profile.name exists, use it at most once in the whole batch
+- gender/age context is optional and rare; avoid stereotypes
+- each text must be at most ${LOCK_SCREEN_TEXT_MAX_LENGTH} characters
 
-profile.tone must shape the writing:
-- formal: calm, polished, restrained; no slang.
-- friendly: warm, natural, conversational.
-- humorous: playful or witty where appropriate, but do not turn all ${BATCH_SIZE} messages into jokes.
-
-Use interests as things the AI knows about the person, not keywords to repeat literally. Let personal_goal noticeably steer some messages: work/business + productivity should feel different from mindfulness + wellbeing. Do not make every line coaching.
-Treat now.country as approximate country context: IP country first, device-locale fallback. Never infer the user's country from system language or timezone.
-Window ids are internal scheduling labels. Use now.window.range and now.time, not the English id alone, to infer time of day. 15:00 is afternoon, not late evening. Do not say the day is ending unless the actual local time supports it.
-Use device signals only when they create a natural useful observation. Treat battery/unlock values as generation-time snapshots that may be stale when displayed. Never expose exact battery percentages or exact unlock counts. Do not make psychological, medical, or moral conclusions from unlocks, steps, battery, ambient light, or screen duration. High unlock count alone does not mean addiction or anxiety. Do not repeat the same signal observation more than once.
-Never assume the user is in traffic, commuting, at work, at school, at home, outside, driving, eating, or about to sleep unless that state is explicitly present in context.
-
-Facts, history, holidays, and today_content are allowed, but they must not read like random encyclopedia cards. When possible, connect today_content to the user's moment or context. If making a factual claim about today/world/date/event, it must come from authoritative now/date context or today_content. Do not invent holidays, weekdays, events, anniversaries, statistics, "tomorrow is...", or "today is...". If today_content is absent, use timeless general observations instead of current-event/date-specific claims.
-When using weather, ground the message in an available weather field. Do not turn generic weather into lifestyle advice. If weather is absent, make no weather claims.
-Humor must work directly in ${languageName}. Avoid English wordplay or puns that become meaningless after adaptation. Prefer short situational or observational humor. Humor is optional, even for humorous tone.
-
-The ${BATCH_SIZE} messages must vary by idea and wording. Do not produce ${BATCH_SIZE} pieces of advice, ${BATCH_SIZE} facts, ${BATCH_SIZE} motivational statements, several paraphrases of the same thought, or repeated use of one interest/signal/event.
-Vary the character of the batch: it should feel like ${BATCH_SIZE} natural remarks from a versatile personal AI, not a wellness or digital-detox app.
-Aim for a mix: several personal/context-aware, several time/weather/device-aware only when interesting, several today/world items only when relevant, and several free observations/humor/unexpected thoughts. Advice/self-help is 0 by default; at most 1 if a specific context makes it genuinely useful. Generic motivational content is 0.
-Never reuse a topic or category listed as already shown today for this user.
-Never invent facts beyond what today's content ideas actually say.
-Never invent, guess, or make up a name for the user. Only use profile.gender when it clearly improves relevance -- never as a rule applied to every phrase.
-Match the given time-of-day window -- never a morning greeting in a day/evening/night batch, or vice versa.
-Every phrase's text must be entirely in ${languageName}, with no words or letters from any other language, even for a single word.
-Every phrase must be at most ${LOCK_SCREEN_TEXT_MAX_LENGTH} characters.
-Do not explain your reasoning or return any analysis -- only the structured result the API call asks for.`;
+Make the batch varied in wording and feel, but do not change the selected slot types. Output only the structured JSON requested by the schema.`;
 }
 
 /**
@@ -1216,8 +1241,16 @@ async function generateBatch(device, window, signals, weather) {
     countryCode
   );
   const shownCategories = getShownCategories(device.device_id, deviceLocalDate);
+  const { slots } = planSlots({
+    device,
+    window,
+    dateContext,
+    weather,
+    bankItems,
+    shownCategories,
+  });
 
-  const context = buildContextPrompt(device, window, signals, weather, languageCode, bankItems, shownCategories, dateContext);
+  const context = buildContextPrompt(device, window, signals, weather, languageCode, slots, shownCategories, dateContext);
   const validationContext = {
     dateContext,
     signals,
@@ -1253,19 +1286,16 @@ async function generateBatch(device, window, signals, weather) {
                 items: {
                   type: 'object',
                   properties: {
+                    slot_id: { type: 'string' },
                     text: { type: 'string', maxLength: LOCK_SCREEN_TEXT_MAX_LENGTH },
                     style_id: { type: 'string', enum: STYLE_IDS },
                   },
-                  required: ['text', 'style_id'],
+                  required: ['slot_id', 'text', 'style_id'],
                   additionalProperties: false,
                 },
               },
-              used_categories: {
-                type: 'array',
-                items: { type: 'string', enum: BANK_CATEGORIES },
-              },
             },
-            required: ['phrases', 'used_categories'],
+            required: ['phrases'],
             additionalProperties: false,
           },
         },
@@ -1291,7 +1321,7 @@ async function generateBatch(device, window, signals, weather) {
 
   let assembly;
   try {
-    assembly = assembleBatchFromGeneratedPhrases(parsed.phrases, languageCode, validationContext);
+    assembly = assembleBatchFromGeneratedPhrases(parsed.phrases, languageCode, validationContext, slots);
   } catch (err) {
     console.error(`AI_BATCH_ERROR reason=final_assembly_fallback error=${err.name || 'Error'}`);
     return buildLoggedFallbackResult(languageCode, context, 'final_assembly_fallback');
@@ -1305,13 +1335,10 @@ async function generateBatch(device, window, signals, weather) {
     return buildLoggedFinalAssemblyFallback(languageCode, context, assembly);
   }
 
-  // Record which bank categories this batch actually drew from (per the
-  // model's own "used_categories" field -- see buildSystemPrompt), so the
-  // device's next batch today doesn't get offered the same categories
-  // again (see selectBankItemsForDevice). Only categories from the fixed
-  // BANK_CATEGORIES set are trusted here; anything else is the model
-  // inventing a label and is dropped rather than stored.
-  const usedCategories = extractUsedCategories(parsed);
+  // Record planned daily-bank categories for this batch. With slot-based
+  // generation the model no longer chooses categories; the server does, so the
+  // repeat-avoidance signal comes from selected slots rather than model labels.
+  const usedCategories = extractUsedCategoriesFromSlots(slots);
   recordShownCategories(device.device_id, deviceLocalDate, usedCategories);
 
   return buildLoggedOpenAiResult(assembly, context);

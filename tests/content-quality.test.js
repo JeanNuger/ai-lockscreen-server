@@ -277,8 +277,8 @@ async function main() {
   assert.strictEqual(eveningWindow.id, 'evening');
   assert.strictEqual(eveningWindow.range, '15:00-20:00', 'evening window must expose its actual clock range, not just the id');
   const systemPromptText = contentTest.buildSystemPrompt('ru');
-  assert(/now\.window\.range/.test(systemPromptText), 'prompt must tell the model to use now.window.range, not the window id alone');
-  assert(/15:00 is afternoon/i.test(systemPromptText), 'prompt must explicitly say 15:00 is not late evening');
+  assert(/server already chose exactly 12 editorial slots/i.test(systemPromptText), 'prompt must keep OpenAI in slot-writing mode');
+  assert(!/profile\.tone/.test(systemPromptText), 'prompt must not depend on the old tone setting');
 
   // BATTERY
   const batteryEcho = contentTest.assembleBatchFromGeneratedPhrases(
@@ -467,7 +467,13 @@ async function main() {
   assert.strictEqual(context.now.country, 'KZ', 'IP country must win over Android locale region');
   assert.strictEqual(context.now.country_source, 'ip_approximate');
   assert.strictEqual(context.now.device_region, 'RU', 'Android RU region should only be retained as device_region');
-  assert(context.today_content.every((item) => !/Russia/i.test(item.text)), 'KZ context must not include Russia-specific today_content');
+  assert(Array.isArray(context.slots), 'slot-based context must include selected slots');
+  assert.strictEqual(context.slots.length, BATCH_SIZE, 'slot-based context must include exactly 12 selected slots');
+  assert(!('personal_goal' in (context.profile || {})), 'slot payload must not include old personal_goal');
+  assert(!('tone' in (context.profile || {})), 'slot payload must not include old tone');
+  assert(!('interests' in (context.profile || {})), 'slot payload must not include old interests');
+  const slotText = JSON.stringify(context.slots);
+  assert(!/Russia/i.test(slotText), 'KZ context slots must not include Russia-specific bank content');
 
   const noKeyLogs = await captureConsole(() => generateBatch(
     {
