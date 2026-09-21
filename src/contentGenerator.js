@@ -1677,7 +1677,12 @@ function addDaysToDateString(date, days) {
 // client-sent value that would just have to agree with the timezone anyway.
 // Returns {dateContext, unavailableReason}. dateContext is null if there's no
 // timezone on file yet, or it's not a timezone Intl recognizes.
-function resolveLocalDateContext(timezone) {
+function isValidDateString(date) {
+  return typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)
+    && !Number.isNaN(new Date(`${date}T00:00:00Z`).getTime());
+}
+
+function resolveLocalDateContext(timezone, forcedLocalDate = null) {
   if (!timezone) {
     return { dateContext: null, unavailableReason: 'missing_timezone' };
   }
@@ -1694,8 +1699,9 @@ function resolveLocalDateContext(timezone) {
     });
     const parts = formatter.formatToParts(new Date());
     const get = (type) => parts.find((p) => p.type === type)?.value;
-    const date = `${get('year')}-${get('month')}-${get('day')}`;
-    const weekday = get('weekday');
+    const computedDate = `${get('year')}-${get('month')}-${get('day')}`;
+    const date = isValidDateString(forcedLocalDate) ? forcedLocalDate : computedDate;
+    const weekday = date === computedDate ? get('weekday') : weekdayForDateString(date);
     const time = `${get('hour')}:${get('minute')}`;
     const tomorrowDate = addDaysToDateString(date, 1);
     const tomorrowWeekday = tomorrowDate ? weekdayForDateString(tomorrowDate) : null;
@@ -1961,10 +1967,10 @@ function buildSystemPrompt(languageCode) {
  * @param {object} [phoneTrends] - semantic phone trends from phoneAnalytics.js
  * @returns {Promise<{phrases: Array<{text: string, style_id: string}>, source: 'openai'|'fallback'}>}
  */
-async function generateBatch(device, window, signals, weather, phoneTrends = {}) {
+async function generateBatch(device, window, signals, weather, phoneTrends = {}, options = {}) {
   const apiKey = process.env.OPENAI_API_KEY;
   const languageCode = resolveTargetLanguageCode(signals);
-  const { dateContext, unavailableReason } = resolveLocalDateContext(device.timezone);
+  const { dateContext, unavailableReason } = resolveLocalDateContext(device.timezone, options.localDate);
   if (!dateContext && unavailableReason) {
     console.warn(`DATE_CONTEXT_UNAVAILABLE reason=${unavailableReason}`);
   }

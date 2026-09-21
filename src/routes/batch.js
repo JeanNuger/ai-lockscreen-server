@@ -17,10 +17,22 @@ const getDeviceStatement = db.prepare('SELECT * FROM devices WHERE device_id = ?
 const insertStubDeviceStatement = db.prepare(
   'INSERT OR IGNORE INTO devices (device_id) VALUES (?)'
 );
+const updateDeviceTimezoneStatement = db.prepare(
+  'UPDATE devices SET timezone = ?, updated_at = datetime(\'now\') WHERE device_id = ?'
+);
 const insertBatchStatement = db.prepare(`
   INSERT INTO content_batches (device_id, window, phrases, source, context)
   VALUES (?, ?, ?, ?, ?)
 `);
+
+function cleanOptionalString(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function cleanLocalDate(value) {
+  const cleaned = cleanOptionalString(value);
+  return cleaned && /^\d{4}-\d{2}-\d{2}$/.test(cleaned) ? cleaned : null;
+}
 
 // GET /api/v1/batch?device_id=...&window=morning|day|evening|night
 // Optional device-signal params (see src/deviceSignals.js): battery_level,
@@ -51,11 +63,19 @@ router.get('/batch', async (req, res, next) => {
     const signals = parseDeviceSignals(req.query);
     const weather = await resolveWeather(req.ip);
 
+    const requestTimezone = cleanOptionalString(req.query.timezone);
+    const requestLocalDate = cleanLocalDate(req.query.local_date);
     const device = getDeviceStatement.get(device_id) || { device_id };
     insertStubDeviceStatement.run(device_id);
+    if (requestTimezone) {
+      updateDeviceTimezoneStatement.run(requestTimezone, device_id);
+      device.timezone = requestTimezone;
+    }
 
     const phoneTrends = computePhoneTrends(device, window, signals);
-    const { phrases, source, context } = await generateBatch(device, window, signals, weather, phoneTrends);
+    const { phrases, source, context } = await generateBatch(device, window, signals, weather, phoneTrends, {
+      localDate: requestLocalDate,
+    });
     recordPhoneSignalSample(device, window, signals);
     const adminPhrases = consumePendingMessages(device_id);
     const combinedPhrases = [...phrases, ...adminPhrases];

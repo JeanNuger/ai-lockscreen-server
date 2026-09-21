@@ -54,6 +54,7 @@ const EVERGREEN_COMPATIBLE_CATEGORIES = new Set([
 // back, even if shorter or longer than this.
 const TARGET_BANK_SIZE = 35;
 const BANK_TIMEZONE = 'Asia/Almaty';
+const DATE_SENSITIVE_CATEGORIES = new Set(['holiday', 'on_this_day']);
 
 const insertBankItemStatement = db.prepare(`
   INSERT INTO daily_content_bank (bank_date, category, content_text, tags)
@@ -62,6 +63,12 @@ const insertBankItemStatement = db.prepare(`
 
 const deleteBankItemsForDateStatement = db.prepare(`
   DELETE FROM daily_content_bank WHERE bank_date = ?
+`);
+
+const selectDateSensitiveBankDatesStatement = db.prepare(`
+  SELECT DISTINCT bank_date FROM daily_content_bank
+  WHERE category IN ('holiday', 'on_this_day')
+  ORDER BY bank_date ASC
 `);
 
 // Atomically replaces every daily_content_bank row for bankDate with a
@@ -79,6 +86,15 @@ const replaceBankItemsForDate = db.transaction((bankDate, rows) => {
   deleteBankItemsForDateStatement.run(bankDate);
   for (const row of rows) {
     insertBankItemStatement.run(bankDate, row.category, row.content_text, JSON.stringify(row.tags));
+  }
+});
+
+const replaceBankItemsForDates = db.transaction((bankDates, rows) => {
+  for (const bankDate of bankDates) {
+    deleteBankItemsForDateStatement.run(bankDate);
+  }
+  for (const row of rows) {
+    insertBankItemStatement.run(row.bank_date, row.category, row.content_text, JSON.stringify(row.tags));
   }
 });
 
@@ -111,21 +127,43 @@ function getBankDateString(instant = new Date()) {
   return `${get('year')}-${get('month')}-${get('day')}`;
 }
 
-function buildBankPrompt(bankDate) {
-  return `Search the web for what's notable about ${bankDate} and put together a varied global "content bank" for a phone lock screen app.
+function addDaysToDateString(date, days) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return null;
+  }
+  const parsed = new Date(`${date}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  parsed.setUTCDate(parsed.getUTCDate() + days);
+  return parsed.toISOString().slice(0, 10);
+}
+
+function getPreparedBankDates(bankDate = getBankDateString()) {
+  return [
+    addDaysToDateString(bankDate, -1),
+    bankDate,
+    addDaysToDateString(bankDate, 1),
+  ].filter(Boolean);
+}
+
+function buildBankPrompt(bankDate, preparedDates = getPreparedBankDates(bankDate)) {
+  return `Search the web for what's notable around ${bankDate} and put together a varied global "content bank" for a phone lock screen app.
 Return STRICTLY a JSON array (no wrapper object, no explanations) of ${TARGET_BANK_SIZE} objects.
-Each object: {"category": one of [${BANK_CATEGORIES.join(', ')}], "content_text": "a short, self-contained piece of content in English, up to 200 characters", "tags": ["lowercase", "keyword", "tags"]}.
-Cover a genuine mix across ALL the listed categories, not just one or two -- include: real holidays/observances for ${bankDate}, "on this day in history" facts, notable quotes, interesting statistics, an interesting idiom or expression with its meaning, a fact about one specific country, a genuinely positive and recent news development, and light humor only if it localizes cleanly.
+Each object: {"bank_date": "YYYY-MM-DD", "category": one of [${BANK_CATEGORIES.join(', ')}], "content_text": "a short, self-contained piece of content in English, up to 200 characters", "tags": ["lowercase", "keyword", "tags"]}.
+For date-sensitive categories only ("holiday" and "on_this_day"), include real items for EACH of these dates: ${preparedDates.join(', ')}. Set bank_date to the exact date the item belongs to. Include at least one holiday and one on_this_day item for every listed date.
+For all other categories, set bank_date to ${bankDate}; these are reusable shared items for the generation day.
+Cover a genuine mix across ALL the listed categories, not just one or two -- include notable quotes, interesting statistics, an interesting idiom or expression with its meaning, a fact about one specific country, a genuinely positive and recent news development, and light humor only if it localizes cleanly.
 Choose "category" precisely -- it is used directly to decide what this item is, not just a label: "science" is for a science fact (physics, biology, space, chemistry, etc.); "technology" is for a technology/computing fact; "economics" is for a money/economics fact; "fact" is only for a genuinely miscellaneous interesting fact that does not belong in science, technology, or economics; "country_fact" is a fact specifically about ONE particular country (not a generic global fact), and must always carry that country's ISO code in tags; "good_news" is a genuinely positive, real, verifiable development from roughly the last few days -- never invented, never old news presented as new. Do not put a science/technology/economics fact under "fact".
 Keep the bank international and reusable for users in many countries: do not make it US-centric or Russia-centric.
-Prioritize accuracy from web search for date-specific items (holiday, on_this_day, good_news) -- holiday/on_this_day must match ${bankDate}; good_news must be a real, recent, verifiable development; do not invent fake historical events, holidays, or news.
+Prioritize accuracy from web search for date-specific items (holiday, on_this_day, good_news) -- holiday/on_this_day must match their own bank_date; good_news must be a real, recent, verifiable development; do not invent fake historical events, holidays, or news.
 Keep every content_text glanceable and self-contained (no "as mentioned above", no follow-up questions).
 For global/international items, add "global" to tags. For country-specific items -- including every "country_fact" item, which must always have one -- add the ISO country code tag such as "KZ", "FR", or "JP". Avoid country-specific politics.
 Do not generate self-help, motivational coaching, psychology tips, productivity advice, or generic wishes.
 Respond with the JSON array only, nothing else.`;
 }
 
-function parseBankItems(rawText) {
+function parseBankItems(rawText, defaultBankDate, preparedDates = [defaultBankDate]) {
   let parsed;
   try {
     parsed = JSON.parse(rawText);
@@ -147,11 +185,18 @@ function parseBankItems(rawText) {
 
   return array
     .filter((item) => item && typeof item.content_text === 'string' && item.content_text.trim().length > 0)
-    .map((item) => ({
-      category: BANK_CATEGORIES.includes(item.category) ? item.category : 'fact',
-      content_text: item.content_text.trim(),
-      tags: Array.isArray(item.tags) ? item.tags.filter((t) => typeof t === 'string') : [],
-    }));
+    .map((item) => {
+      const category = BANK_CATEGORIES.includes(item.category) ? item.category : 'fact';
+      const suppliedDate = typeof item.bank_date === 'string' && preparedDates.includes(item.bank_date)
+        ? item.bank_date
+        : defaultBankDate;
+      return {
+        bank_date: DATE_SENSITIVE_CATEGORIES.has(category) ? suppliedDate : defaultBankDate,
+        category,
+        content_text: item.content_text.trim(),
+        tags: Array.isArray(item.tags) ? item.tags.filter((t) => typeof t === 'string') : [],
+      };
+    });
 }
 
 /**
@@ -161,7 +206,7 @@ function parseBankItems(rawText) {
  * bank empty/partial for today rather than crashing the caller (the cron
  * endpoint that calls this, see src/routes/internalGenerateBank.js).
  *
- * @returns {Promise<{ savedCount: number, error: string|null }>}
+ * @returns {Promise<{ savedCount: number, error: string|null, dates?: string[] }>}
  */
 async function generateDailyBank() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -170,6 +215,7 @@ async function generateDailyBank() {
   }
 
   const bankDate = getBankDateString();
+  const preparedDates = getPreparedBankDates(bankDate);
 
   try {
     const OpenAI = require('openai');
@@ -181,22 +227,22 @@ async function generateDailyBank() {
     const response = await client.responses.create({
       model: 'gpt-4o',
       tools: [{ type: 'web_search' }],
-      input: buildBankPrompt(bankDate),
+      input: buildBankPrompt(bankDate, preparedDates),
     });
 
-    const items = parseBankItems(response.output_text);
+    const items = parseBankItems(response.output_text, bankDate, preparedDates);
     if (items.length === 0) {
       return { savedCount: 0, error: 'model returned zero usable bank items' };
     }
 
     // Replace, not append -- a same-day rerun (manual or accidental) must
-    // regenerate and replace today's bank, not duplicate it. Nothing before
+    // regenerate and replace the prepared date range, not duplicate it. Nothing before
     // this line has touched the DB, so any failure above (network error,
     // malformed JSON, zero valid items) already returned without altering
     // the existing bank.
-    replaceBankItemsForDate(bankDate, items);
+    replaceBankItemsForDates(preparedDates, items);
 
-    return { savedCount: items.length, error: null };
+    return { savedCount: items.length, error: null, dates: preparedDates };
   } catch (err) {
     console.error('generateDailyBank failed:', err.message);
     return { savedCount: 0, error: err.message };
@@ -245,6 +291,31 @@ function isBankItemAllowedForCountry(row, countryCode) {
     return true;
   }
   return targetCountry ? itemCountries.has(targetCountry) : false;
+}
+
+function dateDistanceDays(a, b) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(a) || !/^\d{4}-\d{2}-\d{2}$/.test(b)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const aMs = new Date(`${a}T00:00:00Z`).getTime();
+  const bMs = new Date(`${b}T00:00:00Z`).getTime();
+  if (Number.isNaN(aMs) || Number.isNaN(bMs)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.abs(aMs - bMs) / (24 * 60 * 60 * 1000);
+}
+
+function resolveDateSensitiveBankDate(deviceLocalDate) {
+  const availableDates = selectDateSensitiveBankDatesStatement.all().map((row) => row.bank_date);
+  if (availableDates.length === 0) {
+    return deviceLocalDate;
+  }
+  if (availableDates.includes(deviceLocalDate)) {
+    return deviceLocalDate;
+  }
+  return availableDates
+    .slice()
+    .sort((a, b) => dateDistanceDays(a, deviceLocalDate) - dateDistanceDays(b, deviceLocalDate))[0];
 }
 
 // Static fallback for evergreen-compatible categories that have zero live
@@ -307,8 +378,15 @@ function selectBankItemsForDevice(
     return [];
   }
 
-  const liveBankRows = selectBankRowsForDateStatement
+  const sharedRows = selectBankRowsForDateStatement
     .all(bankDate)
+    .filter((row) => !DATE_SENSITIVE_CATEGORIES.has(row.category));
+  const dateSensitiveDate = resolveDateSensitiveBankDate(deviceLocalDate);
+  const dateSensitiveRows = selectBankRowsForDateStatement
+    .all(dateSensitiveDate)
+    .filter((row) => DATE_SENSITIVE_CATEGORIES.has(row.category));
+  const liveBankRows = sharedRows
+    .concat(dateSensitiveRows)
     .filter((row) => isBankItemAllowedForCountry(row, countryCode));
   const liveCategoriesToday = new Set(liveBankRows.map((row) => row.category));
   const backfillRows = getEvergreenBackfillRows(liveCategoriesToday, countryCode);
@@ -397,5 +475,10 @@ module.exports = {
     getEvergreenBackfillRows,
     EVERGREEN_CONTENT_BANK,
     replaceBankItemsForDate,
+    replaceBankItemsForDates,
+    parseBankItems,
+    getPreparedBankDates,
+    resolveDateSensitiveBankDate,
+    DATE_SENSITIVE_CATEGORIES,
   },
 };
