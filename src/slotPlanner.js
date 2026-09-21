@@ -158,6 +158,18 @@ const TYPE_CAPS = {
 
 const DEFAULT_TYPE_CAP = 2;
 
+// Guaranteed types: unlike every other type, these do not compete in the
+// priority+random lottery (selectNonMandatory) against the rest of the pool.
+// If a candidate of this type exists at all (i.e. there is real content for
+// today/the device's local date), one is reserved a slot before the lottery
+// runs for anything else. Product decision: with holiday/on_this_day/weather/
+// word_of_the_day, there isn't enough content variety to justify these
+// sometimes losing the roll to a generic lifehack or humor filler -- see task
+// history for the discussion. greeting_name/goodnight_care are NOT here: they
+// already have their own, separate mandatory-first/mandatory-last mechanism
+// in planSlots and must stay on that path unchanged.
+const GUARANTEED_TYPES = ['word_learning', 'holiday_today', 'history_today', 'weather_lifehack'];
+
 const CREATIVE_FILLER_BLUEPRINTS = [
   { id: 'creative_filler_everyday_lifehack_v1', type: 'everyday_lifehack', constraints: ['practical_household_or_style_tip', 'one_sentence', 'no_command_tone', 'no_poetry'] },
   { id: 'creative_filler_free_ai_thought_standalone_v1', type: 'free_ai_thought', constraints: ['practical_neutral_observation', 'no_user_facts', 'no_poetry'] },
@@ -721,9 +733,42 @@ function recordType(typeCounts, type) {
   typeCounts.set(type, (typeCounts.get(type) || 0) + 1);
 }
 
-function selectNonMandatory(candidates, count, rng, memoryIndex = buildRecentMemoryIndex()) {
+// Picks at most one candidate per GUARANTEED_TYPES type -- the best-scored
+// one (same candidateWeight formula as the lottery, so if a type somehow has
+// more than one candidate the more relevant/fresher one wins the guaranteed
+// slot, and any leftover of that type still gets a fair shot in the normal
+// competitive round afterward). A type with zero candidates (no data for
+// today/the device's local date, e.g. weather lookup failed or the bank has
+// no holiday for this date) is simply skipped -- it falls back to competing
+// normally rather than reserving an empty slot, per the agreed requirement.
+//
+// `count` is a defensive cap, not an expected trigger: with 4 guaranteed
+// types and BATCH_SIZE=12 (10 outside morning/night), guaranteed candidates
+// can never realistically exceed the slots available. If they somehow did,
+// sorting by priority descending before slicing keeps the highest-priority
+// guaranteed types (word_learning 78, holiday/history_today 70, weather 62)
+// and silently drops the rest back to the competitive pool instead of ever
+// exceeding BATCH_SIZE.
+function selectGuaranteedSlots(candidates, count, rng, memoryIndex) {
+  const chosen = [];
+  for (const type of GUARANTEED_TYPES) {
+    const pool = candidates.filter((candidate) => candidate.type === type);
+    if (pool.length === 0) {
+      continue;
+    }
+    const best = pool
+      .map((candidate) => ({ candidate, score: candidateWeight(candidate, rng, memoryIndex) }))
+      .sort((a, b) => b.score - a.score)[0].candidate;
+    chosen.push(best);
+  }
+  return chosen
+    .sort((a, b) => b.priority - a.priority)
+    .slice(0, count);
+}
+
+function selectNonMandatory(candidates, count, rng, memoryIndex = buildRecentMemoryIndex(), initialTypeCounts = new Map()) {
   const selected = [];
-  const typeCounts = new Map();
+  const typeCounts = new Map(initialTypeCounts);
   const shuffled = shuffle(candidates, rng)
     .map((candidate) => ({ candidate, score: candidateWeight(candidate, rng, memoryIndex) }))
     .sort((a, b) => b.score - a.score);
@@ -824,7 +869,25 @@ function planSlots(input = {}, options = {}) {
   const mandatoryIds = new Set([mandatoryFirst, mandatoryLast].filter(Boolean).map((candidate) => candidate.id));
   const remainingCandidates = candidates.filter((candidate) => !mandatoryIds.has(candidate.id));
   const remainingCount = BATCH_SIZE - (mandatoryFirst ? 1 : 0) - (mandatoryLast ? 1 : 0);
-  const middle = selectNonMandatory(remainingCandidates, remainingCount, rng, memoryIndex);
+
+  // Guaranteed types (see GUARANTEED_TYPES) reserve their slot first, ahead
+  // of the priority+random lottery -- selectNonMandatory then only fills
+  // whatever is left over, still using its normal logic. The guaranteed
+  // picks still count against TYPE_CAPS (via initialTypeCounts below), so a
+  // guaranteed holiday_today slot plus a second, separately-won competitive
+  // holiday_today slot can never together exceed that type's existing cap.
+  const guaranteed = selectGuaranteedSlots(remainingCandidates, remainingCount, rng, memoryIndex);
+  const guaranteedIds = new Set(guaranteed.map((candidate) => candidate.id));
+  const guaranteedTypeCounts = new Map();
+  for (const candidate of guaranteed) {
+    guaranteedTypeCounts.set(candidate.type, (guaranteedTypeCounts.get(candidate.type) || 0) + 1);
+  }
+
+  const competitivePool = remainingCandidates.filter((candidate) => !guaranteedIds.has(candidate.id));
+  const competitiveCount = remainingCount - guaranteed.length;
+  const competitive = selectNonMandatory(competitivePool, competitiveCount, rng, memoryIndex, guaranteedTypeCounts);
+
+  const middle = shuffle([...guaranteed, ...competitive], rng);
 
   const ordered = [];
   if (mandatoryFirst) ordered.push(mandatoryFirst);
@@ -884,5 +947,8 @@ module.exports = {
     GENDER_LEAN_TYPE_MAP,
     TYPE_CAPS,
     MAX_INTEREST_AWARE_SLOTS,
+    GUARANTEED_TYPES,
+    selectGuaranteedSlots,
+    selectNonMandatory,
   },
 };
