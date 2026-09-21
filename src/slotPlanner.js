@@ -158,17 +158,32 @@ const TYPE_CAPS = {
 
 const DEFAULT_TYPE_CAP = 2;
 
-// Guaranteed types: unlike every other type, these do not compete in the
-// priority+random lottery (selectNonMandatory) against the rest of the pool.
-// If a candidate of this type exists at all (i.e. there is real content for
-// today/the device's local date), one is reserved a slot before the lottery
-// runs for anything else. Product decision: with holiday/on_this_day/weather/
-// word_of_the_day, there isn't enough content variety to justify these
-// sometimes losing the roll to a generic lifehack or humor filler -- see task
-// history for the discussion. greeting_name/goodnight_care are NOT here: they
-// already have their own, separate mandatory-first/mandatory-last mechanism
-// in planSlots and must stay on that path unchanged.
-const GUARANTEED_TYPES = ['word_learning', 'holiday_today', 'history_today', 'weather_lifehack'];
+// Window-aware fixed slots (product decision, see task history): morning
+// positions 1-5 are a strict sequence -- greeting_name, weather_lifehack,
+// holiday_today, history_today, word_learning, in that exact order -- not
+// merely "guaranteed somewhere in the batch." Night's second-to-last slot is
+// learning_recall (if a candidate exists) with goodnight_care fixed last, via
+// the existing separate mandatory-last mechanism in planSlots. day/evening
+// use neither: weather/holiday/history/word_learning are not even candidates
+// outside morning (see isCandidateAllowedInWindow), so there is nothing left
+// to guarantee for them.
+//
+// GUARANTEED_TYPES_BY_WINDOW is deliberately empty for every window right
+// now: under this plan every type that would have gone here is already
+// placed at a fixed position instead (fixedMorning/fixedNightRecall in
+// planSlots), so a *separate* guaranteed-but-unordered reservation on top of
+// that would double-count the same candidate pool against TYPE_CAPS. The
+// mechanism (selectGuaranteedSlots/guaranteedTypesForWindow) is kept in
+// place, not deleted, in case a future window needs a "guaranteed, but not a
+// fixed position" category without reintroducing this same bug.
+const MORNING_FIXED_TYPES = ['greeting_name', 'weather_lifehack', 'holiday_today', 'history_today', 'word_learning'];
+const MORNING_ONLY_TYPES = new Set(['weather_lifehack', 'holiday_today', 'history_today', 'word_learning']);
+const GUARANTEED_TYPES_BY_WINDOW = {
+  morning: [],
+  day: [],
+  evening: [],
+  night: [],
+};
 
 const CREATIVE_FILLER_BLUEPRINTS = [
   { id: 'creative_filler_everyday_lifehack_v1', type: 'everyday_lifehack', constraints: ['practical_household_or_style_tip', 'one_sentence', 'no_command_tone', 'no_poetry'] },
@@ -425,7 +440,7 @@ function collectCandidates(input = {}) {
     }));
   }
 
-  if (weather && typeof weather.temperatureC === 'number') {
+  if (window === 'morning' && weather && typeof weather.temperatureC === 'number') {
     const facts = { temperature_c: Math.round(weather.temperatureC) };
     if (weather.city) facts.city = weather.city;
     if (weather.description) facts.condition = weather.description;
@@ -435,7 +450,7 @@ function collectCandidates(input = {}) {
       priority: 62,
       facts,
       source: 'weather',
-      constraints: ['avoid_exact_right_now', 'safe_for_batch_delay', 'temperature_grounding_only', 'do_not_state_exact_temperature', 'clothing_or_umbrella_framing'],
+      constraints: ['avoid_exact_right_now', 'safe_for_batch_delay', 'temperature_grounding_only', 'do_not_state_exact_temperature', 'no_digits', 'simple_clothing_umbrella_shoes_sun_advice'],
     }));
   }
 
@@ -733,37 +748,59 @@ function recordType(typeCounts, type) {
   typeCounts.set(type, (typeCounts.get(type) || 0) + 1);
 }
 
-// Picks at most one candidate per GUARANTEED_TYPES type -- the best-scored
-// one (same candidateWeight formula as the lottery, so if a type somehow has
-// more than one candidate the more relevant/fresher one wins the guaranteed
-// slot, and any leftover of that type still gets a fair shot in the normal
+// Picks at most one candidate per type in `types` -- the best-scored one
+// (same candidateWeight formula as the lottery, so if a type somehow has more
+// than one candidate the more relevant/fresher one wins the guaranteed slot,
+// and any leftover of that type still gets a fair shot in the normal
 // competitive round afterward). A type with zero candidates (no data for
-// today/the device's local date, e.g. weather lookup failed or the bank has
-// no holiday for this date) is simply skipped -- it falls back to competing
-// normally rather than reserving an empty slot, per the agreed requirement.
+// today/the device's local date) is simply skipped -- it falls back to
+// competing normally rather than reserving an empty slot. Currently called
+// with an empty `types` list for every window (see GUARANTEED_TYPES_BY_WINDOW's
+// comment) -- kept generic/parameterized for a future window/type that needs
+// this "guaranteed, unordered position" behavior without a fixed slot.
 //
-// `count` is a defensive cap, not an expected trigger: with 4 guaranteed
-// types and BATCH_SIZE=12 (10 outside morning/night), guaranteed candidates
-// can never realistically exceed the slots available. If they somehow did,
-// sorting by priority descending before slicing keeps the highest-priority
-// guaranteed types (word_learning 78, holiday/history_today 70, weather 62)
-// and silently drops the rest back to the competitive pool instead of ever
+// `count` is a defensive cap, not an expected trigger: `types` can never
+// realistically exceed the slots available. If it somehow did, sorting by
+// priority descending before slicing keeps the highest-priority types and
+// silently drops the rest back to the competitive pool instead of ever
 // exceeding BATCH_SIZE.
-function selectGuaranteedSlots(candidates, count, rng, memoryIndex) {
+function selectGuaranteedSlots(candidates, types, count, rng, memoryIndex) {
   const chosen = [];
-  for (const type of GUARANTEED_TYPES) {
-    const pool = candidates.filter((candidate) => candidate.type === type);
-    if (pool.length === 0) {
-      continue;
-    }
-    const best = pool
-      .map((candidate) => ({ candidate, score: candidateWeight(candidate, rng, memoryIndex) }))
-      .sort((a, b) => b.score - a.score)[0].candidate;
+  for (const type of types) {
+    const best = selectBestCandidateForType(candidates, type, rng, memoryIndex);
+    if (!best) continue;
     chosen.push(best);
   }
   return chosen
     .sort((a, b) => b.priority - a.priority)
     .slice(0, count);
+}
+
+function guaranteedTypesForWindow(window) {
+  return GUARANTEED_TYPES_BY_WINDOW[window] || [];
+}
+
+function isCandidateAllowedInWindow(candidate, window) {
+  if (!candidate) {
+    return false;
+  }
+  if (MORNING_ONLY_TYPES.has(candidate.type)) {
+    return window === 'morning';
+  }
+  if (candidate.type === 'learning_recall') {
+    return window === 'night';
+  }
+  return true;
+}
+
+function selectBestCandidateForType(candidates, type, rng, memoryIndex) {
+  const pool = candidates.filter((candidate) => candidate.type === type);
+  if (pool.length === 0) {
+    return null;
+  }
+  return pool
+    .map((candidate) => ({ candidate, score: candidateWeight(candidate, rng, memoryIndex) }))
+    .sort((a, b) => b.score - a.score)[0].candidate;
 }
 
 function selectNonMandatory(candidates, count, rng, memoryIndex = buildRecentMemoryIndex(), initialTypeCounts = new Map()) {
@@ -849,7 +886,8 @@ function addSlotIds(candidates) {
 }
 
 function planSlots(input = {}, options = {}) {
-  const candidates = options.candidates || collectCandidates(input);
+  const rawCandidates = options.candidates || collectCandidates(input);
+  const candidates = rawCandidates.filter((candidate) => isCandidateAllowedInWindow(candidate, input.window));
   const seed = options.seed || [
     input.device && input.device.device_id,
     input.window,
@@ -858,40 +896,76 @@ function planSlots(input = {}, options = {}) {
   ].filter(Boolean).join('|');
   const rng = options.rng || createSeededRng(seed || 'slot-planner');
   const memoryIndex = buildRecentMemoryIndex(options.recentContentMemory);
-
-  const mandatoryFirst = input.window === 'morning'
-    ? candidates.find((candidate) => candidate.type === 'greeting_name')
-    : null;
+  const fixedMorning = [];
+  if (input.window === 'morning') {
+    const fixedIds = new Set();
+    for (const type of MORNING_FIXED_TYPES) {
+      const pick = selectBestCandidateForType(
+        candidates.filter((candidate) => !fixedIds.has(candidate.id)),
+        type,
+        rng,
+        memoryIndex
+      );
+      if (pick) {
+        fixedMorning.push(pick);
+        fixedIds.add(pick.id);
+      }
+    }
+  }
   const mandatoryLast = input.window === 'night'
     ? candidates.find((candidate) => candidate.type === 'goodnight_care')
     : null;
+  const fixedNightRecall = input.window === 'night'
+    ? selectBestCandidateForType(candidates, 'learning_recall', rng, memoryIndex)
+    : null;
 
-  const mandatoryIds = new Set([mandatoryFirst, mandatoryLast].filter(Boolean).map((candidate) => candidate.id));
+  const mandatoryIds = new Set(
+    [...fixedMorning, fixedNightRecall, mandatoryLast]
+      .filter(Boolean)
+      .map((candidate) => candidate.id)
+  );
   const remainingCandidates = candidates.filter((candidate) => !mandatoryIds.has(candidate.id));
-  const remainingCount = BATCH_SIZE - (mandatoryFirst ? 1 : 0) - (mandatoryLast ? 1 : 0);
+  const fixedCount = fixedMorning.length + (fixedNightRecall ? 1 : 0) + (mandatoryLast ? 1 : 0);
+  const remainingCount = BATCH_SIZE - fixedCount;
 
-  // Guaranteed types (see GUARANTEED_TYPES) reserve their slot first, ahead
-  // of the priority+random lottery -- selectNonMandatory then only fills
-  // whatever is left over, still using its normal logic. The guaranteed
-  // picks still count against TYPE_CAPS (via initialTypeCounts below), so a
-  // guaranteed holiday_today slot plus a second, separately-won competitive
-  // holiday_today slot can never together exceed that type's existing cap.
-  const guaranteed = selectGuaranteedSlots(remainingCandidates, remainingCount, rng, memoryIndex);
+  // guaranteedTypesForWindow (see GUARANTEED_TYPES_BY_WINDOW) reserves a slot
+  // first, ahead of the priority+random lottery, for any type that is
+  // "guaranteed somewhere in the batch" without a fixed position -- currently
+  // empty for every window (see GUARANTEED_TYPES_BY_WINDOW's comment), but
+  // the mechanism stays wired up for a future window/type that needs it.
+  const guaranteedTypes = guaranteedTypesForWindow(input.window);
+  const guaranteed = selectGuaranteedSlots(
+    remainingCandidates.filter((candidate) => guaranteedTypes.includes(candidate.type)),
+    guaranteedTypes,
+    remainingCount,
+    rng,
+    memoryIndex
+  );
   const guaranteedIds = new Set(guaranteed.map((candidate) => candidate.id));
-  const guaranteedTypeCounts = new Map();
-  for (const candidate of guaranteed) {
-    guaranteedTypeCounts.set(candidate.type, (guaranteedTypeCounts.get(candidate.type) || 0) + 1);
+
+  // The competitive lottery must stay aware of every type already placed at
+  // a FIXED position (fixedMorning's 4 types, fixedNightRecall's
+  // learning_recall) -- not just the (currently always empty) `guaranteed`
+  // list above -- otherwise a second, different candidate of an
+  // already-fixed type (e.g. a duplicate holiday item) could win an
+  // additional slot through the lottery on top of its fixed one, exceeding
+  // that type's TYPE_CAPS limit. Seeding typeCounts from all three sources
+  // keeps one single, consistent cap across the whole batch.
+  const fixedTypeCounts = new Map();
+  for (const candidate of [...fixedMorning, ...(fixedNightRecall ? [fixedNightRecall] : []), ...guaranteed]) {
+    fixedTypeCounts.set(candidate.type, (fixedTypeCounts.get(candidate.type) || 0) + 1);
   }
 
   const competitivePool = remainingCandidates.filter((candidate) => !guaranteedIds.has(candidate.id));
   const competitiveCount = remainingCount - guaranteed.length;
-  const competitive = selectNonMandatory(competitivePool, competitiveCount, rng, memoryIndex, guaranteedTypeCounts);
+  const competitive = selectNonMandatory(competitivePool, competitiveCount, rng, memoryIndex, fixedTypeCounts);
 
   const middle = shuffle([...guaranteed, ...competitive], rng);
 
   const ordered = [];
-  if (mandatoryFirst) ordered.push(mandatoryFirst);
+  ordered.push(...fixedMorning);
   ordered.push(...middle);
+  if (fixedNightRecall) ordered.push(fixedNightRecall);
   if (mandatoryLast) ordered.push(mandatoryLast);
 
   const slots = addSlotIds(ordered.slice(0, BATCH_SIZE));
@@ -947,8 +1021,13 @@ module.exports = {
     GENDER_LEAN_TYPE_MAP,
     TYPE_CAPS,
     MAX_INTEREST_AWARE_SLOTS,
-    GUARANTEED_TYPES,
+    MORNING_FIXED_TYPES,
+    MORNING_ONLY_TYPES,
+    GUARANTEED_TYPES_BY_WINDOW,
+    isCandidateAllowedInWindow,
+    guaranteedTypesForWindow,
     selectGuaranteedSlots,
+    selectBestCandidateForType,
     selectNonMandatory,
   },
 };

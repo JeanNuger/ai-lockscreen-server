@@ -179,7 +179,10 @@ async function main() {
         plannerTest.createCandidate({ id: `filler_${type}_b`, type, priority: 10, facts: { text: `filler ${type} b ${i}` } }),
       ])),
     ];
-    const { slots } = planSlots({ device: { device_id: 'learning-slot-device' }, window: 'day' }, { seed: 'learning-recall-seed', candidates });
+    // learning_recall is now a night-only candidate (window-aware fixed
+    // slots: night's second-to-last position) -- see slotPlanner.js
+    // isCandidateAllowedInWindow -- so this must plan for 'night', not 'day'.
+    const { slots } = planSlots({ device: { device_id: 'learning-slot-device' }, window: 'night' }, { seed: 'learning-recall-seed', candidates });
     const recallSlot = slots.find((slot) => slot.type === 'learning_recall');
     assert(recallSlot, 'learning_recall candidate with dominant priority must be selected');
     assert.strictEqual(recallSlot.learning_memory_id, recallCandidateId, 'learning_memory_id must survive candidate -> planned slot unchanged');
@@ -271,9 +274,10 @@ async function main() {
     process.env.OPENAI_API_KEY = 'test-key-recall-e2e';
 
     try {
+      // learning_recall only competes at night now -- see isCandidateAllowedInWindow.
       const result = await generateBatch(
         { device_id: deviceId },
-        'day',
+        'night',
         { system_language: 'en' },
         null,
         {}
@@ -365,9 +369,10 @@ async function main() {
     process.env.OPENAI_API_KEY = 'test-key-learning-memory';
 
     try {
+      // word_learning only competes at morning now -- see isCandidateAllowedInWindow.
       const result = await generateBatch(
         { device_id: 'learning-e2e-device', timezone: 'Asia/Almaty', created_at: '2026-09-01 00:00:00' },
-        'day',
+        'morning',
         { system_language: 'en' },
         null,
         {}

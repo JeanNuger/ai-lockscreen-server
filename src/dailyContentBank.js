@@ -112,6 +112,7 @@ const insertShownCategoryStatement = db.prepare(`
 `);
 
 const DEFAULT_SELECTION_COUNT = 5;
+const GUARANTEED_SELECTION_CATEGORIES = ['holiday', 'on_this_day', 'idiom'];
 
 // Shared product-day date for the global bank. This is deliberately one fixed
 // timezone, not per-user, so the app still generates one reusable bank per day.
@@ -408,18 +409,38 @@ function selectBankItemsForDevice(
     }
     byCategory.get(row.category).push(row);
   }
+  const byCategoryAll = new Map();
+  for (const row of bankRows) {
+    if (!byCategoryAll.has(row.category)) {
+      byCategoryAll.set(row.category, []);
+    }
+    byCategoryAll.get(row.category).push(row);
+  }
+
+  const selected = [];
+  const selectedCategories = new Set();
+  for (const category of GUARANTEED_SELECTION_CATEGORIES) {
+    const rowsInCategory = byCategoryAll.get(category);
+    if (!rowsInCategory || rowsInCategory.length === 0) {
+      continue;
+    }
+    const pick = rowsInCategory[Math.floor(Math.random() * rowsInCategory.length)];
+    selected.push({ id: pick.id, category: pick.category, content_text: pick.content_text });
+    selectedCategories.add(category);
+  }
 
   const liveCategorySet = new Set(liveBankRows.map((row) => row.category));
   const liveCategories = [...byCategory.keys()]
+    .filter((category) => !selectedCategories.has(category))
     .filter((category) => liveCategorySet.has(category))
     .sort(() => Math.random() - 0.5);
   const backfillCategories = [...byCategory.keys()]
+    .filter((category) => !selectedCategories.has(category))
     .filter((category) => !liveCategorySet.has(category))
     .sort(() => Math.random() - 0.5);
   const shuffledCategories = liveCategories.concat(backfillCategories);
-  const selected = [];
   for (const category of shuffledCategories) {
-    if (selected.length >= count) {
+    if (selected.length >= count + selectedCategories.size) {
       break;
     }
     const rowsInCategory = byCategory.get(category);

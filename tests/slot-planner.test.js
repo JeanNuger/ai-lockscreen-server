@@ -115,9 +115,12 @@ async function main() {
   // function makes, penalty or not. Set membership (was the penalized
   // candidate excluded at all?) is the only claim antiRepeatPenalty actually
   // supports.
+  // learning_recall is now a night-only candidate (window-aware fixed slots
+  // -- see slotPlanner.js isCandidateAllowedInWindow), so this must plan for
+  // 'night' to exercise the same anti-repeat-vs-type-cap interaction.
   const freshVsRecent = planSlots({
     device: { device_id: 'memory-device' },
-    window: 'day',
+    window: 'night',
   }, {
     seed: 'memory-ranking-seed',
     rng: () => 0,
@@ -202,9 +205,10 @@ async function main() {
   assert(/[а-яё]/.test(russianPeriod), 'Cyrillic letters must survive normalization, not be stripped to ASCII-only/empty');
   assert.notStrictEqual(russianPeriod.trim(), '', 'normalized Unicode text must not collapse to an empty string');
 
+  // learning_recall is night-only now -- see isCandidateAllowedInWindow.
   const freshVsRecentTopic = planSlots({
     device: { device_id: 'topic-memory-device' },
-    window: 'day',
+    window: 'night',
   }, {
     seed: 'topic-ranking-seed',
     rng: () => 0,
@@ -592,11 +596,23 @@ async function main() {
     'creative filler IDs must be stable across independent planning calls'
   );
 
-  const weatherSlots = planSlots(baseInput, { seed: 'weather-constraint-seed' }).slots;
+  // weather_lifehack is morning-only now (window-aware fixed slots) -- see
+  // isCandidateAllowedInWindow / collectCandidates' window === 'morning' guard.
+  const weatherSlots = planSlots({ ...baseInput, window: 'morning' }, { seed: 'weather-constraint-seed' }).slots;
   const weatherSlot = weatherSlots.find((slot) => slot.type === 'weather_lifehack');
-  assert(weatherSlot, 'planner should include weather slot when weather facts are available');
+  assert(weatherSlot, 'planner should include weather slot in the morning window when weather facts are available');
   assert(weatherSlot.constraints.includes('do_not_state_exact_temperature'), 'weather slot must explicitly forbid exact temperature output');
-  assert(/без точных градусов/i.test(contentTest.buildSystemPrompt('en')), 'prompt must forbid exact weather temperature output');
+  assert(weatherSlot.constraints.includes('no_digits'), 'weather slot must explicitly forbid any digits, not just temperature');
+  assert(
+    !weatherSlots.some((slot) => slot.type === 'weather_lifehack' && slot !== weatherSlot),
+    'weather_lifehack must never appear more than once per batch'
+  );
+  const dayWeatherSlots = planSlots({ ...baseInput, window: 'day' }, { seed: 'weather-constraint-seed' }).slots;
+  assert(
+    !dayWeatherSlots.some((slot) => slot.type === 'weather_lifehack'),
+    'weather_lifehack must not be a candidate at all outside the morning window'
+  );
+  assert(/без температуры и (любых )?цифр/i.test(contentTest.buildSystemPrompt('en')), 'prompt must forbid exact weather temperature/digit output');
 
   // 7: the static/cached system prompt must explicitly forbid revealing the
   // interest_hint personalization mechanism to the user.
