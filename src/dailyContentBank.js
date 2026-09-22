@@ -186,8 +186,23 @@ function parseBankItems(rawText, defaultBankDate, preparedDates = [defaultBankDa
 
   return array
     .filter((item) => item && typeof item.content_text === 'string' && item.content_text.trim().length > 0)
+    .filter((item) => {
+      // A category outside BANK_CATEGORIES used to be silently coerced to
+      // 'fact' -- that let the model (or anything else writing rows the same
+      // shape) invent categories that would never match any bank_category
+      // isBankItemAllowedForCountry/selectBankItemsForDevice actually serves,
+      // so they sat in the table looking saved while being permanently
+      // invisible downstream. Dropping the row outright (with a warning) is
+      // the honest behavior: we never silently store content under a
+      // category it didn't actually belong to.
+      if (BANK_CATEGORIES.includes(item.category)) {
+        return true;
+      }
+      console.warn(`generateDailyBank: dropping bank item with unknown category "${item.category}"`);
+      return false;
+    })
     .map((item) => {
-      const category = BANK_CATEGORIES.includes(item.category) ? item.category : 'fact';
+      const category = item.category;
       const suppliedDate = typeof item.bank_date === 'string' && preparedDates.includes(item.bank_date)
         ? item.bank_date
         : defaultBankDate;
@@ -198,6 +213,56 @@ function parseBankItems(rawText, defaultBankDate, preparedDates = [defaultBankDa
         tags: Array.isArray(item.tags) ? item.tags.filter((t) => typeof t === 'string') : [],
       };
     });
+}
+
+// Warns (never throws, never fabricates) when the model's response is
+// missing content the product actually depends on: holiday/on_this_day for
+// each prepared date (see buildBankPrompt's own request for exactly this),
+// and at least one idiom for the main generation day (word_learning's only
+// live source -- see mapBankItemType in slotPlanner.js). Purely diagnostic:
+// generateDailyBank() still saves whatever valid items it has either way:
+// selectBankItemsForDevice/slotPlanner already handle a missing category by
+// omitting that slot (holiday/on_this_day) or falling back to the evergreen
+// catalog (idiom) -- this just makes the gap visible in logs instead of only
+// showing up later as "why didn't holiday_today appear today".
+function logMissingRequiredCategories(items, bankDate, preparedDates) {
+  for (const date of preparedDates) {
+    for (const category of DATE_SENSITIVE_CATEGORIES) {
+      const present = items.some((item) => item.category === category && item.bank_date === date);
+      if (!present) {
+        console.warn(`generateDailyBank: missing required category "${category}" for ${date}`);
+      }
+    }
+  }
+  const hasIdiom = items.some((item) => item.category === 'idiom' && item.bank_date === bankDate);
+  if (!hasIdiom) {
+    console.warn(`generateDailyBank: missing required category "idiom" for ${bankDate}`);
+  }
+}
+
+// Human-readable confirmation of what actually got saved -- one line with
+// the total, then one line per bank_date listing each category's row count.
+// Deliberately built from the same `items` array that was just persisted
+// (not a fresh SELECT), so this always reflects exactly what this run wrote.
+function logBankSummary(items) {
+  const byDate = new Map();
+  for (const item of items) {
+    if (!byDate.has(item.bank_date)) {
+      byDate.set(item.bank_date, new Map());
+    }
+    const byCategory = byDate.get(item.bank_date);
+    byCategory.set(item.category, (byCategory.get(item.category) || 0) + 1);
+  }
+
+  console.log(`Daily Bank saved: ${items.length} rows`);
+  for (const date of [...byDate.keys()].sort()) {
+    const byCategory = byDate.get(date);
+    const parts = [...byCategory.keys()]
+      .sort()
+      .map((category) => `${category}=${byCategory.get(category)}`)
+      .join(', ');
+    console.log(`${date}: ${parts}`);
+  }
 }
 
 /**
@@ -236,12 +301,15 @@ async function generateDailyBank() {
       return { savedCount: 0, error: 'model returned zero usable bank items' };
     }
 
+    logMissingRequiredCategories(items, bankDate, preparedDates);
+
     // Replace, not append -- a same-day rerun (manual or accidental) must
     // regenerate and replace the prepared date range, not duplicate it. Nothing before
     // this line has touched the DB, so any failure above (network error,
     // malformed JSON, zero valid items) already returned without altering
     // the existing bank.
     replaceBankItemsForDates(preparedDates, items);
+    logBankSummary(items);
 
     return { savedCount: items.length, error: null, dates: preparedDates };
   } catch (err) {
@@ -501,5 +569,7 @@ module.exports = {
     getPreparedBankDates,
     resolveDateSensitiveBankDate,
     DATE_SENSITIVE_CATEGORIES,
+    logMissingRequiredCategories,
+    logBankSummary,
   },
 };
