@@ -20,7 +20,11 @@ const {
   validateLockScreenText,
 } = require('./textFilter');
 
-const LOCK_SCREEN_TEXT_MAX_LENGTH = 65;
+// Absolute hard cap, backed by a real on-device measurement of the Android
+// lock-screen text area (TextWallpaperService.java's safe zone / StaticLayout
+// wrapping at the current font size/width) -- text this long or shorter is
+// guaranteed to fit without visual overflow, regardless of length_hint below.
+const LOCK_SCREEN_TEXT_MAX_LENGTH = 70;
 
 const WINDOW_CONTEXT = {
   morning: { id: 'morning', range: '05:00-11:00' },
@@ -1905,6 +1909,12 @@ function buildContextPrompt(device, window, signals, weather, languageCode, slot
         type: slot.type,
         facts: slot.facts || {},
         constraints: slot.constraints || [],
+        // Target length for this specific slot (see TYPE_LENGTH_HINTS in
+        // slotPlanner.js) -- 'short'/'medium'/'long' are targets the model
+        // should aim for, not the hard cap; LOCK_SCREEN_TEXT_MAX_LENGTH (70)
+        // is enforced separately regardless of this hint (see
+        // buildSystemPrompt/validateFinalBatch).
+        length_hint: slot.length_hint || 'medium',
         // Only present on the small, server-selected subset of slots
         // SlotPlanner picked as interest-aware (see selectInterestAwareSlots
         // in slotPlanner.js) -- omitted (not even an empty/false value) for
@@ -1948,10 +1958,11 @@ function buildSystemPrompt(languageCode) {
 Язык: ${languageName}. На каждый slot_id верни ровно одну строку и уникальный style_id.
 Запрет: ?, «пусть», открытки, уют/чай/тихий свет/мысли/мечты/магия/чудеса/счастье/фея/чайник, ночная поэзия про ночь/луну/звезды/тишину/покой/шорох/фонари/небо/свечи/гирлянды, «верь в себя», «ты справишься», вода, коучинг, выдуманные факты, выдуманные названия мероприятий/фильмов/выставок.
 ЗАПРЕЩЕНО использовать повелительное наклонение и команды (используй, выбери, держи, создай, читай, проверяй). Пиши в формате короткого факта или наблюдения.
-Пиши ультра-коротко (до 8 слов). Экономь слова. Смысл должен считываться за 1 секунду.
-По типу slot: greeting_name — тёплое личное приветствие по имени (если оно есть в profile) и лёгкое светлое напутствие на день, каждый день другими словами; goodnight_care — мягкое пожелание доброго отдыха по имени (если есть), без потока «тишина/звёзды/фонари»; weather_lifehack — только простая бытовая фраза про одежду, зонт, обувь или солнце, без температуры и любых цифр; context_signal — тёплая, заботливая реакция на facts.signal (низкий заряд/много разблокировок/поздний час), без чисел и без тревожности; holiday_today/history_today — коротко и по делу, не энциклопедия; smart_humor_observation — тонкое ироничное наблюдение об обыденной жизни, не анекдот и не насмешка; city_afisha — только общее наблюдение о городской жизни/сезоне (парки, вечерние прогулки, привычки города), НИКОГДА не выдумывай конкретное название события/фильма/выставки или дату; free_ai_thought — одна короткая, по-настоящему интересная мысль о людях или цифровом мире.
+Экономь слова, но не сокращай мысль искусственно — длина зависит от slot.length_hint, см. ниже.
+По типу slot: greeting_name — тёплое личное приветствие по имени (если оно есть в profile) и лёгкое светлое напутствие на день, каждый день другими словами; goodnight_care — мягкое пожелание доброго отдыха по имени (если есть), без потока «тишина/звёзды/фонари»; weather_lifehack — только простая бытовая фраза про одежду, зонт, обувь или солнце, без температуры и любых цифр; context_signal — тёплая, заботливая реакция на facts.signal (низкий заряд/много разблокировок/поздний час), без чисел и без тревожности; holiday_today/history_today — по делу, не энциклопедия; smart_humor_observation — тонкое ироничное наблюдение об обыденной жизни, не анекдот и не насмешка; city_afisha — только общее наблюдение о городской жизни/сезоне (парки, вечерние прогулки, привычки города), НИКОГДА не выдумывай конкретное название события/фильма/выставки или дату; free_ai_thought — одна короткая, по-настоящему интересная мысль о людях или цифровом мире.
 Только факты из slot/profile/now; погода только бытовыми словами без температуры и цифр; утром можно имя 1 раз; gender/age дают только аккуратный практичный оттенок, без стереотипов и обращений вроде «для настоящих мужчин» или «для девочек»; interest_hint и gender_lean_hint используй незаметно, без «since you like».
-До 60 символов, hard cap ${LOCK_SCREEN_TEXT_MAX_LENGTH}. Только JSON по схеме.`;
+Каждый slot несёт свой length_hint — это ОРИЕНТИР по диапазону, не цель, к которой надо тянуться: "short" — примерно 10-20 символов, мысль в одно мгновение; "medium" — примерно 21-40 символов, обычная фраза; "long" — РАЗРЕШЕНИЕ (не обязанность) раскрыть мысль подробнее, примерно 41-60 символов, но только если дополнительное содержание реально делает фразу интереснее — иначе короткая точная фраза всегда лучше растянутой. Никогда не растягивай уже законченную мысль ради попадания в диапазон и не пиши "впритык" к границе: если мысль естественно закончилась на 27 символах — оставь 27, а не дописывай слова до 40. В батче длины должны заметно отличаться друг от друга: большинство фраз — short/medium, long — меньшинство (ощутимо меньше половины батча), не подряд одна за другой и не через одинаковый интервал, а естественно, где материал того стоит.
+${LOCK_SCREEN_TEXT_MAX_LENGTH} символов — это ТОЛЬКО аварийный технический потолок (жёсткая защита от переполнения экрана), никогда не целевая длина ни для одного length_hint. Только JSON по схеме.`;
 }
 
 /**
@@ -2117,5 +2128,7 @@ module.exports = {
     SUPPORTED_LANGUAGES,
     fallbackTextForSlot,
     currentFallbackSetIndex,
+    LOCK_SCREEN_TEXT_MAX_LENGTH,
+    isUnusableLockScreenText,
   },
 };

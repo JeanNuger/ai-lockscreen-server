@@ -66,8 +66,7 @@ function assertFinalBatch(items) {
   assert.strictEqual(items.length, BATCH_SIZE, 'final batch must be exactly 12');
   assert.strictEqual(new Set(normalizedTexts(items)).size, BATCH_SIZE, 'final texts must be unique');
   for (const item of items) {
-    assert(item.text && item.text.length <= 65, 'final text must be nonempty and within max length');
-    assert(item.text.trim().split(/\s+/).length <= 8, 'final text must fit the lock-screen word budget');
+    assert(item.text && item.text.length <= 70, 'final text must be nonempty and within max length');
     assert(STYLE_IDS.includes(item.style_id), `style_id must be valid: ${item.style_id}`);
   }
   assert.strictEqual(new Set(items.map((item) => item.style_id)).size, BATCH_SIZE, 'final styles must be unique');

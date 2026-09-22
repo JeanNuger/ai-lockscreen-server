@@ -1,5 +1,14 @@
 const DEFAULT_MAX_LENGTH = 65;
-const DEFAULT_MAX_WORDS = 8;
+// Was 8 -- tied to the old blanket "ultra-short, до 8 слов" prompt
+// instruction (see buildSystemPrompt in contentGenerator.js), which the
+// three-tier length_hint system (short/medium/long) replaced. A ~60-char
+// Russian "long" phrase routinely runs 8-10 words on its own, so keeping
+// this at 8 would have silently rejected/regenerated every legitimate long
+// phrase regardless of the prompt wording change. LOCK_SCREEN_TEXT_MAX_LENGTH
+// (the character cap, backed by the actual on-device measurement) is now the
+// real governing constraint -- this stays only as a sanity guard against a
+// pathological many-tiny-words response, not a creative-length limit.
+const DEFAULT_MAX_WORDS = 16;
 
 const STOP_PHRASES = [
   'уют',

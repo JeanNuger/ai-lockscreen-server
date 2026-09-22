@@ -35,6 +35,55 @@ const CONTENT_TYPES = [
   'age_context',
 ];
 
+// Per-type length hint, sent to OpenAI alongside each slot (see
+// buildContextPrompt in contentGenerator.js) so the model can vary how much
+// it says per slot instead of writing all 12 phrases at the same ultra-short
+// length. 'short' (~10-20 chars) / 'medium' (~21-40 chars) are rough ranges;
+// 'long' (~41-60 chars) is a PERMISSION to say more when the content genuinely
+// earns it, never an instruction to pad a finished thought -- see
+// buildSystemPrompt's own explanation of these ranges. None of this is a hard
+// cap: the only hard cap is LOCK_SCREEN_TEXT_MAX_LENGTH (70), enforced
+// separately by validateFinalBatch/the JSON schema regardless of hint.
+// Chosen per type by what genuinely benefits from more room (history_today/
+// word_learning/science_tech/country_fact/good_news/money_economics/
+// unusual_fact/culture carry a real fact worth spelling out) vs. what should
+// stay punchy (greeting_name/goodnight_care/smart_humor_observation) vs.
+// everything else defaulting to medium. This alone is what gives a batch
+// natural length variety across its 12 slots -- BATCH_SIZE slots are drawn
+// from a mix of types already (TYPE_CAPS/the competitive lottery), so a
+// mostly-fixed per-type hint mix naturally yields a mix of short/medium/long
+// without any extra "exactly N short" selection logic; the system prompt
+// additionally asks the model to keep long a minority of the batch even when
+// several long-hinted slots are present, since the type mix alone can't
+// guarantee that count on every batch.
+const TYPE_LENGTH_HINTS = {
+  greeting_name: 'short',
+  goodnight_care: 'short',
+  smart_humor_observation: 'short',
+  weather_lifehack: 'medium',
+  holiday_today: 'medium',
+  free_ai_thought: 'medium',
+  context_signal: 'medium',
+  age_context: 'medium',
+  phone_trend: 'medium',
+  seasonal: 'medium',
+  everyday_lifehack: 'medium',
+  city_afisha: 'medium',
+  learning_recall: 'medium',
+  history_today: 'long',
+  word_learning: 'long',
+  science_tech: 'long',
+  country_fact: 'long',
+  good_news: 'long',
+  money_economics: 'long',
+  unusual_fact: 'long',
+  culture: 'long',
+};
+
+function lengthHintForType(type) {
+  return TYPE_LENGTH_HINTS[type] || 'medium';
+}
+
 const FACTUAL_TYPES = new Set([
   'weather_lifehack',
   'context_signal',
@@ -873,6 +922,7 @@ function addSlotIds(candidates) {
     source: candidate.source,
     bank_category: candidate.bank_category || undefined,
     constraints: candidate.constraints,
+    length_hint: lengthHintForType(candidate.type),
     // Server-only; buildContextPrompt hand-picks {slot_id, type, facts,
     // constraints} for the OpenAI payload and does not include this field.
     learning_memory_id: candidate.learning_memory_id,
@@ -1029,5 +1079,7 @@ module.exports = {
     selectGuaranteedSlots,
     selectBestCandidateForType,
     selectNonMandatory,
+    TYPE_LENGTH_HINTS,
+    lengthHintForType,
   },
 };
