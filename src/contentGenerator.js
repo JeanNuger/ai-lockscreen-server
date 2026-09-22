@@ -26,11 +26,23 @@ const {
 // guaranteed to fit without visual overflow, regardless of length_hint below.
 const LOCK_SCREEN_TEXT_MAX_LENGTH = 70;
 
+// `focus` (content-improvement follow-up, req 3 "усилить различие между
+// morning/day/evening/night") is a short, data-only mood/topic steer for the
+// currently-selected, non-fixed-type slots (free_ai_thought/everyday_lifehack/
+// smart_humor_observation/city_afisha/context_signal/seasonal and friends --
+// greeting_name/goodnight_care/weather_lifehack/holiday_today/history_today/
+// word_learning already have their own explicit per-type instructions in
+// buildSystemPrompt and are unaffected). Travels inside now.window (see
+// buildContextPrompt) as ordinary JSON data, not a system-prompt change, so
+// buildSystemPrompt stays a pure function of languageCode only -- the
+// existing OpenAI-side prompt-cache rationale for that (see buildSystemPrompt's
+// own comment) is preserved unchanged; only ONE static instruction line
+// (added there) tells the model to read this field.
 const WINDOW_CONTEXT = {
-  morning: { id: 'morning', range: '05:00-11:00' },
-  day: { id: 'day', range: '11:00-15:00' },
-  evening: { id: 'evening', range: '15:00-20:00' },
-  night: { id: 'night', range: '20:00-05:00' },
+  morning: { id: 'morning', range: '05:00-11:00', focus: 'старт дня, лёгкая энергия, ненавязчивое планирование' },
+  day: { id: 'day', range: '11:00-15:00', focus: 'рабочий темп, фокус, бытовые наблюдения' },
+  evening: { id: 'evening', range: '15:00-20:00', focus: 'переключение с дел, восстановление, итоги дня' },
+  night: { id: 'night', range: '20:00-05:00', focus: 'спокойные мягкие мысли, минимум активного тона и советов' },
 };
 
 // One entry per SUPPORTED_LANGUAGES code -- covers every language the app
@@ -1960,7 +1972,11 @@ function buildSystemPrompt(languageCode) {
 ЗАПРЕЩЕНО использовать повелительное наклонение и команды (используй, выбери, держи, создай, читай, проверяй). Пиши в формате короткого факта или наблюдения.
 Экономь слова, но не сокращай мысль искусственно — длина зависит от slot.length_hint, см. ниже.
 По типу slot: greeting_name — тёплое личное приветствие по имени (если оно есть в profile) и лёгкое светлое напутствие на день, каждый день другими словами; goodnight_care — мягкое пожелание доброго отдыха по имени (если есть), без потока «тишина/звёзды/фонари»; weather_lifehack — только простая бытовая фраза про одежду, зонт, обувь или солнце, без температуры и любых цифр; context_signal — тёплая, заботливая реакция на facts.signal (низкий заряд/много разблокировок/поздний час), без чисел и без тревожности; holiday_today/history_today — по делу, не энциклопедия; smart_humor_observation — тонкое ироничное наблюдение об обыденной жизни, не анекдот и не насмешка; city_afisha — только общее наблюдение о городской жизни/сезоне (парки, вечерние прогулки, привычки города), НИКОГДА не выдумывай конкретное название события/фильма/выставки или дату; free_ai_thought — одна короткая, по-настоящему интересная мысль о людях или цифровом мире.
-Только факты из slot/profile/now; погода только бытовыми словами без температуры и цифр; утром можно имя 1 раз; gender/age дают только аккуратный практичный оттенок, без стереотипов и обращений вроде «для настоящих мужчин» или «для девочек»; interest_hint и gender_lean_hint используй незаметно, без «since you like».
+Только факты из slot/profile/now; погода только бытовыми словами без температуры и цифр, но опирайся на facts.temp_band/facts.condition_lean, если они есть — разная погода должна звучать по-разному, а не одним и тем же «оденься теплее» каждый раз; утром можно имя 1 раз; gender/age дают только аккуратный практичный оттенок, без стереотипов и обращений вроде «для настоящих мужчин» или «для девочек»; facts.age_bracket (teen/young_adult/adult/mature/senior) можно использовать только как мягкий ориентир уместности темы и сложности тона, никогда не называя сам возраст или диапазон вслух; interest_hint и gender_lean_hint используй незаметно, без «since you like».
+Персонализация всегда должна выглядеть естественной, а не как отчёт о данных пользователя: никогда не пиши прямо «ты выбрал спорт», «раз тебе нравится X», «поскольку тебе N лет», «мы видим, что ты разблокировал телефон N раз» — только едва заметный сдвиг темы или тона, без ссылки на источник.
+context_signal: many_unlocks — тёплое, ненавязчивое наблюдение, никогда не упрёк и не «ты слишком много сидишь в телефоне»; low_battery — короткий практичный контекст без нравоучений; late_hour — спокойный, некатегоричный тон, без предположений о том, что человек уже спит.
+phone_trend (facts.unlocks_vs_yesterday/facts.steps_vs_yesterday: higher/lower) — построй на этом естественное наблюдение о дне, а не сухую констатацию тренда, и никогда не называй точные числа.
+now.window.focus задаёт общее настроение НЕ закреплённых по типу слотов (free_ai_thought/everyday_lifehack/smart_humor_observation/city_afisha/context_signal/seasonal и похожих) для текущего времени суток: утром — старт дня и лёгкое планирование, днём — рабочий темп и бытовые наблюдения, вечером — переключение и итоги дня, ночью — спокойные мысли и минимум активного тона; не называй это поле и не объясняй эту логику вслух.
 Каждый slot несёт свой length_hint — это ОРИЕНТИР по диапазону, не цель, к которой надо тянуться: "short" — примерно 10-20 символов, мысль в одно мгновение; "medium" — примерно 21-40 символов, обычная фраза; "long" — РАЗРЕШЕНИЕ (не обязанность) раскрыть мысль подробнее, примерно 41-60 символов, но только если дополнительное содержание реально делает фразу интереснее — иначе короткая точная фраза всегда лучше растянутой. Никогда не растягивай уже законченную мысль ради попадания в диапазон и не пиши "впритык" к границе: если мысль естественно закончилась на 27 символах — оставь 27, а не дописывай слова до 40. В батче длины должны заметно отличаться друг от друга: большинство фраз — short/medium, long — меньшинство (ощутимо меньше половины батча), не подряд одна за другой и не через одинаковый интервал, а естественно, где материал того стоит.
 ${LOCK_SCREEN_TEXT_MAX_LENGTH} символов — это ТОЛЬКО аварийный технический потолок (жёсткая защита от переполнения экрана), никогда не целевая длина ни для одного length_hint. Только JSON по схеме.`;
 }

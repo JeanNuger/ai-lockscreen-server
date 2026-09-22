@@ -317,6 +317,41 @@ async function main() {
   assert(/slot_id/.test(systemPromptText), 'prompt must keep OpenAI in slot-writing mode');
   assert(!/profile\.tone/.test(systemPromptText), 'prompt must not depend on the old tone setting');
 
+  // Content-improvement follow-up: all four windows must have distinct,
+  // non-empty `focus` text (drives non-fixed-type tone/topic differentiation
+  // -- see WINDOW_CONTEXT/buildSystemPrompt's now.window.focus instruction),
+  // and buildSystemPrompt stays a pure function of languageCode only (no
+  // window param) so the OpenAI-side prompt cache rationale documented on
+  // buildSystemPrompt is preserved -- window-specific behavior travels only
+  // through the per-request context payload (now.window.focus), never
+  // through the static system prompt text itself.
+  for (const w of ['morning', 'day', 'evening', 'night']) {
+    const focus = contentTest.windowContextFor(w).focus;
+    assert(typeof focus === 'string' && focus.length > 0, `window ${w} must have a non-empty focus`);
+  }
+  assert.strictEqual(
+    new Set(['morning', 'day', 'evening', 'night'].map((w) => contentTest.windowContextFor(w).focus)).size,
+    4,
+    'all four windows must have genuinely distinct focus text'
+  );
+  assert(/now\.window\.focus/.test(systemPromptText), 'system prompt must instruct the model to read now.window.focus');
+  assert.strictEqual(
+    contentTest.buildSystemPrompt('ru'),
+    contentTest.buildSystemPrompt('ru'),
+    'buildSystemPrompt must remain a pure function of languageCode alone (no window/other input), preserving the OpenAI prompt-cache rationale'
+  );
+
+  // Req 4: personalization must never be spelled out to the user -- the
+  // system prompt itself must explicitly forbid the exact creepy patterns
+  // named in the product requirement.
+  assert(/ты выбрал/i.test(systemPromptText), 'prompt must forbid literally naming a chosen interest ("ты выбрал ...")');
+  assert(/раз тебе нравится/i.test(systemPromptText), 'prompt must forbid "раз тебе нравится X" phrasing');
+  assert(/поскольку тебе/i.test(systemPromptText), 'prompt must forbid literally stating the user\'s age ("поскольку тебе N лет")');
+  assert(/разблокировал телефон/i.test(systemPromptText), 'prompt must forbid literally citing the unlock count back at the user');
+  assert(/many_unlocks/.test(systemPromptText) && /не упрёк/.test(systemPromptText), 'prompt must explicitly forbid a scolding tone for many_unlocks');
+  assert(/age_bracket/.test(systemPromptText), 'prompt must document the age_bracket (not exact age) mechanism for age_context');
+  assert(/temp_band|condition_lean/.test(systemPromptText), 'prompt must reference the weather temp_band/condition_lean facts for varied advice');
+
   // BATTERY
   const batteryEcho = contentTest.assembleBatchFromGeneratedPhrases(
     [...validTwelve.slice(0, 11), phrase('75% заряда осталось в батарее.')],
@@ -510,6 +545,8 @@ async function main() {
   assert.strictEqual(context.now.country, 'KZ', 'IP country must win over Android locale region');
   assert.strictEqual(context.now.country_source, 'ip_approximate');
   assert.strictEqual(context.now.device_region, 'RU', 'Android RU region should only be retained as device_region');
+  assert.strictEqual(context.now.window.id, 'day', 'now.window must still expose its id alongside the new focus field');
+  assert(typeof context.now.window.focus === 'string' && context.now.window.focus.length > 0, 'now.window.focus must reach the actual OpenAI payload, not just windowContextFor in isolation');
   assert(Array.isArray(context.slots), 'slot-based context must include selected slots');
   assert.strictEqual(context.slots.length, BATCH_SIZE, 'slot-based context must include exactly 12 selected slots');
   assert(!('personal_goal' in (context.profile || {})), 'slot payload must not include old personal_goal');

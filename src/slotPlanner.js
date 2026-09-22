@@ -200,12 +200,43 @@ const TYPE_CAPS = {
   smart_humor_observation: 2,
   city_afisha: 2,
   free_ai_thought: 2,
-  everyday_lifehack: 3,
+  // Lowered from 3 -- see GENERIC_FILLER_TYPES/MAX_GENERIC_FILLER_PER_BATCH
+  // below, the "generic filler" content-improvement task: a per-type cap
+  // alone let everyday_lifehack alone eat up to a third of the group budget,
+  // so it is trimmed to match its 3 "always available" creative siblings.
+  everyday_lifehack: 2,
   phone_trend: 1,
   learning_recall: 1,
 };
 
 const DEFAULT_TYPE_CAP = 2;
+
+// Group cap on top of the individual TYPE_CAPS above: free_ai_thought/
+// everyday_lifehack/smart_humor_observation/city_afisha are the four
+// "always available" synthetic types that carry no user facts at all (pure
+// creative filler, see SYNTHETIC_POOL/CREATIVE_FILLER_BLUEPRINTS) -- the
+// content-improvement audit found their per-type caps alone could sum to 9
+// of BATCH_SIZE (12) slots in the worst case, which is far more generic
+// filler than a "kind, attentive companion" batch should ever lean on when
+// there is real profile/bank/telemetry content available. This caps their
+// COMBINED total at MAX_GENERIC_FILLER_PER_BATCH regardless of individual
+// per-type headroom -- enforced in canAddType/recordType below via a
+// dedicated (collision-proof, Symbol-keyed) counter alongside the normal
+// per-type counts. It is NOT a floor and NOT an exact target ("не гарантировать
+// ровно N" -- product decision): a rich batch with plenty of real content may
+// select fewer than this many, or even zero. selectNonMandatory's
+// capsExhausted escape hatch (see its own comment) can still exceed this
+// group cap same as it can exceed any individual TYPE_CAPS entry -- that
+// remains a genuine last resort for a degenerate/near-empty candidate pool,
+// not a normal-operation path.
+const GENERIC_FILLER_TYPES = new Set([
+  'free_ai_thought',
+  'everyday_lifehack',
+  'smart_humor_observation',
+  'city_afisha',
+]);
+const MAX_GENERIC_FILLER_PER_BATCH = 4;
+const GENERIC_FILLER_COUNT_KEY = Symbol('genericFillerCount');
 
 // Window-aware fixed slots (product decision, see task history): morning
 // positions 1-5 are a strict sequence -- greeting_name, weather_lifehack,
@@ -458,6 +489,72 @@ function resolveContextSignal(signals, dateContext) {
   return null;
 }
 
+// Per-signal constraint tail, appended to the shared CONTEXT_SIGNAL_BASE_CONSTRAINTS
+// below -- content-improvement follow-up so low_battery/many_unlocks/late_hour
+// each get their own concrete framing instead of one generic "reaction" tag
+// for all three (req 3, HANDOFF audit "усилить использование контекста").
+// many_unlocks especially must never read as a lecture/scold (req 4).
+const CONTEXT_SIGNAL_BASE_CONSTRAINTS = ['no_exact_numbers', 'caring_not_alarming', 'no_medical_claims'];
+const CONTEXT_SIGNAL_EXTRA_CONSTRAINTS = {
+  low_battery: ['short_practical_context', 'no_moralizing'],
+  many_unlocks: ['non_judgmental', 'no_screen_time_shaming', 'no_productivity_or_addiction_framing'],
+  late_hour: ['calm_not_alarming_night_tone', 'no_sleep_assumption'],
+};
+
+function contextSignalConstraints(signal) {
+  return [...CONTEXT_SIGNAL_BASE_CONSTRAINTS, ...(CONTEXT_SIGNAL_EXTRA_CONSTRAINTS[signal] || [])];
+}
+
+// Coarse, non-exact temperature banding for weather_lifehack -- gives the
+// model something to genuinely vary advice on (umbrella vs. sun vs. layers)
+// beyond a single generic "оденься теплее" every time, while the existing
+// do_not_state_exact_temperature/no_digits constraints still forbid ever
+// echoing the number itself (see contentGenerator's hasExactTelemetryEcho
+// guard, which stays unchanged).
+function temperatureBand(temperatureC) {
+  if (!Number.isFinite(temperatureC)) return null;
+  if (temperatureC <= 0) return 'freezing';
+  if (temperatureC <= 10) return 'cold';
+  if (temperatureC <= 18) return 'cool';
+  if (temperatureC <= 26) return 'mild';
+  return 'hot';
+}
+
+// Coarse weather-condition lean from the free-text description weather.js
+// already provides -- another axis of variety alongside temperatureBand, so
+// "rain" content can lean umbrella/shoes while "sun" leans sun/light
+// clothing, instead of every weather_lifehack slot defaulting to the same
+// generic clothing tip regardless of actual conditions.
+function weatherConditionLean(description) {
+  const text = typeof description === 'string' ? description.toLowerCase() : '';
+  if (/rain|shower|drizzle/.test(text)) return 'rain';
+  if (/snow|sleet|blizzard/.test(text)) return 'snow';
+  if (/wind/.test(text)) return 'wind';
+  if (/clear|sun/.test(text)) return 'sun';
+  if (/cloud|overcast|fog|mist/.test(text)) return 'cloudy';
+  return null;
+}
+
+// Broad, non-identifying age bracket for age_context -- replaces sending the
+// exact computed age in this candidate's own facts (profile.age, used by the
+// separate general "gender/age give a careful practical shade" instruction,
+// is untouched/out of scope here). A bracket is enough to let the model lean
+// topic/tone/complexity appropriately (req 3) without ever being able to
+// echo a specific number back at the user (req 4: no "поскольку тебе 16").
+const AGE_BRACKETS = [
+  { max: 17, id: 'teen' },
+  { max: 25, id: 'young_adult' },
+  { max: 40, id: 'adult' },
+  { max: 60, id: 'mature' },
+  { max: Infinity, id: 'senior' },
+];
+
+function ageBracketFor(age) {
+  if (!Number.isFinite(age) || age < 0) return null;
+  const match = AGE_BRACKETS.find((bracket) => age <= bracket.max);
+  return match ? match.id : null;
+}
+
 function collectCandidates(input = {}) {
   const candidates = [];
   const { device = {}, window, dateContext, weather, bankItems = [], phoneTrends = {}, recallCandidate = null, signals = {} } = input;
@@ -491,6 +588,10 @@ function collectCandidates(input = {}) {
 
   if (window === 'morning' && weather && typeof weather.temperatureC === 'number') {
     const facts = { temperature_c: Math.round(weather.temperatureC) };
+    const band = temperatureBand(weather.temperatureC);
+    if (band) facts.temp_band = band;
+    const lean = weatherConditionLean(weather.description);
+    if (lean) facts.condition_lean = lean;
     if (weather.city) facts.city = weather.city;
     if (weather.description) facts.condition = weather.description;
     candidates.push(createCandidate({
@@ -499,7 +600,7 @@ function collectCandidates(input = {}) {
       priority: 62,
       facts,
       source: 'weather',
-      constraints: ['avoid_exact_right_now', 'safe_for_batch_delay', 'temperature_grounding_only', 'do_not_state_exact_temperature', 'no_digits', 'simple_clothing_umbrella_shoes_sun_advice'],
+      constraints: ['avoid_exact_right_now', 'safe_for_batch_delay', 'temperature_grounding_only', 'do_not_state_exact_temperature', 'no_digits', 'simple_clothing_umbrella_shoes_sun_advice', 'vary_advice_by_temp_band_and_condition'],
     }));
   }
 
@@ -511,30 +612,40 @@ function collectCandidates(input = {}) {
       priority: 40,
       facts: { signal: contextSignal },
       source: 'device_signal',
-      constraints: ['no_exact_numbers', 'caring_not_alarming', 'no_medical_claims'],
+      constraints: contextSignalConstraints(contextSignal),
     }));
   }
 
   const age = computeAge(device.birth_date);
-  if (age !== null) {
+  const ageBracket = ageBracketFor(age);
+  if (ageBracket) {
     candidates.push(createCandidate({
       id: 'age_context_soft',
+      // Priority nudged up slightly (15 -> 20) so this genuinely-usable-now
+      // signal (bracket-only, no exact number -- see ageBracketFor) competes
+      // a bit more often, while staying well below mandatory/bank/weather
+      // priorities so it remains a rare accent, not a recurring bucket (req 3:
+      // "усилить... но без стереотипов").
+      priority: 20,
       type: 'age_context',
-      priority: 15,
-      facts: { age },
+      facts: { age_bracket: ageBracket },
       source: 'profile',
-      constraints: ['rare', 'avoid_stereotypes'],
+      constraints: ['rare', 'avoid_stereotypes', 'no_exact_age', 'no_medical_advice', 'no_financial_advice', 'soft_topic_lean_only'],
     }));
   }
 
   if (Object.keys(semanticPhoneTrends).length > 0) {
     candidates.push(createCandidate({
       id: 'phone_trend_semantic',
+      // Priority nudged up slightly (28 -> 32) -- still capped at 1 slot
+      // (TYPE_CAPS.phone_trend), but this makes it a bit more likely to win
+      // its capped slot over low-value generic filler when a real trend
+      // exists (req 3: "использовать это не только как сухой тренд").
+      priority: 32,
       type: 'phone_trend',
-      priority: 28,
       facts: semanticPhoneTrends,
       source: 'phone_analytics',
-      constraints: ['non_moralizing', 'no_exact_counts', 'no_psychological_claims', 'no_productivity_or_addiction_framing', 'no_causal_claims'],
+      constraints: ['non_moralizing', 'no_exact_counts', 'no_psychological_claims', 'no_productivity_or_addiction_framing', 'no_causal_claims', 'ground_in_natural_observation', 'no_dry_stat_callout'],
     }));
   }
 
@@ -614,41 +725,100 @@ function antiRepeatPenalty(candidate, memoryIndex) {
 
 // Interests personalization (server-selects WHAT gets an interest angle,
 // OpenAI only handles HOW -- same "Server = WHAT, OpenAI = HOW" split as the
-// rest of this file). Deliberately NOT a selection-time score nudge (an
-// earlier version of this file did that, and was replaced): a score boost
-// can only make a slot MORE LIKELY to be picked, it can never guarantee the
-// generated text is actually about the interest, because OpenAI never
-// received the interest at all. Instead: run the exact same, completely
-// unmodified candidate selection as always (this is what keeps interests
-// fully subordinate to mandatory slots/learning recall/anti-repeat/country
-// eligibility/factual grounding/Daily Bank freshness/type caps -- nothing
-// here can touch WHICH candidates get chosen), then, only after the 12
-// slots are already final, tag at most MAX_INTEREST_AWARE_SLOTS of them
-// with a compact interest_hint that DOES reach the OpenAI payload for just
-// those slots (see buildContextPrompt in contentGenerator.js and the static
-// prompt instruction in buildSystemPrompt). See HANDOFF_2 interests
-// personalization follow-up.
+// rest of this file).
 //
-// Android currently sends the first six stable ids below; the extra aliases
-// let newer clients add practical topics (auto/tech/style) without another
-// server migration. Each maps to one existing content type -- used here
-// purely as a compatibility check ("is this already-selected slot's type a
-// genuine fit for this interest"), never to invent or force a connection a
-// slot's own facts don't support.
-const INTEREST_TYPE_MAP = {
-  sport: 'unusual_fact',
-  auto: 'science_tech',
-  cars: 'science_tech',
-  technology: 'science_tech',
-  tech: 'science_tech',
-  style: 'everyday_lifehack',
-  fashion: 'everyday_lifehack',
-  work: 'money_economics',
-  family: 'culture',
-  self_development: 'science_tech',
-  mindfulness: 'culture',
-  creative_arts: 'culture',
+// Content-improvement follow-up (see audit): interests now influence TWO
+// separate things, at two different stages, and must not be confused with
+// each other:
+//   1. Selection itself -- see INTEREST_SELECTION_BOOST/interestBoostTypesForDevice
+//      below and their use inside selectNonMandatory's scoring -- gives a
+//      small, bounded score nudge to NON-BANK candidates (free_ai_thought/
+//      everyday_lifehack/smart_humor_observation/city_afisha/phone_trend/
+//      context_signal/seasonal) whose type is thematically compatible with
+//      one of the device's selected interests. This can change WHICH
+//      candidates win a slot, but never overrides a mandatory slot, never
+//      touches Daily Bank candidate scoring (explicitly excluded by source
+//      below -- Daily Bank selection/eligibility stays exactly as before),
+//      never overrides anti-repeat/type-cap/window-eligibility, and the
+//      normal TYPE_CAPS/MAX_GENERIC_FILLER_PER_BATCH ceilings still bound how
+//      much of the batch any one type (therefore any one interest) can ever
+//      reach -- "интерес влияет только на часть карточек", not the whole batch.
+//   2. Wording -- selectInterestAwareSlots (unchanged mechanism/timing, only
+//      the type map below is now array-valued): only AFTER the 12 slots are
+//      already final, tag at most MAX_INTEREST_AWARE_SLOTS of them with a
+//      compact interest_hint that reaches the OpenAI payload for just those
+//      slots (see buildContextPrompt in contentGenerator.js and the static
+//      prompt instruction in buildSystemPrompt), so a slot whose type merely
+//      happens to be interest-compatible can also get its phrasing nudged.
+//
+// INTEREST_AFFINITY maps each of Android's 6 send interests (no new interest
+// ids introduced -- see the product requirement) to an ordered list of
+// thematically-compatible content types, per the product's own grouping:
+// sport -> practical/activity, work -> productivity/organization,
+// family -> everyday/relationship context, self_development -> learning/
+// reflection, mindfulness -> calm/attention/reset, creative_arts -> culture/
+// creativity/artistic observation. Lists intentionally mix a couple of
+// Daily-Bank-sourced types (money_economics/science_tech/culture/word_learning)
+// with the always-available non-bank ones -- selection-time boosting only
+// ever applies to the non-bank half (enforced by the source !== 'daily_bank'
+// check in candidateWeight), so Daily Bank item scoring is never touched;
+// the bank-sourced types stay reachable only through the pre-existing
+// wording-hint path (mechanism 2 above), exactly as before this change.
+const INTEREST_AFFINITY = {
+  sport: ['everyday_lifehack', 'phone_trend', 'unusual_fact'],
+  auto: ['science_tech'],
+  cars: ['science_tech'],
+  technology: ['science_tech'],
+  tech: ['science_tech'],
+  style: ['everyday_lifehack'],
+  fashion: ['everyday_lifehack'],
+  work: ['money_economics', 'everyday_lifehack', 'free_ai_thought'],
+  family: ['culture', 'everyday_lifehack', 'good_news'],
+  self_development: ['science_tech', 'word_learning', 'free_ai_thought'],
+  mindfulness: ['context_signal', 'seasonal', 'culture'],
+  creative_arts: ['culture', 'smart_humor_observation', 'city_afisha'],
 };
+
+// Small, bounded additive score nudge used only inside the competitive
+// (non-mandatory, non-bank) lottery -- see candidateWeight/selectNonMandatory.
+// Comparable to, but smaller than, the existing rng() * 20 randomness term,
+// so it tilts likelihood without ever guaranteeing a matching-type candidate
+// wins its slot (priority/anti-repeat/randomness still matter).
+const INTEREST_SELECTION_BOOST = 10;
+
+// Only these non-bank types are ever eligible for the selection-time boost,
+// regardless of what INTEREST_AFFINITY lists for a given interest -- a second,
+// explicit safety net on top of the source !== 'daily_bank' check in
+// candidateWeight, so a future edit to INTEREST_AFFINITY cannot accidentally
+// start nudging Daily Bank content scoring.
+const INTEREST_BOOST_ELIGIBLE_TYPES = new Set([
+  'free_ai_thought',
+  'everyday_lifehack',
+  'smart_humor_observation',
+  'city_afisha',
+  'phone_trend',
+  'context_signal',
+  'seasonal',
+]);
+
+// Returns the Set of non-bank types eligible for INTEREST_SELECTION_BOOST for
+// this device's selected interests -- union across all of them (a device with
+// several interests can have several boosted types, still each individually
+// bounded by TYPE_CAPS/MAX_GENERIC_FILLER_PER_BATCH).
+function interestBoostTypesForDevice(rawInterests) {
+  const interests = parseDeviceInterests(rawInterests);
+  const types = new Set();
+  for (const interest of interests) {
+    const compatible = INTEREST_AFFINITY[interest];
+    if (!compatible) continue;
+    for (const type of compatible) {
+      if (INTEREST_BOOST_ELIGIBLE_TYPES.has(type)) {
+        types.add(type);
+      }
+    }
+  }
+  return types;
+}
 
 // Hard, structural cap on how many of the final BATCH_SIZE slots may ever
 // carry an interest_hint -- "approximately 3-4 of 12, never the whole
@@ -715,12 +885,19 @@ function selectInterestAwareSlots(finalSlots, rawInterests) {
       if (hints.size >= MAX_INTEREST_AWARE_SLOTS) {
         return assignedAny;
       }
-      const compatibleType = INTEREST_TYPE_MAP[interest];
-      if (!compatibleType) {
+      const compatibleTypes = INTEREST_AFFINITY[interest];
+      if (!compatibleTypes) {
         continue;
       }
-      const candidates = slotsByType.get(compatibleType) || [];
-      const pick = candidates.find((slot) => !used.has(slot.id));
+      // Try each compatible type in order (see INTEREST_AFFINITY's own
+      // comment for why each interest now maps to several types, not one) --
+      // first type with an available, not-yet-used slot wins.
+      let pick = null;
+      for (const type of compatibleTypes) {
+        const candidatesForType = slotsByType.get(type) || [];
+        pick = candidatesForType.find((slot) => !used.has(slot.id));
+        if (pick) break;
+      }
       if (pick) {
         hints.set(pick.id, interest);
         used.add(pick.id);
@@ -781,8 +958,17 @@ function selectGenderLeanSlot(finalSlots, rawGender, rng = Math.random) {
   return { slotId: pick.id, gender };
 }
 
-function candidateWeight(candidate, rng, memoryIndex = buildRecentMemoryIndex()) {
-  return candidate.priority + rng() * 20 - antiRepeatPenalty(candidate, memoryIndex);
+// interestBoostTypes: optional Set (see interestBoostTypesForDevice) -- only
+// ever applied to a candidate whose source is NOT 'daily_bank' (Daily Bank
+// item scoring must stay completely untouched by interests, per product
+// requirement), and only passed in at all from selectNonMandatory's
+// competitive round (never from the fixed-morning/guaranteed-slot selection
+// paths -- see planSlots), so mandatory/fixed-position picks are unaffected.
+function candidateWeight(candidate, rng, memoryIndex = buildRecentMemoryIndex(), interestBoostTypes = null) {
+  const interestBoost = interestBoostTypes && candidate.source !== 'daily_bank' && interestBoostTypes.has(candidate.type)
+    ? INTEREST_SELECTION_BOOST
+    : 0;
+  return candidate.priority + rng() * 20 - antiRepeatPenalty(candidate, memoryIndex) + interestBoost;
 }
 
 function typeCap(type) {
@@ -790,11 +976,17 @@ function typeCap(type) {
 }
 
 function canAddType(typeCounts, type) {
+  if (GENERIC_FILLER_TYPES.has(type) && (typeCounts.get(GENERIC_FILLER_COUNT_KEY) || 0) >= MAX_GENERIC_FILLER_PER_BATCH) {
+    return false;
+  }
   return (typeCounts.get(type) || 0) < typeCap(type);
 }
 
 function recordType(typeCounts, type) {
   typeCounts.set(type, (typeCounts.get(type) || 0) + 1);
+  if (GENERIC_FILLER_TYPES.has(type)) {
+    typeCounts.set(GENERIC_FILLER_COUNT_KEY, (typeCounts.get(GENERIC_FILLER_COUNT_KEY) || 0) + 1);
+  }
 }
 
 // Picks at most one candidate per type in `types` -- the best-scored one
@@ -852,11 +1044,11 @@ function selectBestCandidateForType(candidates, type, rng, memoryIndex) {
     .sort((a, b) => b.score - a.score)[0].candidate;
 }
 
-function selectNonMandatory(candidates, count, rng, memoryIndex = buildRecentMemoryIndex(), initialTypeCounts = new Map()) {
+function selectNonMandatory(candidates, count, rng, memoryIndex = buildRecentMemoryIndex(), initialTypeCounts = new Map(), interestBoostTypes = null) {
   const selected = [];
   const typeCounts = new Map(initialTypeCounts);
   const shuffled = shuffle(candidates, rng)
-    .map((candidate) => ({ candidate, score: candidateWeight(candidate, rng, memoryIndex) }))
+    .map((candidate) => ({ candidate, score: candidateWeight(candidate, rng, memoryIndex, interestBoostTypes) }))
     .sort((a, b) => b.score - a.score);
 
   for (const entry of shuffled) {
@@ -1008,7 +1200,13 @@ function planSlots(input = {}, options = {}) {
 
   const competitivePool = remainingCandidates.filter((candidate) => !guaranteedIds.has(candidate.id));
   const competitiveCount = remainingCount - guaranteed.length;
-  const competitive = selectNonMandatory(competitivePool, competitiveCount, rng, memoryIndex, fixedTypeCounts);
+  // Interest selection-boost (see INTEREST_SELECTION_BOOST/interestBoostTypesForDevice)
+  // is deliberately only wired in here, the general competitive round -- NOT
+  // into fixedMorning/fixedNightRecall/selectGuaranteedSlots' selectBestCandidateForType
+  // calls above, so it can never influence which candidate wins a fixed
+  // position (e.g. which bank item becomes today's word_learning).
+  const interestBoostTypes = interestBoostTypesForDevice(input.device && input.device.interests);
+  const competitive = selectNonMandatory(competitivePool, competitiveCount, rng, memoryIndex, fixedTypeCounts, interestBoostTypes);
 
   const middle = shuffle([...guaranteed, ...competitive], rng);
 
@@ -1067,9 +1265,18 @@ module.exports = {
     selectGenderLeanSlot,
     resolveContextSignal,
     candidateWeight,
-    INTEREST_TYPE_MAP,
+    INTEREST_AFFINITY,
+    interestBoostTypesForDevice,
+    INTEREST_SELECTION_BOOST,
+    INTEREST_BOOST_ELIGIBLE_TYPES,
     GENDER_LEAN_TYPE_MAP,
     TYPE_CAPS,
+    GENERIC_FILLER_TYPES,
+    MAX_GENERIC_FILLER_PER_BATCH,
+    ageBracketFor,
+    temperatureBand,
+    weatherConditionLean,
+    contextSignalConstraints,
     MAX_INTEREST_AWARE_SLOTS,
     MORNING_FIXED_TYPES,
     MORNING_ONLY_TYPES,

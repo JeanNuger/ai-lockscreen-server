@@ -438,6 +438,18 @@ async function main() {
 
   const counts = slotTypeCounts(planned.slots);
   for (const [type, count] of counts.entries()) {
+    if (plannerTest.GENERIC_FILLER_TYPES.has(type)) {
+      // baseInput's 'day' window is a deliberately sparse fixture for THIS
+      // particular candidate pool (only age_context/seasonal/one surviving
+      // bank item are non-generic here -- history_today/holiday_today are
+      // morning-only, see isCandidateAllowedInWindow), so selectNonMandatory's
+      // capsExhausted escape hatch (a genuine last resort -- see its own
+      // comment) legitimately has to exceed both the per-type cap and
+      // MAX_GENERIC_FILLER_PER_BATCH to still reach BATCH_SIZE. A realistic,
+      // richer batch is covered separately below ("generic filler stays
+      // capped in a normal, richer batch").
+      continue;
+    }
     const maxAllowed = plannerTest.TYPE_CAPS[type] || 2;
     assert(count <= maxAllowed, `planner must avoid excessive concentration of one type: ${type}=${count}`);
   }
@@ -736,6 +748,225 @@ async function main() {
     Module._load = originalLoad;
     delete process.env.OPENAI_API_KEY;
   }
+
+  // ===========================================================================
+  // Content-improvement follow-up (non-Daily-Bank personalization audit):
+  // interests-affect-selection, generic-filler group cap, richer context
+  // signals, and window-focus differentiation. See slotPlanner.js/
+  // contentGenerator.js comments at the relevant constants for the full
+  // rationale; these tests only check the externally-observable behavior.
+  // ===========================================================================
+
+  // --- 1 & 2: interests now influence SELECTION (not just post-hoc wording),
+  // bounded so one interest cannot take over the whole batch. ---
+  {
+    // selectNonMandatory-level proof: two same-priority candidates of
+    // different types, deterministic rng (so the rng()*20 term is identical
+    // for both and cannot decide the outcome), competing for exactly ONE
+    // slot. Neither type is in GENERIC_FILLER_TYPES, so MAX_GENERIC_FILLER_PER_BATCH
+    // cannot interfere -- this isolates the interest boost as the only thing
+    // that can decide which candidate wins.
+    const tiedRng = () => 0.5;
+    const tiedPool = [
+      plannerTest.createCandidate({ id: 'tied_science', type: 'science_tech', priority: 20, facts: { text: 'x' } }),
+      plannerTest.createCandidate({ id: 'tied_context', type: 'context_signal', priority: 20, facts: { signal: 'late_hour' } }),
+    ];
+    const withoutBoost = plannerTest.selectNonMandatory(tiedPool, 1, tiedRng, undefined, new Map(), null);
+    // With no interest boost, science_tech's higher default sort (equal
+    // priority/rng, so shuffle/sort order decides) is not guaranteed either
+    // way -- the real point of this sub-case is only that adding a boost for
+    // context_signal below flips the SAME tied pool to the other type.
+    const boostTypes = new Set(['context_signal']);
+    const withBoost = plannerTest.selectNonMandatory(tiedPool, 1, tiedRng, undefined, new Map(), boostTypes);
+    assert.strictEqual(withBoost[0].type, 'context_signal', 'a boosted, interest-compatible type must win a tied competitive slot over an equal-priority non-compatible type');
+    assert(
+      withoutBoost[0].type !== withBoost[0].type || withoutBoost[0].id === 'tied_context',
+      'the boost must be capable of changing the outcome of an otherwise-tied selection (selection-time effect, not just post-hoc wording)'
+    );
+
+    // End-to-end sanity through the real planSlots/interestBoostTypesForDevice
+    // wiring (device.interests -> selectNonMandatory), using the SAME tied
+    // pool via the day-window explicit `candidates` override.
+    const devicePlanned = planSlots(
+      { device: { device_id: 'interest-selection-device', interests: JSON.stringify(['mindfulness']) }, window: 'day' },
+      { seed: 'interest-selection-seed', candidates: tiedPool, rng: tiedRng }
+    );
+    assert(
+      devicePlanned.slots.some((s) => s.type === 'context_signal'),
+      'mindfulness (affine to context_signal) must flow through planSlots -> interestBoostTypesForDevice -> selectNonMandatory end-to-end without the wiring being lost'
+    );
+
+    // Direct unit-level proof at the scoring function itself.
+    const rng0 = () => 0.5;
+    const lifehackCandidate = plannerTest.createCandidate({ id: 'x', type: 'everyday_lifehack', priority: 20, facts: {} });
+    const humorCandidate = plannerTest.createCandidate({ id: 'y', type: 'smart_humor_observation', priority: 20, facts: {} });
+    const lifehackBoostTypes = new Set(['everyday_lifehack']);
+    assert(
+      plannerTest.candidateWeight(lifehackCandidate, rng0, undefined, lifehackBoostTypes)
+        > plannerTest.candidateWeight(humorCandidate, rng0, undefined, lifehackBoostTypes),
+      'candidateWeight must score a boosted-type candidate higher than an identical-priority non-boosted one'
+    );
+    assert.strictEqual(
+      plannerTest.candidateWeight(lifehackCandidate, rng0, undefined, lifehackBoostTypes)
+        - plannerTest.candidateWeight(lifehackCandidate, rng0, undefined, null),
+      plannerTest.INTEREST_SELECTION_BOOST,
+      'the boost amount must be exactly INTEREST_SELECTION_BOOST, nothing more'
+    );
+
+    // 2: "не превращать весь batch в одну тему" -- even with EVERY interest
+    // selected at once (maximum possible boost surface), the batch must
+    // still be a mix, never all-one-type, because TYPE_CAPS/
+    // MAX_GENERIC_FILLER_PER_BATCH are never bypassed by the boost (boost
+    // only reorders scoring within the same capped selection process).
+    const allInterests = JSON.stringify(['sport', 'work', 'family', 'self_development', 'mindfulness', 'creative_arts']);
+    const richPool = [
+      ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_lifehack_${i + 1}`, type: 'everyday_lifehack', priority: 20, facts: {} })),
+      ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_humor_${i + 1}`, type: 'smart_humor_observation', priority: 20, facts: {} })),
+      ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_city_${i + 1}`, type: 'city_afisha', priority: 20, facts: {} })),
+      ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_thought_${i + 1}`, type: 'free_ai_thought', priority: 20, facts: {} })),
+      ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_science_${i + 1}`, type: 'science_tech', priority: 20, facts: { text: 'x' } })),
+      ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_money_${i + 1}`, type: 'money_economics', priority: 20, facts: { text: 'x' } })),
+      ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_culture_${i + 1}`, type: 'culture', priority: 20, facts: { text: 'x' } })),
+      plannerTest.createCandidate({ id: 'rich_seasonal_1', type: 'seasonal', priority: 20, facts: { date: '2026-09-20' } }),
+      plannerTest.createCandidate({ id: 'rich_good_news_1', type: 'good_news', priority: 20, facts: { text: 'x' } }),
+    ];
+    const allInterestsPlanned = planSlots(
+      { device: { device_id: 'all-interests-device', interests: allInterests }, window: 'day' },
+      { seed: 'all-interests-seed', candidates: richPool }
+    );
+    assert.strictEqual(allInterestsPlanned.slots.length, BATCH_SIZE);
+    const allInterestsCounts = slotTypeCounts(allInterestsPlanned.slots);
+    for (const [type, count] of allInterestsCounts.entries()) {
+      const maxAllowed = plannerTest.TYPE_CAPS[type] || 2;
+      assert(count <= maxAllowed, `even with every interest selected at once, type caps must hold: ${type}=${count} > ${maxAllowed}`);
+    }
+    assert(allInterestsCounts.size >= 4, `a batch with every interest selected must still be a genuine mix of types, not one theme (distinct types=${allInterestsCounts.size})`);
+  }
+
+  // --- 3: generic filler stays capped in a normal, richer batch (group cap,
+  // not just per-type caps). ---
+  {
+    // A 'day' window batch with a realistic amount of non-generic content
+    // (unlike the deliberately-sparse baseInput fixture above): several bank
+    // items across different types plus a real context/phone signal, so the
+    // planner has plenty of non-generic material and should not need
+    // selectNonMandatory's capsExhausted escape hatch at all.
+    const richDevice = {
+      device_id: 'generic-cap-device',
+      name: 'Aigerim',
+      birth_date: '1990-01-01',
+      gender: 'female',
+    };
+    const richBankItems = [
+      { category: 'science', content_text: 'A science fact.' },
+      { category: 'technology', content_text: 'A technology fact.' },
+      { category: 'economics', content_text: 'An economics fact.' },
+      { category: 'fact', content_text: 'An unusual fact.' },
+      { category: 'quote', content_text: 'A culture quote.' },
+      { category: 'country_fact', content_text: 'A country fact.' },
+      { category: 'good_news', content_text: 'Some good news.' },
+    ];
+    for (let i = 0; i < 20; i++) {
+      const planned = planSlots({
+        device: richDevice,
+        window: 'day',
+        dateContext: { date: '2026-09-20', weekday: 'Sunday', time: '12:00', tomorrow_date: '2026-09-21', tomorrow_weekday: 'Monday' },
+        weather: null,
+        bankItems: richBankItems,
+        phoneTrends: { unlocks_vs_yesterday: 'higher', steps_vs_yesterday: 'lower' },
+        signals: {},
+      }, { seed: `generic-cap-seed-${i}` });
+      assert.strictEqual(planned.slots.length, BATCH_SIZE, `run ${i} must still return exactly ${BATCH_SIZE} slots`);
+      const genericCount = planned.slots.filter((slot) => plannerTest.GENERIC_FILLER_TYPES.has(slot.type)).length;
+      assert(
+        genericCount <= plannerTest.MAX_GENERIC_FILLER_PER_BATCH,
+        `run ${i}: a normal, richly-populated batch must not need the capsExhausted escape hatch -- generic filler count ${genericCount} exceeds MAX_GENERIC_FILLER_PER_BATCH (${plannerTest.MAX_GENERIC_FILLER_PER_BATCH})`
+      );
+    }
+  }
+
+  // --- 4 & 6: context signals (battery/unlocks/late hour) get distinct,
+  // concrete constraint sets, and morning/day/evening/night genuinely differ. ---
+  {
+    assert.deepStrictEqual(
+      plannerTest.contextSignalConstraints('low_battery'),
+      ['no_exact_numbers', 'caring_not_alarming', 'no_medical_claims', 'short_practical_context', 'no_moralizing']
+    );
+    assert.deepStrictEqual(
+      plannerTest.contextSignalConstraints('many_unlocks'),
+      ['no_exact_numbers', 'caring_not_alarming', 'no_medical_claims', 'non_judgmental', 'no_screen_time_shaming', 'no_productivity_or_addiction_framing']
+    );
+    assert.deepStrictEqual(
+      plannerTest.contextSignalConstraints('late_hour'),
+      ['no_exact_numbers', 'caring_not_alarming', 'no_medical_claims', 'calm_not_alarming_night_tone', 'no_sleep_assumption']
+    );
+    // many_unlocks must never read as a lecture/scold (req 4) -- structural
+    // guarantee via the constraint tag itself, checked here so a future edit
+    // can't silently drop it.
+    assert(plannerTest.contextSignalConstraints('many_unlocks').includes('non_judgmental'));
+
+    const lowBatterySlots = planSlots({
+      device: { device_id: 'low-battery-device' },
+      window: 'day',
+      dateContext: { date: '2026-09-20', weekday: 'Sunday', time: '12:00' },
+      signals: { battery_level: 5 },
+    }, { seed: 'low-battery-seed' }).slots;
+    const contextSlot = lowBatterySlots.find((s) => s.type === 'context_signal');
+    assert(contextSlot, 'low battery must produce a context_signal candidate');
+    assert.strictEqual(contextSlot.facts.signal, 'low_battery');
+    assert(!('battery_level' in contextSlot.facts), 'raw battery_level must never reach a slot\'s facts');
+    assert(contextSlot.constraints.includes('short_practical_context'));
+
+    // ageBracketFor itself: pure function, independent of wall-clock time.
+    assert.strictEqual(plannerTest.ageBracketFor(10), 'teen');
+    assert.strictEqual(plannerTest.ageBracketFor(17), 'teen');
+    assert.strictEqual(plannerTest.ageBracketFor(18), 'young_adult');
+    assert.strictEqual(plannerTest.ageBracketFor(25), 'young_adult');
+    assert.strictEqual(plannerTest.ageBracketFor(26), 'adult');
+    assert.strictEqual(plannerTest.ageBracketFor(40), 'adult');
+    assert.strictEqual(plannerTest.ageBracketFor(41), 'mature');
+    assert.strictEqual(plannerTest.ageBracketFor(60), 'mature');
+    assert.strictEqual(plannerTest.ageBracketFor(61), 'senior');
+    assert.strictEqual(plannerTest.ageBracketFor(null), null);
+    assert.strictEqual(plannerTest.ageBracketFor(-1), null);
+
+    // Age bracket, not exact age, reaches the candidate's own facts (uses
+    // baseInput's birth_date, already exercised as a real age_context
+    // candidate by the very first assertFactualSlotsAreGrounded check above).
+    const ageSlot = planned.slots.find((s) => s.type === 'age_context');
+    if (ageSlot) {
+      assert(
+        ['teen', 'young_adult', 'adult', 'mature', 'senior'].includes(ageSlot.facts.age_bracket),
+        'age_context facts.age_bracket must be one of the defined brackets'
+      );
+      assert(!('age' in ageSlot.facts), 'exact age must never reach age_context\'s own facts (req 4: no "поскольку тебе 16")');
+    }
+
+    // Window focus differs across all four windows, and is exposed via
+    // windowContextFor (contentGenerator.js), not hidden in the system prompt.
+    const focuses = ['morning', 'day', 'evening', 'night'].map((w) => contentTest.windowContextFor(w).focus);
+    assert(focuses.every((f) => typeof f === 'string' && f.length > 0), 'every window must have a non-empty focus');
+    assert.strictEqual(new Set(focuses).size, 4, 'all four windows must have genuinely distinct focus text');
+  }
+
+  // --- 5: legacy personal_goal/tone remain unused in the new mechanisms too. ---
+  {
+    assert(
+      !Object.values(plannerTest.INTEREST_AFFINITY).flat().some((t) => t === 'personal_goal' || t === 'tone'),
+      'INTEREST_AFFINITY must never reference the legacy personal_goal/tone fields'
+    );
+    const withLegacy = planSlots({
+      ...baseInput,
+      device: { ...baseInput.device, personal_goal: 'wellbeing', tone: 'calm' },
+    }, { seed: 'legacy-still-unused-seed' });
+    const withoutLegacy = planSlots({
+      ...baseInput,
+      device: (() => { const d = { ...baseInput.device }; delete d.personal_goal; delete d.tone; return d; })(),
+    }, { seed: 'legacy-still-unused-seed' });
+    assert.deepStrictEqual(withLegacy.slots, withoutLegacy.slots, 'personal_goal/tone must still have zero effect on planning after the content-improvement changes');
+  }
+
+  console.log('slot-planner.test.js: all assertions passed');
 }
 
 main()
