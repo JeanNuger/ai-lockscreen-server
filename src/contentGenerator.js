@@ -24,7 +24,25 @@ const {
 // lock-screen text area (TextWallpaperService.java's safe zone / StaticLayout
 // wrapping at the current font size/width) -- text this long or shorter is
 // guaranteed to fit without visual overflow, regardless of length_hint below.
+// This is the ONLY number server-side validation (isUnusableLockScreenText/
+// rejectionReasonForText, via textFilter.js's validateLockScreenText) ever
+// enforces -- never lowered, never used to slice/truncate a phrase.
 const LOCK_SCREEN_TEXT_MAX_LENGTH = 70;
+
+// Soft target exposed to OpenAI via the response schema's `text.maxLength`
+// (see buildBatchResponseFormat) -- deliberately smaller than the real hard
+// cap above. OpenAI's Structured Outputs strict-mode json_schema does NOT
+// actually enforce `maxLength` for strings (unsupported keyword, confirmed
+// against OpenAI's own docs), so this was never a hard constraint -- but a
+// production incident showed the model still appears to treat the number in
+// the schema as an implicit target while composing text token-by-token, and
+// was observed cutting a sentence off mid-thought exactly at the old value
+// (70). Using a smaller number here keeps the model from aiming at 70 (the
+// real, emergency-only cap) as if it were a normal target; server-side
+// validation still accepts any genuinely completed phrase up to the real
+// 70-char hard cap regardless of this schema hint -- SHORT/MEDIUM/LONG
+// length_hint selection (slotPlanner.js) is unaffected by this constant.
+const OPENAI_SCHEMA_SOFT_MAX_LENGTH = 60;
 
 // `focus` (content-improvement follow-up, req 3 "усилить различие между
 // morning/day/evening/night") is a short, data-only mood/topic steer for the
@@ -1350,7 +1368,7 @@ const ANCHOR_FALLBACK_TEXT = {
       'Телефону тоже нужен отдых',
       'Хорошего отдыха, экран подождёт',
       'Сегодняшний день был не зря',
-      'Отдохни — ты его заслужил',
+      'Ты заслуживаешь немного отдыха',
       'Пора дать себе передышку',
     ],
     en: [
@@ -1570,7 +1588,7 @@ function buildBatchResponseFormat(name, count) {
               type: 'object',
               properties: {
                 slot_id: { type: 'string' },
-                text: { type: 'string', maxLength: LOCK_SCREEN_TEXT_MAX_LENGTH },
+                text: { type: 'string', maxLength: OPENAI_SCHEMA_SOFT_MAX_LENGTH },
                 style_id: { type: 'string', enum: STYLE_IDS },
               },
               required: ['slot_id', 'text', 'style_id'],
@@ -1966,7 +1984,17 @@ function buildContextPrompt(device, window, signals, weather, languageCode, slot
 // in generateBatch, not described in this text -- see the call site for why.
 function buildSystemPrompt(languageCode) {
   const languageName = SUPPORTED_LANGUAGES[languageCode].name;
-  return `Ты — добрый, умный и внимательный AI-компаньон на экране блокировки, не quote/trivia/coach-приложение. Давай короткие мысли монологом: 1 предложение, емко, полезно, разнообразно, с теплом и вниманием к дню человека.
+  // Russian-only naturalness instruction (production incident: a generated
+  // Russian phrase read like a rough literal translation, e.g. a dangling
+  // "его" with no antecedent in the sentence itself). Scoped to
+  // languageCode === 'ru' only -- the base prompt template below is always
+  // authored in Russian regardless of the requested OUTPUT language, so this
+  // extra sentence must not leak into English/French/etc. generation runs
+  // where it would be meaningless.
+  const ruNaturalnessInstruction = languageCode === 'ru'
+    ? ' Пиши естественным современным русским языком, а не буквальным переводом английских конструкций и без калек; каждая фраза должна быть самостоятельной, завершённой мыслью.'
+    : '';
+  return `Ты — добрый, умный и внимательный AI-компаньон на экране блокировки, не quote/trivia/coach-приложение. Давай короткие мысли монологом: 1 предложение, емко, полезно, разнообразно, с теплом и вниманием к дню человека.${ruNaturalnessInstruction}
 Язык: ${languageName}. На каждый slot_id верни ровно одну строку и уникальный style_id.
 Запрет: ?, «пусть», открытки, уют/чай/тихий свет/мысли/мечты/магия/чудеса/счастье/фея/чайник, ночная поэзия про ночь/луну/звезды/тишину/покой/шорох/фонари/небо/свечи/гирлянды, «верь в себя», «ты справишься», вода, коучинг, выдуманные факты, выдуманные названия мероприятий/фильмов/выставок.
 ЗАПРЕЩЕНО использовать повелительное наклонение и команды (используй, выбери, держи, создай, читай, проверяй). Пиши в формате короткого факта или наблюдения.
@@ -2145,6 +2173,8 @@ module.exports = {
     fallbackTextForSlot,
     currentFallbackSetIndex,
     LOCK_SCREEN_TEXT_MAX_LENGTH,
+    OPENAI_SCHEMA_SOFT_MAX_LENGTH,
+    buildBatchResponseFormat,
     isUnusableLockScreenText,
   },
 };

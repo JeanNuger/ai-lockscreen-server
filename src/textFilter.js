@@ -125,6 +125,40 @@ function hasImperativeCommand(text) {
   return IMPERATIVE_OPENER_PATTERN.test(String(text || '').trim());
 }
 
+// Minimal, non-grammar-checker guard against a phrase cut off mid-thought
+// (production incident: OpenAI returned a phrase ending "...выявить в" --
+// exactly at the schema's maxLength, no server-side truncation involved,
+// see contentGenerator.js's LOCK_SCREEN_TEXT_MAX_LENGTH/OPENAI_SCHEMA_SOFT_MAX_LENGTH
+// comments for the full story). Only checks whether the LAST WORD is one of
+// a small set of Russian words that can never end a sentence on their own
+// (prepositions/conjunctions) -- terminal punctuation is not required (a
+// normal lock-screen phrase without a period is fine), and this is
+// deliberately just a word-list lookup, not real grammar analysis. The word
+// list is Cyrillic-only, so it is inert (never matches) for any other
+// language's output -- same "Russian words applied universally, harmless
+// elsewhere" precedent as STOP_PHRASES above.
+const INCOMPLETE_ENDING_WORDS = new Set([
+  'в', 'во', 'на', 'с', 'со', 'к', 'ко', 'для', 'из', 'от', 'до', 'по', 'у', 'о', 'об', 'про', 'через',
+  'и', 'но', 'а', 'или', 'либо', 'что', 'чтобы', 'если', 'когда', 'потому',
+]);
+
+function hasIncompleteSentenceEnding(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) {
+    return false;
+  }
+  // A phrase may legitimately end with . ! … etc -- strip that before
+  // looking at the last WORD, since the check is about the word, not the
+  // raw trailing character.
+  const withoutTrailingPunctuation = trimmed.replace(/[.!?…,:;»"')\]]+$/u, '');
+  const words = withoutTrailingPunctuation.split(/\s+/).filter(Boolean);
+  if (words.length === 0) {
+    return false;
+  }
+  const lastWord = words[words.length - 1].toLowerCase();
+  return INCOMPLETE_ENDING_WORDS.has(lastWord);
+}
+
 function validateLockScreenText(text, options = {}) {
   if (typeof text !== 'string') {
     return { ok: false, reason: 'schema' };
@@ -148,6 +182,9 @@ function validateLockScreenText(text, options = {}) {
   if (hasImperativeCommand(trimmed)) {
     return { ok: false, reason: 'imperative_command' };
   }
+  if (hasIncompleteSentenceEnding(trimmed)) {
+    return { ok: false, reason: 'incomplete_sentence' };
+  }
   return { ok: true, reason: null };
 }
 
@@ -155,9 +192,11 @@ module.exports = {
   STOP_PHRASES,
   DEFAULT_MAX_LENGTH,
   DEFAULT_MAX_WORDS,
+  INCOMPLETE_ENDING_WORDS,
   normalizeText,
   hasQuestionMark,
   hasBlockedPhrase,
   hasImperativeCommand,
+  hasIncompleteSentenceEnding,
   validateLockScreenText,
 };
