@@ -127,19 +127,39 @@ function hasImperativeCommand(text) {
 
 // Minimal, non-grammar-checker guard against a phrase cut off mid-thought
 // (production incident: OpenAI returned a phrase ending "...выявить в" --
-// exactly at the schema's maxLength, no server-side truncation involved,
-// see contentGenerator.js's LOCK_SCREEN_TEXT_MAX_LENGTH/OPENAI_SCHEMA_SOFT_MAX_LENGTH
-// comments for the full story). Only checks whether the LAST WORD is one of
-// a small set of Russian words that can never end a sentence on their own
-// (prepositions/conjunctions) -- terminal punctuation is not required (a
-// normal lock-screen phrase without a period is fine), and this is
-// deliberately just a word-list lookup, not real grammar analysis. The word
-// list is Cyrillic-only, so it is inert (never matches) for any other
-// language's output -- same "Russian words applied universally, harmless
-// elsewhere" precedent as STOP_PHRASES above.
+// exactly at the schema's old maxLength, no server-side truncation involved,
+// see contentGenerator.js's LOCK_SCREEN_TEXT_MAX_LENGTH comment for the full
+// story, including why the schema no longer carries any maxLength at all).
+// Only checks whether the LAST WORD is one of a small set of Russian words
+// that can never end a sentence on their own (prepositions/conjunctions) --
+// terminal punctuation is not required (a normal lock-screen phrase without
+// a period is fine), and this is deliberately just a word-list lookup, not
+// real grammar analysis. The word list is Cyrillic-only, so it is inert
+// (never matches) for any other language's output -- same "Russian words
+// applied universally, harmless elsewhere" precedent as STOP_PHRASES above.
+//
+// Deliberately does NOT attempt to catch a truncated WORD (as opposed to a
+// truncated sentence ending on a whole function word) -- e.g. "жела",
+// "окружающ", "уверенн", "десят", "особ", "стале" (all real production
+// fragments from the same incident). A hand-picked suffix/fragment
+// dictionary for that was considered and rejected: Russian orthography has
+// no small, reliable rule that distinguishes a genuine complete word from a
+// truncated stem without unacceptable false positives -- e.g. a naive
+// "never ends in a doubled consonant" rule would reject perfectly normal
+// words like "тонн" (genitive plural of "тонна") or "класс"/"процесс"/
+// "прогресс" (common loanwords ending in "сс"), and a naive "must end in a
+// common vowel" rule would accept "стале" itself, since а/е/о/и are all
+// completely ordinary word-final letters in real Russian. There is no small
+// set of endings that is both broad enough to catch real fragments and safe
+// enough not to reject real words. See generateBatch's system prompt (the
+// ruNaturalnessInstruction in buildSystemPrompt) and the removal of the
+// schema's maxLength for the actual fix to this class of defect -- it is a
+// generation-time problem (the model stopping mid-word under a length
+// target), not something a post-hoc text filter can reliably detect for
+// free-form Russian without a real dictionary.
 const INCOMPLETE_ENDING_WORDS = new Set([
-  'в', 'во', 'на', 'с', 'со', 'к', 'ко', 'для', 'из', 'от', 'до', 'по', 'у', 'о', 'об', 'про', 'через',
-  'и', 'но', 'а', 'или', 'либо', 'что', 'чтобы', 'если', 'когда', 'потому',
+  'в', 'во', 'на', 'с', 'со', 'к', 'ко', 'для', 'из', 'от', 'до', 'по', 'у', 'о', 'об', 'про', 'через', 'при',
+  'и', 'но', 'а', 'или', 'либо', 'что', 'чтобы', 'если', 'когда', 'потому', 'как',
 ]);
 
 function hasIncompleteSentenceEnding(text) {

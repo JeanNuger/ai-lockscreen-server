@@ -29,21 +29,6 @@ const {
 // enforces -- never lowered, never used to slice/truncate a phrase.
 const LOCK_SCREEN_TEXT_MAX_LENGTH = 70;
 
-// Soft target exposed to OpenAI via the response schema's `text.maxLength`
-// (see buildBatchResponseFormat) -- deliberately smaller than the real hard
-// cap above. OpenAI's Structured Outputs strict-mode json_schema does NOT
-// actually enforce `maxLength` for strings (unsupported keyword, confirmed
-// against OpenAI's own docs), so this was never a hard constraint -- but a
-// production incident showed the model still appears to treat the number in
-// the schema as an implicit target while composing text token-by-token, and
-// was observed cutting a sentence off mid-thought exactly at the old value
-// (70). Using a smaller number here keeps the model from aiming at 70 (the
-// real, emergency-only cap) as if it were a normal target; server-side
-// validation still accepts any genuinely completed phrase up to the real
-// 70-char hard cap regardless of this schema hint -- SHORT/MEDIUM/LONG
-// length_hint selection (slotPlanner.js) is unaffected by this constant.
-const OPENAI_SCHEMA_SOFT_MAX_LENGTH = 60;
-
 // `focus` (content-improvement follow-up, req 3 "усилить различие между
 // morning/day/evening/night") is a short, data-only mood/topic steer for the
 // currently-selected, non-fixed-type slots (free_ai_thought/everyday_lifehack/
@@ -1588,7 +1573,28 @@ function buildBatchResponseFormat(name, count) {
               type: 'object',
               properties: {
                 slot_id: { type: 'string' },
-                text: { type: 'string', maxLength: OPENAI_SCHEMA_SOFT_MAX_LENGTH },
+                // No `maxLength` here -- deliberately (see LOCK_SCREEN_TEXT_MAX_LENGTH's
+                // own comment for the full incident history). A prior attempt
+                // used a smaller "soft target" (60) here specifically to stop
+                // the model from treating the real 70-char cap as a target,
+                // but production showed the model instead treated *that*
+                // number as its new target and got cut off mid-WORD at ~56-60
+                // chars across many phrases (e.g. "...хранилища стале",
+                // "...жела", "...окружающ") -- any maxLength value in this
+                // schema, soft or hard, ends up read by the model as a length
+                // goal to aim for rather than a limit to respect, and OpenAI's
+                // Structured Outputs strict mode does not actually enforce it
+                // as a hard decode-time constraint anyway (confirmed against
+                // OpenAI's own docs), so it bought no real safety in exchange
+                // for that risk. The model must now finish its thought with no
+                // length signal in the schema at all; length_hint (short/
+                // medium/long) in the per-slot payload plus buildSystemPrompt's
+                // own prose instructions are the only length guidance it gets.
+                // LOCK_SCREEN_TEXT_MAX_LENGTH (70) remains the real hard cap,
+                // enforced ONLY after generation, server-side, by
+                // isUnusableLockScreenText/rejectionReasonForText -- never in
+                // this schema, and never via slice/substring.
+                text: { type: 'string' },
                 style_id: { type: 'string', enum: STYLE_IDS },
               },
               required: ['slot_id', 'text', 'style_id'],
@@ -1992,7 +1998,7 @@ function buildSystemPrompt(languageCode) {
   // extra sentence must not leak into English/French/etc. generation runs
   // where it would be meaningless.
   const ruNaturalnessInstruction = languageCode === 'ru'
-    ? ' Пиши естественным современным русским языком, а не буквальным переводом английских конструкций и без калек; каждая фраза должна быть самостоятельной, завершённой мыслью.'
+    ? ' Пиши естественным современным русским языком, а не буквальным переводом английских конструкций и без калек; следи за согласованием рода, числа и падежа (например «городские парки», не «городское парки»); каждая фраза должна быть самостоятельной, полностью завершённой мыслью — никогда не обрывай предложение и не обрывай слово посередине ради лимита длины, лучше закончить короче, чем оборвать; не повторяй одно и то же существительное дважды в одной короткой фразе, если это не добавляет смысла.'
     : '';
   return `Ты — добрый, умный и внимательный AI-компаньон на экране блокировки, не quote/trivia/coach-приложение. Давай короткие мысли монологом: 1 предложение, емко, полезно, разнообразно, с теплом и вниманием к дню человека.${ruNaturalnessInstruction}
 Язык: ${languageName}. На каждый slot_id верни ровно одну строку и уникальный style_id.
@@ -2173,7 +2179,6 @@ module.exports = {
     fallbackTextForSlot,
     currentFallbackSetIndex,
     LOCK_SCREEN_TEXT_MAX_LENGTH,
-    OPENAI_SCHEMA_SOFT_MAX_LENGTH,
     buildBatchResponseFormat,
     isUnusableLockScreenText,
   },
