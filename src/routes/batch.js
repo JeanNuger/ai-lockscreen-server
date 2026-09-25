@@ -1,11 +1,11 @@
 const express = require('express');
 const db = require('../db');
 const { WINDOWS } = require('../constants');
-const { generateBatch } = require('../contentGenerator');
+const { generateBatch, resolveLocalDateContext } = require('../contentGenerator');
 const { consumePendingMessages } = require('../adminMessages');
 const { parseDeviceSignals } = require('../deviceSignals');
 const { computePhoneTrends, recordPhoneSignalSample } = require('../phoneAnalytics');
-const { resolveWeather } = require('../weather');
+const { resolveWeather, resolveGeolocation } = require('../weather');
 const { getOrGenerateMorningPack } = require('../morningPack');
 
 const router = express.Router();
@@ -38,7 +38,12 @@ function cleanLocalDate(value) {
   return cleaned && /^\d{4}-\d{2}-\d{2}$/.test(cleaned) ? cleaned : null;
 }
 
-function finalizeBatchTrace(trace, batchId) {
+// requestMs (optional): total wall-clock time for the whole /batch request
+// (batch generation + pack generation running concurrently, DB writes, etc.)
+// -- observation-only, see the route handler's own requestStartMs comment.
+// Distinct from trace.meta.generation_ms (contentGenerator.js), which only
+// covers the ordinary batch's own generateBatch() call.
+function finalizeBatchTrace(trace, batchId, requestMs) {
   if (!trace || typeof trace !== 'object') {
     return null;
   }
@@ -48,6 +53,7 @@ function finalizeBatchTrace(trace, batchId) {
       meta: {
         ...(trace.meta || {}),
         batch_id: batchId,
+        request_ms: typeof requestMs === 'number' ? requestMs : null,
       },
     };
     return JSON.stringify(finalizedTrace);
@@ -91,6 +97,12 @@ function logBatchTrace(traceJson) {
 // full design. Without that param, the response is byte-identical to before
 // this feature existed — no batch_id, no morning_pack key at all.
 router.get('/batch', async (req, res, next) => {
+  // Observation-only: total wall-clock time for the whole request, logged
+  // into [batch-trace]'s meta.request_ms below -- covers everything (device
+  // lookup, weather/geo resolution, concurrent batch+pack generation, DB
+  // writes), not just generateBatch's own work (see contentGenerator.js's
+  // separate meta.generation_ms for that).
+  const requestStartMs = Date.now();
   try {
     const { device_id, window } = req.query;
 
@@ -102,7 +114,6 @@ router.get('/batch', async (req, res, next) => {
     }
 
     const signals = parseDeviceSignals(req.query);
-    const weather = await resolveWeather(req.ip);
 
     const requestTimezone = cleanOptionalString(req.query.timezone);
     const requestLocalDate = cleanLocalDate(req.query.local_date);
@@ -116,8 +127,37 @@ router.get('/batch', async (req, res, next) => {
     const supportsMorningPack = req.query.supports_morning_pack === '1';
     const packDateHeld = supportsMorningPack ? cleanLocalDate(req.query.pack_date_held) : null;
 
+    // Computed UP FRONT, before either generateBatch or the pack's own
+    // generation starts — resolveLocalDateContext only needs device.timezone
+    // (already resolved above) + the optional client-forced local_date, not
+    // anything generateBatch computes, so the pack's target_date can be
+    // known without waiting on generateBatch's result. This is what makes
+    // the Promise.all below possible: previously the pack was generated
+    // AFTER generateBatch finished, sequentially, reading dateContext off
+    // its return value.
+    const { dateContext } = resolveLocalDateContext(device.timezone, requestLocalDate);
+
+    // Geolocation is resolved ONCE per request and shared between the
+    // current-weather lookup (resolveWeather, needed by the ordinary batch)
+    // and the day-forecast lookup inside getOrGenerateMorningPack
+    // (resolveWeatherForecast, needed by the pack) — see weather.js's
+    // resolveGeolocation. Without this, two concurrent branches each doing
+    // their own IP geolocation lookup would double the ipwho.is calls for
+    // every request.
+    const geo = await resolveGeolocation(req.ip);
+    const weather = await resolveWeather(req.ip, geo);
+
     const phoneTrends = computePhoneTrends(device, window, signals);
-    const { phrases, source, context, trace, dateContext } = await generateBatch(device, window, signals, weather, phoneTrends, {
+
+    // Batch generation and pack generation now run CONCURRENTLY rather than
+    // sequentially — previously the pack's own OpenAI call(s) started only
+    // after generateBatch's had fully finished, in the same request, which
+    // could chain up to 4 OpenAI calls back-to-back (2 each with repair) and
+    // risk a client-side timeout. A pack failure/timeout must never delay or
+    // break the ordinary batch response: the pack promise's own rejection is
+    // caught and turned into a resolved `null` outcome right here, so
+    // Promise.all only ever waits on two promises that both always resolve.
+    const batchPromise = generateBatch(device, window, signals, weather, phoneTrends, {
       localDate: requestLocalDate,
       // The 7 morning-pack types are excluded from ordinary batch planning in
       // every window once the client supports the pack — they're delivered
@@ -126,6 +166,28 @@ router.get('/batch', async (req, res, next) => {
       // the ordinary response stays byte-identical for old clients.
       excludeMorningPackTypes: supportsMorningPack,
     });
+
+    const packPromise = supportsMorningPack
+      ? getOrGenerateMorningPack({
+        device,
+        window,
+        dateContext,
+        signals,
+        weather,
+        ip: req.ip,
+        packDateHeld,
+        geo,
+      }).catch((err) => {
+        // Defense in depth on top of getOrGenerateMorningPack's own
+        // try/catch — a pack failure must NEVER break the ordinary batch
+        // response computed concurrently below.
+        console.error(`MORNING_PACK_ROUTE_ERROR error=${err.name || 'Error'}`);
+        return null;
+      })
+      : Promise.resolve(null);
+
+    const [{ phrases, source, context, trace }, morningPack] = await Promise.all([batchPromise, packPromise]);
+
     recordPhoneSignalSample(device, window, signals);
     const adminPhrases = consumePendingMessages(device_id);
     const combinedPhrases = [...phrases, ...adminPhrases];
@@ -137,7 +199,7 @@ router.get('/batch', async (req, res, next) => {
       source,
       context || null
     );
-    const traceJson = finalizeBatchTrace(trace, insertResult.lastInsertRowid);
+    const traceJson = finalizeBatchTrace(trace, insertResult.lastInsertRowid, Date.now() - requestStartMs);
     if (traceJson) {
       updateBatchTraceStatement.run(traceJson, insertResult.lastInsertRowid);
       logBatchTrace(traceJson);
@@ -146,24 +208,6 @@ router.get('/batch', async (req, res, next) => {
     const responseBody = { phrases: combinedPhrases };
     if (supportsMorningPack) {
       responseBody.batch_id = insertResult.lastInsertRowid;
-      let morningPack = null;
-      try {
-        morningPack = await getOrGenerateMorningPack({
-          device,
-          window,
-          dateContext,
-          signals,
-          weather,
-          ip: req.ip,
-          packDateHeld,
-        });
-      } catch (err) {
-        // Defense in depth on top of getOrGenerateMorningPack's own
-        // try/catch — a pack failure must NEVER break the ordinary batch
-        // response that has already been computed and stored above.
-        console.error(`MORNING_PACK_ROUTE_ERROR error=${err.name || 'Error'}`);
-        morningPack = null;
-      }
       responseBody.morning_pack = morningPack;
     }
 

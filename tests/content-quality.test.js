@@ -62,14 +62,21 @@ function normalizedTexts(items) {
   return items.map((item) => item.text.trim().replace(/\s+/g, ' ').toLowerCase());
 }
 
-function assertFinalBatch(items) {
-  assert.strictEqual(items.length, BATCH_SIZE, 'final batch must be exactly 12');
-  assert.strictEqual(new Set(normalizedTexts(items)).size, BATCH_SIZE, 'final texts must be unique');
+// expectedLength defaults to BATCH_SIZE (the normal case: every direct
+// assembleBatchFromGeneratedPhrases call in this file uses the old
+// fallback-fill path, always exactly 12) -- but a real generateBatch() run
+// through the repair flow can now legitimately come back shorter than 12: a
+// slot still rejected after the one repair round is dropped, not
+// generic-filled (see contentGenerator.js's dropMissing/B5). Callers that
+// exercise that exact scenario pass the real expected count explicitly.
+function assertFinalBatch(items, expectedLength = BATCH_SIZE) {
+  assert.strictEqual(items.length, expectedLength, `final batch must be exactly ${expectedLength}`);
+  assert.strictEqual(new Set(normalizedTexts(items)).size, expectedLength, 'final texts must be unique');
   for (const item of items) {
     assert(item.text && item.text.length <= 70, 'final text must be nonempty and within max length');
     assert(STYLE_IDS.includes(item.style_id), `style_id must be valid: ${item.style_id}`);
   }
-  assert.strictEqual(new Set(items.map((item) => item.style_id)).size, BATCH_SIZE, 'final styles must be unique');
+  assert.strictEqual(new Set(items.map((item) => item.style_id)).size, expectedLength, 'final styles must be unique');
 }
 
 function captureConsole(callback) {
@@ -668,7 +675,11 @@ async function main() {
 
     assert.strictEqual(memoryOpenAiCallCount, 2, 'one rejected slot should trigger exactly one targeted repair OpenAI call');
     assert.strictEqual(memoryResult.source, 'openai');
-    assertFinalBatch(memoryResult.phrases);
+    // The mock's repair handler always answers the (single) rejected slot
+    // with the same still-a-question text, so it stays rejected after the
+    // one repair round -- under B5 that slot is now dropped rather than
+    // generic-filled, so the final batch is BATCH_SIZE - 1, not BATCH_SIZE.
+    assertFinalBatch(memoryResult.phrases, BATCH_SIZE - 1);
     const memoryRows = db.prepare(`
       SELECT content_key FROM device_content_memory
       WHERE device_id = ? AND content_key != ?

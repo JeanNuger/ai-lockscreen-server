@@ -59,7 +59,7 @@ function rowToPackResult(row) {
 // than ever affecting the ordinary batch response this is called alongside
 // (see routes/batch.js, which also wraps this call in its own try/catch as
 // defense in depth).
-async function getOrGenerateMorningPack({ device, window, dateContext, signals, weather, ip, packDateHeld }) {
+async function getOrGenerateMorningPack({ device, window, dateContext, signals, weather, ip, packDateHeld, geo }) {
   try {
     const targetDate = computeTargetDate(window, dateContext);
     if (!targetDate) {
@@ -76,7 +76,14 @@ async function getOrGenerateMorningPack({ device, window, dateContext, signals, 
       return rowToPackResult(existing);
     }
 
-    const weatherForecast = await resolveWeatherForecast(ip, targetDate);
+    // geo (optional, from routes/batch.js's single shared resolveGeolocation
+    // call for this request): reused here instead of resolveWeatherForecast
+    // making its own second ipwho.is call. If the caller didn't pass it
+    // (e.g. a direct test call), resolveWeatherForecast falls back to
+    // resolving geolocation itself, same as before.
+    const weatherForecast = geo !== undefined
+      ? await resolveWeatherForecast(ip, targetDate, geo)
+      : await resolveWeatherForecast(ip, targetDate);
     const { phrases, trace } = await generateMorningPack(device, targetDate, signals, weather, weatherForecast);
 
     if (!Array.isArray(phrases) || phrases.length === 0) {

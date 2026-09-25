@@ -80,10 +80,21 @@ async function withMockedBatchRoute(generateBatchImpl, callback) {
   delete require.cache[require.resolve('../src/routes/batch')];
   Module._load = function patchedLoad(request, parent, isMain) {
     if (request === '../contentGenerator') {
-      return { generateBatch: generateBatchImpl };
+      // resolveLocalDateContext is also required directly by routes/batch.js
+      // (used to compute the morning pack's target_date up front, before
+      // generateBatch runs) -- the real implementation is fine to reuse here
+      // since this test module doesn't touch dates itself.
+      return {
+        generateBatch: generateBatchImpl,
+        resolveLocalDateContext: require('../src/contentGenerator').resolveLocalDateContext,
+      };
     }
     if (request === '../weather') {
-      return { resolveWeather: async () => null };
+      // resolveGeolocation is also required directly by routes/batch.js now
+      // (resolved once per request and shared with getOrGenerateMorningPack)
+      // -- mocked to null here, same "no geo" behavior a private/local test
+      // IP would already produce.
+      return { resolveWeather: async () => null, resolveGeolocation: async () => null };
     }
     if (request === '../adminMessages') {
       return { consumePendingMessages: () => [] };

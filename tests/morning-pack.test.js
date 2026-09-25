@@ -433,6 +433,142 @@ async function testOrdinaryBatchUnaffectedWithoutFlag() {
   }
 }
 
+// Pack repair must receive original_text/rejection_reason per rejected slot
+// (same B3 fields as the ordinary batch path, tests/production-reject-repair-drop.test.js's
+// own style) -- exercises generateMorningPack's regenerateRejectedSlots call,
+// which must now be passed assembly.rejectedDetails, not the old bare-slot-id
+// call the pack used before this task.
+async function testPackRepairReceivesOriginalTextAndReason() {
+  const bankDate = getBankDateString();
+  const targetDate = '2026-10-01';
+  insertBankItem(targetDate, 'holiday', 'Repair Test Festival celebrates community.');
+  insertBankItem(targetDate, 'on_this_day', 'In 1988 a local landmark was completed.');
+  insertBankItem(bankDate, 'idiom', 'Actions speak louder than words, meaning what you do matters more than what you say.');
+
+  const device = insertDevice('pack-device-repair-payload');
+  const signals = { system_language: 'en', region: 'US' };
+  const weather = { countryCode: 'US' };
+  const weatherForecast = { countryCode: 'US', city: 'Metropolis', temperatureC: 20, description: 'clear' };
+
+  let repairPayload = null;
+  const mock = installOpenAiMock((payload, schemaName, callIndex) => {
+    if (schemaName === 'lock_screen_repair') {
+      repairPayload = payload;
+      return payload.slots.map((slot, index) => mockPhrase(slot, index, genericValidPhrase(slot, index)));
+    }
+    // First pass: word_learning is always an invalid bare question, forcing
+    // a repair round for that one slot.
+    return payload.slots.map((slot, index) => {
+      if (slot.type === 'word_learning') {
+        return mockPhrase(slot, index, 'Is this even a real phrase?');
+      }
+      return mockPhrase(slot, index, genericValidPhrase(slot, index));
+    });
+  });
+
+  try {
+    const { phrases } = await generateMorningPack(device, targetDate, signals, weather, weatherForecast);
+
+    assert(repairPayload, 'a repair call must have been made for the rejected word_learning slot');
+    const repairedSlot = repairPayload.slots.find((slot) => slot.type === 'word_learning');
+    assert(repairedSlot, 'word_learning must be among the repair slots');
+    assert.strictEqual(
+      repairedSlot.original_text,
+      'Is this even a real phrase?',
+      'repair payload must carry the exact rejected original_text'
+    );
+    assert(
+      typeof repairedSlot.rejection_reason === 'string' && repairedSlot.rejection_reason.length > 0,
+      'repair payload must carry a non-empty rejection_reason'
+    );
+    assert.strictEqual(
+      repairedSlot.max_length_chars,
+      contentTest.LOCK_SCREEN_TEXT_MAX_LENGTH,
+      'repair payload must carry the real max_length_chars'
+    );
+
+    const types = phrases.map((p) => p.type);
+    assert(types.includes('word_learning'), 'word_learning must be present after a successful repair');
+  } finally {
+    mock.restore();
+  }
+}
+
+// Weather bands: the full Open-Meteo forecast (precipitation_probability_max,
+// temperature_2m_min, uv_index_max), not just temperature_2m_max/weathercode,
+// must be threaded into the weather_lifehack pack slot's facts as bands.
+async function testWeatherForecastBandsInPackFacts() {
+  const bankDate = getBankDateString();
+  const signals = { system_language: 'en', region: 'US' };
+  const weather = { countryCode: 'US' };
+
+  const mock = installOpenAiMock((payload) => payload.slots.map((slot, index) => mockPhrase(slot, index, genericValidPhrase(slot, index))));
+  try {
+    // High rain chance -> rain_chance: 'high' (>60% threshold).
+    {
+      const targetDate = '2026-11-01';
+      const weatherForecast = {
+        countryCode: 'US',
+        city: 'Raintown',
+        temperatureC: 15,
+        temperatureMinC: 8,
+        precipitationProbabilityMax: 85,
+        uvIndexMax: 2,
+        description: 'rain',
+      };
+      await generateMorningPack(device_for_weather_test(), targetDate, signals, weather, weatherForecast);
+      // Pull facts from what was actually sent to OpenAI, same technique as
+      // testPackOrderFactsAndDrop's holiday/history fact assertions.
+      const firstPassCall = mock.calls.filter((c) => c.schemaName === 'lock_screen_morning_pack').slice(-1)[0];
+      const weatherSlot = firstPassCall.payload.slots.find((s) => s.type === 'weather_lifehack');
+      assert(weatherSlot, 'weather_lifehack slot must be planned when a forecast is available');
+      assert.strictEqual(weatherSlot.facts.rain_chance, 'high', 'precipitation_probability_max=85 must map to rain_chance=high');
+      assert.strictEqual(weatherSlot.facts.morning_temp_band, 'cold', 'temperature_2m_min=8 must map to morning_temp_band=cold');
+    }
+
+    // High UV, low rain -> uv_level: 'high', rain_chance: 'low'.
+    {
+      const targetDate = '2026-11-02';
+      const weatherForecast = {
+        countryCode: 'US',
+        city: 'Sunnyside',
+        temperatureC: 28,
+        temperatureMinC: 22,
+        precipitationProbabilityMax: 5,
+        uvIndexMax: 9,
+        description: 'clear',
+      };
+      await generateMorningPack(device_for_weather_test(), targetDate, signals, weather, weatherForecast);
+      const firstPassCall = mock.calls.filter((c) => c.schemaName === 'lock_screen_morning_pack').slice(-1)[0];
+      const weatherSlot = firstPassCall.payload.slots.find((s) => s.type === 'weather_lifehack');
+      assert(weatherSlot, 'weather_lifehack slot must be planned when a forecast is available');
+      assert.strictEqual(weatherSlot.facts.uv_level, 'high', 'uv_index_max=9 must map to uv_level=high');
+      assert.strictEqual(weatherSlot.facts.rain_chance, 'low', 'precipitation_probability_max=5 must map to rain_chance=low');
+      assert(
+        weatherSlot.constraints.includes('suggest_sunglasses_or_sun_protection'),
+        'high UV with low rain chance must add the sun-protection constraint'
+      );
+    }
+
+    // No forecast at all -> weather_lifehack dropped entirely (unchanged rule,
+    // re-verified after the geolocation-sharing/band refactor).
+    {
+      const targetDate = '2026-11-03';
+      const { phrases } = await generateMorningPack(device_for_weather_test(), targetDate, signals, weather, null);
+      const types = phrases.map((p) => p.type);
+      assert(!types.includes('weather_lifehack'), 'weather_lifehack must still be dropped when no forecast is available at all');
+    }
+  } finally {
+    mock.restore();
+  }
+}
+
+let weatherTestDeviceCounter = 0;
+function device_for_weather_test() {
+  weatherTestDeviceCounter += 1;
+  return insertDevice(`pack-device-weather-bands-${weatherTestDeviceCounter}`);
+}
+
 async function main() {
   await testTargetDateComputation();
   await testPackOrderFactsAndDrop();
@@ -443,6 +579,8 @@ async function main() {
   await testPackFailureNeverBreaksOrdinaryBatch();
   await testExcludeMorningPackTypesFromOrdinaryBatch();
   await testOrdinaryBatchUnaffectedWithoutFlag();
+  await testPackRepairReceivesOriginalTextAndReason();
+  await testWeatherForecastBandsInPackFacts();
 }
 
 main()

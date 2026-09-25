@@ -83,21 +83,44 @@ function isPrivateOrLocalIp(ip) {
   );
 }
 
-/**
- * @param {string} ip - the requesting client's IP (req.ip, with Express
- *   'trust proxy' configured so this is the real client, not the reverse proxy)
- * @returns {Promise<{countryCode: string|null, city: string|null, temperatureC?: number, description?: string|null} | null>}
- */
-async function resolveWeather(ip) {
+// Shared IP -> geolocation lookup (ipwho.is), factored out so a single
+// request can resolve geolocation ONCE and reuse it for both the
+// current-weather call (resolveWeather) and the day-forecast call
+// (resolveWeatherForecast) below -- see routes/batch.js, which resolves this
+// once and threads it into both, instead of each making its own ipwho.is
+// call. Returns the raw ipwho.is response object (success/country_code/
+// city/latitude/longitude), or null if the IP is private/local or the
+// lookup failed.
+async function resolveGeolocation(ip) {
   if (isPrivateOrLocalIp(ip)) {
     return null;
   }
-
   const geo = await fetchWithTimeout(
     `https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country_code,city,latitude,longitude`,
     IPWHOIS_TIMEOUT_MS
   );
   if (!geo || geo.success !== true) {
+    return null;
+  }
+  return geo;
+}
+
+/**
+ * @param {string} ip - the requesting client's IP (req.ip, with Express
+ *   'trust proxy' configured so this is the real client, not the reverse proxy)
+ * @param {object} [precomputedGeo] - an already-resolved ipwho.is geolocation
+ *   object (from resolveGeolocation), reused instead of making a second
+ *   ipwho.is call. Omit this parameter entirely (not even `undefined`) to
+ *   have this function resolve geolocation itself, same as before.
+ * @returns {Promise<{countryCode: string|null, city: string|null, temperatureC?: number, description?: string|null} | null>}
+ */
+async function resolveWeather(ip, precomputedGeo) {
+  if (isPrivateOrLocalIp(ip)) {
+    return null;
+  }
+
+  const geo = arguments.length >= 2 ? precomputedGeo : await resolveGeolocation(ip);
+  if (!geo) {
     return null;
   }
   const countryCode = typeof geo.country_code === 'string' && geo.country_code ? geo.country_code : null;
@@ -155,18 +178,19 @@ function pruneExpiredForecastCacheEntries(now) {
 /**
  * @param {string} ip - the requesting client's IP (see resolveWeather)
  * @param {string} targetDate - YYYY-MM-DD, the calendar date to forecast
- * @returns {Promise<{countryCode: string|null, city: string|null, temperatureC?: number, description?: string|null} | null>}
+ * @param {object} [precomputedGeo] - an already-resolved ipwho.is geolocation
+ *   object (from resolveGeolocation), reused instead of making a second
+ *   ipwho.is call for the same request. Omit entirely to resolve it here,
+ *   same as before.
+ * @returns {Promise<{countryCode: string|null, city: string|null, temperatureC?: number, description?: string|null, precipitationProbabilityMax?: number, temperatureMinC?: number, uvIndexMax?: number} | null>}
  */
-async function resolveWeatherForecast(ip, targetDate) {
+async function resolveWeatherForecast(ip, targetDate, precomputedGeo) {
   if (isPrivateOrLocalIp(ip) || typeof targetDate !== 'string' || !targetDate) {
     return null;
   }
 
-  const geo = await fetchWithTimeout(
-    `https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country_code,city,latitude,longitude`,
-    IPWHOIS_TIMEOUT_MS
-  );
-  if (!geo || geo.success !== true) {
+  const geo = arguments.length >= 3 ? precomputedGeo : await resolveGeolocation(ip);
+  if (!geo) {
     return null;
   }
   const countryCode = typeof geo.country_code === 'string' && geo.country_code ? geo.country_code : null;
@@ -193,6 +217,9 @@ async function resolveWeatherForecast(ip, targetDate) {
   const times = daily && Array.isArray(daily.time) ? daily.time : null;
   const dayIndex = times ? times.indexOf(targetDate) : -1;
   const tempMaxArr = daily && Array.isArray(daily.temperature_2m_max) ? daily.temperature_2m_max : null;
+  const tempMinArr = daily && Array.isArray(daily.temperature_2m_min) ? daily.temperature_2m_min : null;
+  const precipArr = daily && Array.isArray(daily.precipitation_probability_max) ? daily.precipitation_probability_max : null;
+  const uvArr = daily && Array.isArray(daily.uv_index_max) ? daily.uv_index_max : null;
   const codeArr = daily && Array.isArray(daily.weathercode) ? daily.weathercode : null;
 
   if (dayIndex === -1 || !tempMaxArr || typeof tempMaxArr[dayIndex] !== 'number') {
@@ -205,13 +232,29 @@ async function resolveWeatherForecast(ip, targetDate) {
   // (umbrella/sunglasses/warm clothes), not a single instant, and this reuses
   // the exact same temperatureBand/weatherConditionLean shaping as the
   // current-weather path (see slotPlanner.js), which only ever takes a single
-  // temperatureC + description pair.
+  // temperatureC + description pair. precipitation_probability_max,
+  // temperature_2m_min and uv_index_max were already being fetched (see the
+  // `daily=` query param above) but previously discarded -- now threaded
+  // through so slotPlanner.js's planMorningPack can turn them into the
+  // rain_chance/uv_level/morning_temp_band bands for the weather_lifehack
+  // pack slot's facts. Each is left undefined (not present on the returned
+  // object) when Open-Meteo didn't return a number for it, same
+  // "degrade gracefully, don't fabricate" convention as temperatureC/description.
   const value = {
     temperatureC: tempMaxArr[dayIndex],
     description: (codeArr && WEATHER_CODE_DESCRIPTIONS[codeArr[dayIndex]]) || null,
   };
+  if (tempMinArr && typeof tempMinArr[dayIndex] === 'number') {
+    value.temperatureMinC = tempMinArr[dayIndex];
+  }
+  if (precipArr && typeof precipArr[dayIndex] === 'number') {
+    value.precipitationProbabilityMax = precipArr[dayIndex];
+  }
+  if (uvArr && typeof uvArr[dayIndex] === 'number') {
+    value.uvIndexMax = uvArr[dayIndex];
+  }
   forecastCache.set(cacheKey, { at: now, value });
   return { ...value, countryCode, city };
 }
 
-module.exports = { resolveWeather, resolveWeatherForecast };
+module.exports = { resolveWeather, resolveWeatherForecast, resolveGeolocation };
