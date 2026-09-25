@@ -1190,7 +1190,10 @@ function traceResultsFromCollected(collected, slots) {
         slot_id: slot.slot_id,
         status: 'rejected',
         text: rejected.text,
-        reason: rejected.reason,
+        // The exact sub-reason with numbers (e.g. "too_long:93>70") when one
+        // was computed, not just the coarse "basic_quality" bucket -- see
+        // collectUsablePhrases' reject() and rejectionReasonForText.
+        reason: rejected.detail || rejected.reason,
       };
     }
     return {
@@ -1246,8 +1249,8 @@ function isGenericBadLockScreenPhrase(text) {
   ].includes(normalized);
 }
 
-function isUnusableLockScreenText(text) {
-  const filterResult = validateLockScreenText(text, { maxLength: LOCK_SCREEN_TEXT_MAX_LENGTH });
+function isUnusableLockScreenText(text, slotType = null) {
+  const filterResult = validateLockScreenText(text, { maxLength: LOCK_SCREEN_TEXT_MAX_LENGTH, slotType });
   return (
     !filterResult.ok ||
     hasQuestionShapeWithoutMark(text) ||
@@ -1340,16 +1343,23 @@ function hasCoachingOrDirectiveShape(text, languageCode) {
   return patterns.some((pattern) => pattern.test(text));
 }
 
-function rejectionReasonForText(text, languageCode, validationContext = {}) {
-  const filterResult = validateLockScreenText(text, { maxLength: LOCK_SCREEN_TEXT_MAX_LENGTH });
-  if (!filterResult.ok) return filterResult.reason;
-  if (hasQuestionShapeWithoutMark(text)) return 'question';
-  if (isGenericBadLockScreenPhrase(text)) return 'generic';
-  if (hasInvalidRelativeDateClaim(text, languageCode, validationContext)) return 'date_claim';
-  if (hasExactTelemetryEcho(text, languageCode, validationContext)) return 'telemetry_echo';
-  if (hasUnsupportedContextClaim(text, languageCode, validationContext)) return 'unsupported_context';
-  if (hasCoachingOrDirectiveShape(text, languageCode)) return 'coaching';
-  return null;
+// Returns { reason, detail } (both null if the text passes), never a bare
+// string -- `reason` is the coarse bucket used for aggregate counts
+// (rejectionReasons in collectUsablePhrases, unchanged from before), `detail`
+// is the exact sub-reason with numbers where the check computed one (e.g.
+// "too_long:93>70", "blocked_phrase:пусть") so the batch trace doesn't
+// collapse every basic_quality rejection into the same opaque label. See
+// textFilter.js's validateLockScreenText for where `detail` is computed.
+function rejectionReasonForText(text, languageCode, validationContext = {}, slotType = null) {
+  const filterResult = validateLockScreenText(text, { maxLength: LOCK_SCREEN_TEXT_MAX_LENGTH, slotType });
+  if (!filterResult.ok) return { reason: filterResult.reason, detail: filterResult.detail || filterResult.reason };
+  if (hasQuestionShapeWithoutMark(text)) return { reason: 'question', detail: 'question_shape_without_mark' };
+  if (isGenericBadLockScreenPhrase(text)) return { reason: 'generic', detail: 'generic' };
+  if (hasInvalidRelativeDateClaim(text, languageCode, validationContext)) return { reason: 'date_claim', detail: 'date_claim' };
+  if (hasExactTelemetryEcho(text, languageCode, validationContext)) return { reason: 'telemetry_echo', detail: 'telemetry_echo' };
+  if (hasUnsupportedContextClaim(text, languageCode, validationContext)) return { reason: 'unsupported_context', detail: 'unsupported_context' };
+  if (hasCoachingOrDirectiveShape(text, languageCode)) return { reason: 'coaching', detail: 'coaching' };
+  return { reason: null, detail: null };
 }
 
 function incrementReason(reasonCounts, reason) {
@@ -1369,9 +1379,29 @@ const MORNING_ANCHOR_TYPES = new Set([
   'daily_numerology',
 ]);
 
-function collectUsablePhrases(phrases, languageCode, validationContext = {}, expectedSlotIds = null) {
+// expectedSlots may be an array of slot_id strings (legacy shape) or an
+// array of slot objects ({slot_id, type, ...}) -- accepting both means every
+// existing caller/test that passed plain slot_id strings keeps working
+// unchanged, while callers that pass the real slot objects (both production
+// call sites now do, see assembleBatchFromGeneratedPhrases/
+// regenerateRejectedSlots) additionally get per-slot `type` threaded down to
+// rejectionReasonForText -- needed for the goodnight_care blocked-phrase
+// exemption (see textFilter.js's GOODNIGHT_CARE_EXEMPT_STOP_PHRASES).
+function collectUsablePhrases(phrases, languageCode, validationContext = {}, expectedSlots = null) {
   if (!Array.isArray(phrases)) {
     return null;
+  }
+
+  const expectedSlotIds = Array.isArray(expectedSlots)
+    ? expectedSlots.map((slot) => (typeof slot === 'string' ? slot : slot && slot.slot_id))
+    : null;
+  const slotTypeById = new Map();
+  if (Array.isArray(expectedSlots)) {
+    for (const slot of expectedSlots) {
+      if (slot && typeof slot === 'object' && typeof slot.slot_id === 'string') {
+        slotTypeById.set(slot.slot_id, slot.type || null);
+      }
+    }
   }
 
   const seenTexts = new Set();
@@ -1382,13 +1412,17 @@ function collectUsablePhrases(phrases, languageCode, validationContext = {}, exp
   const rejectedDetails = [];
   let rejectedCount = 0;
   const rejectionReasons = {};
-  const reject = (reason, slotId, text) => {
+  const reject = (reason, slotId, text, detail = null) => {
     rejectedCount += 1;
     incrementReason(rejectionReasons, reason);
     if (typeof slotId === 'string') {
       rejectedDetails.push({
         slot_id: slotId,
         reason,
+        // Exact sub-reason with numbers (e.g. "too_long:93>70") where one was
+        // computed -- falls back to `reason` itself for checks that don't
+        // have extra numbers to report (duplicate/slot_id/schema/language).
+        detail: detail || reason,
         text: typeof text === 'string' ? text : null,
       });
     }
@@ -1409,9 +1443,10 @@ function collectUsablePhrases(phrases, languageCode, validationContext = {}, exp
       seenSlotIds.add(phrase.slot_id);
     }
     const text = phrase.text.trim();
-    const reason = rejectionReasonForText(text, languageCode, validationContext);
+    const slotType = typeof phrase.slot_id === 'string' ? (slotTypeById.get(phrase.slot_id) || null) : null;
+    const { reason, detail } = rejectionReasonForText(text, languageCode, validationContext, slotType);
     if (reason) {
-      reject(reason, phrase.slot_id, text);
+      reject(reason, phrase.slot_id, text, detail);
       continue;
     }
     if (languageCode && !isValidLanguageText(text, languageCode)) {
@@ -1474,14 +1509,32 @@ function assignUniqueStyleIds(items, styleTrace = null) {
   });
 }
 
-function validateFinalBatch(items) {
-  if (!Array.isArray(items) || items.length !== BATCH_SIZE) {
+// Accepts 1..BATCH_SIZE items, not only exactly BATCH_SIZE -- a slot still
+// rejected after the one repair round is now dropped from the batch rather
+// than papered over with generic FALLBACK_PHRASES content (see
+// assembleByExpectedSlotOrder's dropMissing param), so a real successful
+// batch can legitimately come up short. Whole-batch fallback (buildFallbackBatch)
+// is the only path left for "nothing usable at all" (0 items), handled by
+// the caller treating a null assembleByExpectedSlotOrder result as failure
+// before this function is even reached in that case.
+// slotTypeById (optional Map<slot_id, type>) is threaded into
+// isUnusableLockScreenText so the goodnight_care blocked-phrase exemption
+// (see textFilter.js) still applies on this final re-check, not just on
+// collectUsablePhrases' first-pass check -- otherwise an accepted
+// goodnight_care phrase using "пусть" would pass collectUsablePhrases only
+// to be rejected again right here, with no slot type available to explain
+// why it should be allowed.
+function validateFinalBatch(items, slotTypeById = null) {
+  if (!Array.isArray(items) || items.length < 1 || items.length > BATCH_SIZE) {
     return false;
   }
   const seenTexts = new Set();
   const seenStyles = new Set();
   for (const item of items) {
-    if (!item || typeof item.text !== 'string' || isUnusableLockScreenText(item.text)) {
+    const slotType = slotTypeById && item && typeof item.slot_id === 'string'
+      ? slotTypeById.get(item.slot_id) || null
+      : null;
+    if (!item || typeof item.text !== 'string' || isUnusableLockScreenText(item.text, slotType)) {
       return false;
     }
     if (!STYLE_IDS.includes(item.style_id) || seenStyles.has(item.style_id)) {
@@ -1820,7 +1873,16 @@ function pickFallbackTextForSlot(slot, languageCode, seenTexts, fallbackTexts, v
   return null;
 }
 
-function assembleByExpectedSlotOrder(generated, languageCode, expectedSlots, validationContext = {}, rejectedDetails = [], traceParts = null) {
+// dropMissing: see assembleBatchFromGeneratedPhrases's own comment on the
+// param -- when true, a slot with no accepted generated text is simply
+// omitted from the result (no FALLBACK_PHRASES draw, no fallback trace
+// entry) instead of going through pickFallbackTextForSlot below. The result
+// can then be anywhere from 0 to expectedSlots.length items long; the caller
+// (assembleBatchFromGeneratedPhrases) treats 0 as "nothing usable" (falls
+// through to null, same as any other assembly failure) and anything else as
+// a valid, possibly-shorter-than-BATCH_SIZE batch (see validateFinalBatch's
+// updated 1..BATCH_SIZE range check).
+function assembleByExpectedSlotOrder(generated, languageCode, expectedSlots, validationContext = {}, rejectedDetails = [], traceParts = null, dropMissing = false) {
   const fallbackPhrases = activeFallbackPhrases(languageCode);
   const shuffledFallback = [...fallbackPhrases].sort(() => Math.random() - 0.5);
   const generatedBySlot = new Map(generated.map((item) => [item.slot_id, item]));
@@ -1832,6 +1894,9 @@ function assembleByExpectedSlotOrder(generated, languageCode, expectedSlots, val
     const generatedItem = generatedBySlot.get(slot.slot_id);
     if (generatedItem) {
       return generatedItem;
+    }
+    if (dropMissing) {
+      return null;
     }
     const fallbackText = pickFallbackTextForSlot(
       slot,
@@ -1848,6 +1913,14 @@ function assembleByExpectedSlotOrder(generated, languageCode, expectedSlots, val
     seenTexts.add(normalizeTextForDedupe(fallbackText));
     return { slot_id: slot.slot_id, text: fallbackText, style_id: null };
   });
+
+  if (dropMissing) {
+    const usable = result.filter(Boolean);
+    if (usable.length === 0) {
+      return null;
+    }
+    return assignUniqueStyleIds(usable, traceParts ? traceParts.styleDedupe : null);
+  }
 
   if (result.some((item) => !item)) {
     return null;
@@ -1882,9 +1955,16 @@ function fillWithFallbackPhrases(generated, languageCode, traceParts = null) {
   return assignUniqueStyleIds(result, traceParts ? traceParts.styleDedupe : null);
 }
 
-function assembleBatchFromGeneratedPhrases(phrases, languageCode, validationContext = {}, expectedSlots = null, traceParts = null) {
-  const expectedSlotIds = Array.isArray(expectedSlots) ? expectedSlots.map((slot) => slot.slot_id) : null;
-  const collected = collectUsablePhrases(phrases, languageCode, validationContext, expectedSlotIds);
+// dropMissing (default false, so every existing direct caller/test keeps the
+// old fallback-fill behavior unchanged): when true, a slot that has no
+// accepted generated text is left OUT of the assembled batch entirely
+// instead of being papered over with FALLBACK_PHRASES content -- see
+// generateBatch's two production call sites, which both now pass true. Only
+// the real runtime flow opts into this; direct unit tests of this function
+// (content-quality.test.js, slot-planner.test.js) still exercise the
+// original fallback-fill path.
+function assembleBatchFromGeneratedPhrases(phrases, languageCode, validationContext = {}, expectedSlots = null, traceParts = null, dropMissing = false) {
+  const collected = collectUsablePhrases(phrases, languageCode, validationContext, expectedSlots);
   if (!collected) {
     return null;
   }
@@ -1894,19 +1974,31 @@ function assembleBatchFromGeneratedPhrases(phrases, languageCode, validationCont
   const generated = collected.accepted.slice(0, BATCH_SIZE);
   const fallbackFillCount = BATCH_SIZE - generated.length;
   const assembled = Array.isArray(expectedSlots)
-    ? assembleByExpectedSlotOrder(generated, languageCode, expectedSlots, validationContext, collected.rejectedDetails, traceParts)
+    ? assembleByExpectedSlotOrder(generated, languageCode, expectedSlots, validationContext, collected.rejectedDetails, traceParts, dropMissing)
     : fallbackFillCount > 0
       ? fillWithFallbackPhrases(generated, languageCode, traceParts)
       : assignUniqueStyleIds(generated, traceParts ? traceParts.styleDedupe : null);
 
-  if (!assembled || !validateFinalBatch(assembled)) {
+  const slotTypeById = Array.isArray(expectedSlots)
+    ? new Map(expectedSlots.filter((slot) => slot && typeof slot.slot_id === 'string').map((slot) => [slot.slot_id, slot.type || null]))
+    : null;
+  if (!assembled || !validateFinalBatch(assembled, slotTypeById)) {
     return {
       phrases: null,
       generatedCount: generated.length,
+      // generatedSlotIds/rejectedSlotIds are included even on this failure
+      // branch (previously omitted) -- generateBatch's repair gate reads
+      // assembly.rejectedSlotIds to decide whether to attempt repair, and
+      // with dropMissing (see B5) an all-rejected first pass lands exactly
+      // here (assembled is null because zero slots were usable), so without
+      // these fields repair could never fire for the very case it exists
+      // for: every slot rejected on first pass.
+      generatedSlotIds: generated.map((item) => item.slot_id),
       rejectedCount: collected.rejectedCount,
       fallbackFillCount,
       reason: 'final_assembly_fallback',
       rejectionReasons: collected.rejectionReasons,
+      rejectedSlotIds: collected.rejectedSlotIds,
       rejectedDetails: collected.rejectedDetails,
     };
   }
@@ -1925,9 +2017,11 @@ function assembleBatchFromGeneratedPhrases(phrases, languageCode, validationCont
     styleDedupeChanges: traceParts && traceParts.styleDedupe ? traceParts.styleDedupe : [],
     reason: fallbackFillCount === 0
       ? 'success'
-      : generated.length === 0
-        ? 'all_invalid_fallback'
-        : 'partial_validation_fill',
+      : dropMissing
+        ? 'partial_drop_after_repair'
+        : generated.length === 0
+          ? 'all_invalid_fallback'
+          : 'partial_validation_fill',
   };
 }
 
@@ -2156,7 +2250,14 @@ async function createOpenAiBatch(client, context, languageCode, count = BATCH_SI
   });
 }
 
-async function regenerateRejectedSlots(client, basePayload, slots, rejectedSlotIds, languageCode, validationContext, trace = null) {
+// rejectedDetails (optional, from assembly.rejectedDetails) carries the
+// original rejected text and exact reason/detail per slot_id (see
+// collectUsablePhrases' rejectedDetails) -- B3: the repair request must show
+// the model what it actually got wrong, not just ask it to "try again"
+// blind. Falls back to sending no original_text/rejection_reason for a slot
+// this array doesn't cover (defensive only; every rejected slot should have
+// a matching entry).
+async function regenerateRejectedSlots(client, basePayload, slots, rejectedSlotIds, languageCode, validationContext, trace = null, rejectedDetails = []) {
   if (!Array.isArray(rejectedSlotIds) || rejectedSlotIds.length === 0) {
     return null;
   }
@@ -2171,17 +2272,41 @@ async function regenerateRejectedSlots(client, basePayload, slots, rejectedSlotI
       trace.repair.sent_slot_ids = repairSlots.map((slot) => slot.slot_id);
     }
   });
+  // Most recent rejection per slot_id -- rejectedDetails can contain more
+  // than one entry per slot across passes, last one wins (most recent
+  // attempt for that slot).
+  const rejectionBySlot = new Map();
+  for (const detail of Array.isArray(rejectedDetails) ? rejectedDetails : []) {
+    if (detail && typeof detail.slot_id === 'string') {
+      rejectionBySlot.set(detail.slot_id, detail);
+    }
+  }
   const repairPayload = {
     ...basePayload,
     repair: 'rewrite_only_these_rejected_slots',
-    slots: repairSlots.map((slot) => ({
-      slot_id: slot.slot_id,
-      type: slot.type,
-      facts: slot.facts || {},
-      constraints: slot.constraints || [],
-      interest_hint: slot.interest_hint || undefined,
-      gender_lean_hint: slot.gender_lean_hint || undefined,
-    })),
+    // repair_instructions is deliberately plain, model-facing English/Russian
+    // prose data (not a schema field) -- see buildSystemPrompt's own repair
+    // clause, which tells the model how to read original_text/
+    // rejection_reason/max_length_chars below: preserve the meaning/fact,
+    // rewrite to fix the specific violation.
+    slots: repairSlots.map((slot) => {
+      const rejection = rejectionBySlot.get(slot.slot_id) || null;
+      return {
+        slot_id: slot.slot_id,
+        type: slot.type,
+        facts: slot.facts || {},
+        constraints: slot.constraints || [],
+        interest_hint: slot.interest_hint || undefined,
+        gender_lean_hint: slot.gender_lean_hint || undefined,
+        // B3: the exact text that got rejected, why (detail carries the
+        // numbers, e.g. "too_long:93>70"), and the hard limit it must now
+        // respect -- so the model fixes THIS violation while preserving the
+        // original meaning, instead of generating blind.
+        original_text: rejection ? rejection.text : undefined,
+        rejection_reason: rejection ? (rejection.detail || rejection.reason) : undefined,
+        max_length_chars: LOCK_SCREEN_TEXT_MAX_LENGTH,
+      };
+    }),
   };
   const response = await createOpenAiBatch(
     client,
@@ -2195,7 +2320,7 @@ async function regenerateRejectedSlots(client, basePayload, slots, rejectedSlotI
     parsed.phrases,
     languageCode,
     validationContext,
-    repairSlots.map((slot) => slot.slot_id)
+    repairSlots
   );
   safeTrace(() => {
     if (trace) {
@@ -2559,7 +2684,8 @@ context_signal: many_unlocks — тёплое, ненавязчивое набл
 phone_trend (facts.unlocks_vs_yesterday/facts.steps_vs_yesterday: higher/lower) — построй на этом естественное наблюдение о дне, а не сухую констатацию тренда, и никогда не называй точные числа.
 now.window.focus задаёт общее настроение НЕ закреплённых по типу слотов (free_ai_thought/everyday_lifehack/smart_humor_observation/city_afisha/context_signal/seasonal и похожих) для текущего времени суток: утром — старт дня и лёгкое планирование, днём — рабочий темп и бытовые наблюдения, вечером — переключение и итоги дня, ночью — спокойные мысли и минимум активного тона; не называй это поле и не объясняй эту логику вслух.
 Каждый slot несёт свой length_hint — это ОРИЕНТИР по диапазону, не цель, к которой надо тянуться: "short" — примерно 10-20 символов, мысль в одно мгновение; "medium" — примерно 21-40 символов, обычная фраза; "long" — РАЗРЕШЕНИЕ (не обязанность) раскрыть мысль подробнее, примерно 41-60 символов, но только если дополнительное содержание реально делает фразу интереснее — иначе короткая точная фраза всегда лучше растянутой. Никогда не растягивай уже законченную мысль ради попадания в диапазон и не пиши "впритык" к границе: если мысль естественно закончилась на 27 символах — оставь 27, а не дописывай слова до 40. В батче длины должны заметно отличаться друг от друга: большинство фраз — short/medium, long — меньшинство (ощутимо меньше половины батча), не подряд одна за другой и не через одинаковый интервал, а естественно, где материал того стоит.
-${LOCK_SCREEN_TEXT_MAX_LENGTH} символов — это ТОЛЬКО аварийный технический потолок (жёсткая защита от переполнения экрана), никогда не целевая длина ни для одного length_hint. Только JSON по схеме.`;
+Жёсткий лимит: НИ ОДНА фраза не должна превышать ${LOCK_SCREEN_TEXT_MAX_LENGTH} символов, включая пробелы и знаки препинания, — это абсолютный потолок, не цель ни для одного length_hint, и его нельзя превышать ни при каких обстоятельствах, даже если тема кажется недосказанной: заверши мысль короче, но никогда не выходи за ${LOCK_SCREEN_TEXT_MAX_LENGTH} символов. Каждый ответ, который длиннее ${LOCK_SCREEN_TEXT_MAX_LENGTH} символов, будет отклонён целиком и не попадёт пользователю.
+Если payload содержит "repair": "rewrite_only_these_rejected_slots" — это режим точечного исправления, а не обычная генерация: для каждого slot в payload уже есть original_text (что было отклонено), rejection_reason (почему именно, например too_long:93>70 означает "93 символа при лимите 70", blocked_phrase:пусть означает "содержит запрещённое слово/оборот пусть") и max_length_chars (тот же ${LOCK_SCREEN_TEXT_MAX_LENGTH}). Перепиши именно то, что нарушено, сохранив исходный смысл/факт original_text насколько возможно, а не сочиняй заново с нуля; если причина too_long/too_many_words — сократи до предела, не обрывая мысль; если blocked_phrase — просто убери/замени конкретное запрещённое слово или оборот, остальное можно сохранить. Только JSON по схеме.`;
 }
 
 /**
@@ -2655,7 +2781,12 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
   let assembly;
   const firstPassTraceParts = { fallback: [], styleDedupe: [], firstPass: null };
   try {
-    assembly = assembleBatchFromGeneratedPhrases(parsed.phrases, languageCode, validationContext, slots, firstPassTraceParts);
+    // dropMissing=true: see assembleBatchFromGeneratedPhrases' own comment.
+    // Applies even before repair runs/completes -- if repair never fires (no
+    // rejections), is skipped, or throws, this first-pass assembly is what
+    // ships, and it must already reflect "drop, don't generic-fill" for any
+    // slot that has no accepted text yet.
+    assembly = assembleBatchFromGeneratedPhrases(parsed.phrases, languageCode, validationContext, slots, firstPassTraceParts, true);
     safeTrace(() => {
       trace.first_pass = firstPassTraceParts.firstPass || [];
     });
@@ -2669,7 +2800,13 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
   }
 
   const repairedSlotIds = new Set();
-  if (assembly.rejectedSlotIds && assembly.rejectedSlotIds.length > 0 && assembly.generatedCount > 0) {
+  // B3 fix: previously gated on `assembly.generatedCount > 0` too, so a
+  // batch where EVERY slot was rejected on first pass (generatedCount === 0
+  // -- exactly the production incident this task investigates: 12/12
+  // rejected, repair.called stayed false) never got a repair attempt at
+  // all. Repair only needs at least one rejected slot to make sense; it
+  // does not need any already-accepted slot to build on.
+  if (assembly.rejectedSlotIds && assembly.rejectedSlotIds.length > 0) {
     try {
       const basePayload = JSON.parse(context);
       const repaired = await regenerateRejectedSlots(
@@ -2679,7 +2816,8 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
         assembly.rejectedSlotIds,
         languageCode,
         validationContext,
-        trace
+        trace,
+        assembly.rejectedDetails
       );
       if (repaired && repaired.length > 0) {
         for (const item of repaired) {
@@ -2690,7 +2828,10 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
           .filter((phrase) => acceptedSlotIds.has(phrase.slot_id))
           .concat(repaired);
         const repairTraceParts = { fallback: [], styleDedupe: [], firstPass: [] };
-        const repairedAssembly = assembleBatchFromGeneratedPhrases(merged, languageCode, validationContext, slots, repairTraceParts);
+        // dropMissing=true here too -- a slot still rejected after this one
+        // repair round is dropped, not generic-filled (see B5/dropMissing's
+        // own comment on assembleBatchFromGeneratedPhrases).
+        const repairedAssembly = assembleBatchFromGeneratedPhrases(merged, languageCode, validationContext, slots, repairTraceParts, true);
         if (repairedAssembly && repairedAssembly.phrases) {
           repairedAssembly.reason = repairedAssembly.rejectedCount === 0
             ? 'success_after_slot_regeneration'
@@ -2740,5 +2881,7 @@ module.exports = {
     LOCK_SCREEN_TEXT_MAX_LENGTH,
     buildBatchResponseFormat,
     isUnusableLockScreenText,
+    rejectionReasonForText,
+    collectUsablePhrases,
   },
 };

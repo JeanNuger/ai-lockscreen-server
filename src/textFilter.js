@@ -102,9 +102,71 @@ function hasQuestionMark(text) {
   return /[?¿؟？]/.test(String(text || ''));
 }
 
-function hasBlockedPhrase(text) {
+// goodnight_care's entire purpose is a warm "wish you well for the night"
+// line (e.g. "пусть завтра будет добрым"), and the postcard-cliche "пусть"
+// construction is exactly the shape that wish naturally takes in Russian --
+// so for this one slot type, and only for this narrow family of "пусть ..."
+// stop phrases, the postcard-cliche guard is deliberately relaxed. Every
+// OTHER stop phrase (including night-poetry words like "ноч"/"тишина"/
+// "звезда") still applies to goodnight_care exactly as before -- the system
+// prompt still explicitly tells the model to avoid those for this slot type
+// (see buildSystemPrompt's goodnight_care clause), this exemption is not a
+// blanket pass. See contentGenerator.js's ANCHOR_FALLBACK_TEXT.goodnight_care
+// for confirmation the sanctioned goodnight fallback lines already avoid
+// "ночь" entirely -- this exemption does not need to touch that ban.
+const GOODNIGHT_CARE_EXEMPT_STOP_PHRASES = new Set([
+  'пусть',
+  'пусть день будет',
+  'пусть день станет',
+  'пусть день начнется',
+  'пусть остаток дня',
+]);
+
+// The one place goodnight_care is allowed to say "ночь" at all: the two
+// fixed, idiomatic good-night wishes themselves ("спокойной ночи"/"доброй
+// ночи"). The general 'ноч' stop phrase still exists specifically to keep
+// night-POETRY ("ночь укутает тишиной", "полночь", etc.) out of every slot
+// type, goodnight_care included -- this does not lift that ban, it only
+// carves out these two literal, whole phrases so the stock wish itself
+// doesn't trip the same rule it's aimed at.
+//
+// The whole allowed phrase (not just the "ноч" part of it) is stripped
+// before testing EVERY stop phrase below, not only 'ноч' -- "спокойной"
+// itself contains "покой" as a substring, which is a separate stop phrase
+// (postcard-cliche "покой"/calm), so testing only 'ноч' in isolation still
+// left "Спокойной ночи, ..." blocked on 'покой'. Stripping the whole
+// sanctioned phrase up front avoids every such incidental substring
+// collision inside it, while every OTHER occurrence of any stop phrase
+// (including a second, non-idiomatic "ноч"/"покой" elsewhere in the same
+// text) still blocks exactly as before.
+const GOODNIGHT_CARE_ALLOWED_NIGHT_PHRASES = ['спокойной ночи', 'доброй ночи'];
+
+// Returns the matched STOP_PHRASES entry (a non-empty string), or null if
+// none matched. options.slotType narrows which stop phrases apply -- see
+// GOODNIGHT_CARE_EXEMPT_STOP_PHRASES/GOODNIGHT_CARE_ALLOWED_NIGHT_PHRASES above.
+function findBlockedPhrase(text, options = {}) {
   const normalized = normalizeText(text);
-  return STOP_PHRASES.some((phrase) => normalized.includes(phrase));
+  const isGoodnightCare = options.slotType === 'goodnight_care';
+  const exempt = isGoodnightCare ? GOODNIGHT_CARE_EXEMPT_STOP_PHRASES : null;
+  let searchable = normalized;
+  if (isGoodnightCare) {
+    for (const allowed of GOODNIGHT_CARE_ALLOWED_NIGHT_PHRASES) {
+      searchable = searchable.split(allowed).join(' ');
+    }
+  }
+  for (const phrase of STOP_PHRASES) {
+    if (exempt && exempt.has(phrase)) {
+      continue;
+    }
+    if (searchable.includes(phrase)) {
+      return phrase;
+    }
+  }
+  return null;
+}
+
+function hasBlockedPhrase(text, options = {}) {
+  return findBlockedPhrase(text, options) !== null;
 }
 
 // Catches imperative/command-verb openers (everyday_lifehack's most common
@@ -179,33 +241,45 @@ function hasIncompleteSentenceEnding(text) {
   return INCOMPLETE_ENDING_WORDS.has(lastWord);
 }
 
+// `detail` on a rejection carries the exact numbers/match behind `reason`,
+// e.g. "too_long:93>70" or "blocked_phrase:пусть" -- see contentGenerator.js's
+// rejectionReasonForText, which threads this into the batch trace instead of
+// only the coarse `reason` bucket (production incident: a trace full of
+// "basic_quality" gave no way to tell a 93-char phrase from a 17-word one).
+// `reason` itself is left unchanged (still just "basic_quality"/
+// "blocked_phrase"/etc.) so existing aggregate counts (rejectionReasons) and
+// callers that only check `.ok`/`.reason` keep working as before.
 function validateLockScreenText(text, options = {}) {
   if (typeof text !== 'string') {
-    return { ok: false, reason: 'schema' };
+    return { ok: false, reason: 'schema', detail: 'schema' };
   }
   const trimmed = text.trim();
   const maxLength = options.maxLength || DEFAULT_MAX_LENGTH;
   const maxWords = options.maxWords || DEFAULT_MAX_WORDS;
-  if (trimmed.length === 0 || trimmed.length > maxLength) {
-    return { ok: false, reason: 'basic_quality' };
+  if (trimmed.length === 0) {
+    return { ok: false, reason: 'basic_quality', detail: 'empty' };
+  }
+  if (trimmed.length > maxLength) {
+    return { ok: false, reason: 'basic_quality', detail: `too_long:${trimmed.length}>${maxLength}` };
   }
   const words = trimmed.split(/\s+/).filter(Boolean);
   if (words.length > maxWords) {
-    return { ok: false, reason: 'basic_quality' };
+    return { ok: false, reason: 'basic_quality', detail: `too_many_words:${words.length}>${maxWords}` };
   }
   if (hasQuestionMark(trimmed)) {
-    return { ok: false, reason: 'question' };
+    return { ok: false, reason: 'question', detail: 'question' };
   }
-  if (hasBlockedPhrase(trimmed)) {
-    return { ok: false, reason: 'blocked_phrase' };
+  const blockedPhrase = findBlockedPhrase(trimmed, options);
+  if (blockedPhrase) {
+    return { ok: false, reason: 'blocked_phrase', detail: `blocked_phrase:${blockedPhrase}` };
   }
   if (hasImperativeCommand(trimmed)) {
-    return { ok: false, reason: 'imperative_command' };
+    return { ok: false, reason: 'imperative_command', detail: 'imperative_command' };
   }
   if (hasIncompleteSentenceEnding(trimmed)) {
-    return { ok: false, reason: 'incomplete_sentence' };
+    return { ok: false, reason: 'incomplete_sentence', detail: 'incomplete_sentence' };
   }
-  return { ok: true, reason: null };
+  return { ok: true, reason: null, detail: null };
 }
 
 module.exports = {
@@ -216,6 +290,9 @@ module.exports = {
   normalizeText,
   hasQuestionMark,
   hasBlockedPhrase,
+  findBlockedPhrase,
+  GOODNIGHT_CARE_EXEMPT_STOP_PHRASES,
+  GOODNIGHT_CARE_ALLOWED_NIGHT_PHRASES,
   hasImperativeCommand,
   hasIncompleteSentenceEnding,
   validateLockScreenText,

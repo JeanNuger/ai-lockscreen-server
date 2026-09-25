@@ -123,11 +123,17 @@ async function testRejectRepairFallback() {
     assert(result.trace.repair.sent_slot_ids.length >= 2, 'repair should include rejected and missing slots');
     assert(result.trace.first_pass.some((item) => item.status === 'rejected'), 'trace should include first-pass rejection');
     assert(result.trace.first_pass.some((item) => item.status === 'missing'), 'trace should include missing first-pass slot');
-    assert(result.trace.fallback.some((item) => item.pool === 'fallback_zodiac'), 'trace should include zodiac fallback');
-    assert(result.trace.fallback.some((item) => item.pool === 'fallback_numerology'), 'trace should include numerology fallback');
-    assert(result.trace.summary.language_mismatch_count >= 2, 'ja run should flag en-only zodiac/numerology fallback mismatch');
-    assert.strictEqual(result.phrases.length, 12);
-    assert.strictEqual(result.trace.whole_batch_fallback.flag, false, 'a per-slot repair/fallback run is not a whole-batch fallback');
+    // B5: the daily_horoscope/daily_numerology slots are still a question /
+    // still missing after the one repair round (see the mock's second-call
+    // handler, which never actually fixes them) -- they are now DROPPED
+    // instead of filled from the zodiac/numerology fallback pools, so no
+    // fallback_zodiac/fallback_numerology trace entries appear at all, and
+    // the final batch is shorter than 12 (10: the 12 planned slots minus the
+    // 2 still-rejected-after-repair ones).
+    assert.strictEqual(result.trace.fallback.length, 0, 'still-rejected-after-repair slots must be dropped, not filled from a fallback pool');
+    assert.strictEqual(result.trace.summary.language_mismatch_count, 0, 'nothing was fallback-filled, so there is no fallback language to mismatch');
+    assert.strictEqual(result.phrases.length, 10, 'batch must come up short by exactly the 2 still-rejected-after-repair slots');
+    assert.strictEqual(result.trace.whole_batch_fallback.flag, false, 'a per-slot repair/drop run is not a whole-batch fallback');
 
     console.log('[test-trace]', JSON.stringify(result.trace));
     return result.trace;
