@@ -24,6 +24,9 @@ const insertBatchStatement = db.prepare(`
   INSERT INTO content_batches (device_id, window, phrases, source, context)
   VALUES (?, ?, ?, ?, ?)
 `);
+const updateBatchTraceStatement = db.prepare(`
+  UPDATE content_batches SET trace_json = ? WHERE id = ?
+`);
 
 function cleanOptionalString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
@@ -32,6 +35,36 @@ function cleanOptionalString(value) {
 function cleanLocalDate(value) {
   const cleaned = cleanOptionalString(value);
   return cleaned && /^\d{4}-\d{2}-\d{2}$/.test(cleaned) ? cleaned : null;
+}
+
+function finalizeBatchTrace(trace, batchId) {
+  if (!trace || typeof trace !== 'object') {
+    return null;
+  }
+  try {
+    const finalizedTrace = {
+      ...trace,
+      meta: {
+        ...(trace.meta || {}),
+        batch_id: batchId,
+      },
+    };
+    return JSON.stringify(finalizedTrace);
+  } catch (err) {
+    console.warn(`BATCH_TRACE_ERROR stage=finalize error=${err.name || 'Error'}`);
+    return null;
+  }
+}
+
+function logBatchTrace(traceJson) {
+  if (!traceJson || process.env.BATCH_TRACE_LOG === '0') {
+    return;
+  }
+  try {
+    console.log(`[batch-trace] ${traceJson}`);
+  } catch (err) {
+    console.warn(`BATCH_TRACE_ERROR stage=stdout error=${err.name || 'Error'}`);
+  }
 }
 
 // GET /api/v1/batch?device_id=...&window=morning|day|evening|night
@@ -73,20 +106,25 @@ router.get('/batch', async (req, res, next) => {
     }
 
     const phoneTrends = computePhoneTrends(device, window, signals);
-    const { phrases, source, context } = await generateBatch(device, window, signals, weather, phoneTrends, {
+    const { phrases, source, context, trace } = await generateBatch(device, window, signals, weather, phoneTrends, {
       localDate: requestLocalDate,
     });
     recordPhoneSignalSample(device, window, signals);
     const adminPhrases = consumePendingMessages(device_id);
     const combinedPhrases = [...phrases, ...adminPhrases];
 
-    insertBatchStatement.run(
+    const insertResult = insertBatchStatement.run(
       device_id,
       window,
       JSON.stringify(combinedPhrases),
       source,
       context || null
     );
+    const traceJson = finalizeBatchTrace(trace, insertResult.lastInsertRowid);
+    if (traceJson) {
+      updateBatchTraceStatement.run(traceJson, insertResult.lastInsertRowid);
+      logBatchTrace(traceJson);
+    }
 
     res.status(200).json({ phrases: combinedPhrases });
   } catch (err) {

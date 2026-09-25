@@ -14,7 +14,7 @@ const {
   recordLearnedWords,
   recordRecalledWords,
 } = require('./learningMemory');
-const { planSlots } = require('./slotPlanner');
+const { planSlots, MORNING_FIXED_TYPES } = require('./slotPlanner');
 const {
   hasQuestionMark,
   validateLockScreenText,
@@ -1013,6 +1013,10 @@ function activeFallbackPhrases(languageCode) {
   return sets[currentFallbackSetIndex()];
 }
 
+function activeFallbackLanguage(languageCode) {
+  return FALLBACK_PHRASES[languageCode] ? languageCode : DEFAULT_LANGUAGE_CODE;
+}
+
 // The 10 languages product/DoD calls for (locale-driven generation task).
 // Each entry names the language for the SYSTEM_PROMPT and a scriptCheck
 // regex used to catch full-phrase language drift (see isValidLanguageText
@@ -1069,6 +1073,133 @@ function pickUniqueStyles(count) {
 
 function pickFirstUnusedStyle(usedStyles) {
   return STYLE_IDS.find((id) => !usedStyles.has(id)) || pickRandomStyle();
+}
+
+function safeTrace(fn) {
+  try {
+    return fn();
+  } catch (err) {
+    console.warn(`BATCH_TRACE_ERROR stage=collect error=${err.name || 'Error'}`);
+    return null;
+  }
+}
+
+function plannedSourceForSlot(slot) {
+  if (!slot || !slot.source) {
+    return 'generic';
+  }
+  if (slot.source === 'daily_bank') {
+    return 'bank';
+  }
+  if (slot.source === 'profile' || slot.source === 'learning_memory') {
+    return 'profile';
+  }
+  if (slot.source === 'weather' || slot.source === 'device_signal' || slot.source === 'phone_analytics' || slot.source === 'date_context') {
+    return 'signal';
+  }
+  return 'generic';
+}
+
+function isFixedPositionSlot(window, slot, position) {
+  if (!slot) {
+    return false;
+  }
+  if (window === 'morning') {
+    return MORNING_FIXED_TYPES.includes(slot.type);
+  }
+  if (window === 'night' && slot.type === 'goodnight_care') {
+    return position === BATCH_SIZE;
+  }
+  if (window === 'night' && slot.type === 'learning_recall') {
+    return position === BATCH_SIZE - 1;
+  }
+  return false;
+}
+
+function buildInitialTrace(device, window, languageCode, dateContext) {
+  return {
+    meta: {
+      batch_id: null,
+      device_id: device && device.device_id ? device.device_id : null,
+      window,
+      lang: languageCode,
+      model: 'gpt-4o-mini',
+      local_date: dateContext && dateContext.date ? dateContext.date : null,
+      timestamp: new Date().toISOString(),
+    },
+    planned: [],
+    first_pass: [],
+    repair: { called: false, sent_slot_ids: [], results: [] },
+    fallback: [],
+    whole_batch_fallback: { flag: false, reason: null },
+    style_dedupe: [],
+    final: [],
+    summary: {},
+  };
+}
+
+function markWholeBatchFallback(trace, reason) {
+  safeTrace(() => {
+    if (!trace) {
+      return;
+    }
+    trace.whole_batch_fallback = { flag: true, reason: reason || 'unknown' };
+  });
+}
+
+function tracePlannedSlots(trace, window, slots) {
+  safeTrace(() => {
+    if (!trace || !Array.isArray(slots)) {
+      return;
+    }
+    trace.planned = slots.map((slot, index) => ({
+      position: index + 1,
+      slot_id: slot.slot_id,
+      type: slot.type,
+      is_fixed_position: isFixedPositionSlot(window, slot, index + 1),
+      planned_source: plannedSourceForSlot(slot),
+      bank_category: slot.bank_category || null,
+    }));
+  });
+}
+
+function traceResultsFromCollected(collected, slots) {
+  if (!collected || !Array.isArray(slots)) {
+    return [];
+  }
+  const acceptedBySlot = new Map((collected.accepted || []).map((item) => [item.slot_id, item]));
+  const rejectedBySlot = new Map();
+  for (const detail of collected.rejectedDetails || []) {
+    if (detail && detail.slot_id && !rejectedBySlot.has(detail.slot_id)) {
+      rejectedBySlot.set(detail.slot_id, detail);
+    }
+  }
+  return slots.map((slot) => {
+    const accepted = acceptedBySlot.get(slot.slot_id);
+    if (accepted) {
+      return {
+        slot_id: slot.slot_id,
+        status: 'accepted',
+        text: accepted.text,
+        reason: null,
+      };
+    }
+    const rejected = rejectedBySlot.get(slot.slot_id);
+    if (rejected) {
+      return {
+        slot_id: slot.slot_id,
+        status: 'rejected',
+        text: rejected.text,
+        reason: rejected.reason,
+      };
+    }
+    return {
+      slot_id: slot.slot_id,
+      status: 'missing',
+      text: null,
+      reason: 'missing',
+    };
+  });
 }
 
 // Reassigns any duplicate style_id within a batch to one not yet used in that
@@ -1324,13 +1455,21 @@ function cleanUsablePhrases(phrases, languageCode, validationContext = {}) {
   return finalChecked ? styled : null;
 }
 
-function assignUniqueStyleIds(items) {
+function assignUniqueStyleIds(items, styleTrace = null) {
   const usedStyles = new Set();
   return items.map((item) => {
+    const originalStyle = item.style_id || null;
     const style_id = STYLE_IDS.includes(item.style_id) && !usedStyles.has(item.style_id)
       ? item.style_id
       : pickFirstUnusedStyle(usedStyles);
     usedStyles.add(style_id);
+    if (styleTrace && originalStyle !== style_id) {
+      styleTrace.push({
+        slot_id: item.slot_id || null,
+        from: originalStyle,
+        to: style_id,
+      });
+    }
     return { ...item, style_id };
   });
 }
@@ -1584,7 +1723,56 @@ function logMorningAnchorFallback(slot, rejectedDetail, fallbackText) {
   );
 }
 
-function pickFallbackTextForSlot(slot, languageCode, seenTexts, fallbackTexts, validationContext = {}, rejectedDetail = null) {
+function fallbackLanguageForPool(pool, languageCode) {
+  if (pool === 'fallback_generic') {
+    return activeFallbackLanguage(languageCode);
+  }
+  if (pool === 'fallback_zodiac') {
+    return ZODIAC_FALLBACK_TEXT[languageCode] ? languageCode : DEFAULT_LANGUAGE_CODE;
+  }
+  if (pool === 'fallback_numerology') {
+    return NUMEROLOGY_FALLBACK_TEXT[languageCode] ? languageCode : DEFAULT_LANGUAGE_CODE;
+  }
+  if (pool === 'fallback_anchor') {
+    return languageCode === 'ru' || languageCode === 'en' ? languageCode : DEFAULT_LANGUAGE_CODE;
+  }
+  if (pool === 'fallback_weather') {
+    return DEFAULT_LANGUAGE_CODE;
+  }
+  return null;
+}
+
+function fallbackPoolForSlot(slot, fallbackText, languageCode, fallbackTexts) {
+  if (slot && slot.type === 'daily_horoscope') return 'fallback_zodiac';
+  if (slot && slot.type === 'daily_numerology') return 'fallback_numerology';
+  if (slot && slot.type === 'weather_lifehack') return 'fallback_weather';
+  if (slot && MORNING_ANCHOR_TYPES.has(slot.type)) return 'fallback_anchor';
+  if (slot && (slot.type === 'greeting_name' || slot.type === 'goodnight_care')) return 'fallback_anchor';
+  if (fallbackTexts && fallbackTexts.includes(fallbackText)) return 'fallback_generic';
+  return 'fallback_generic';
+}
+
+function fallbackTraceForText(slot, fallbackText, languageCode, fallbackTexts) {
+  const pool = fallbackPoolForSlot(slot, fallbackText, languageCode, fallbackTexts);
+  const issuedLanguage = fallbackLanguageForPool(pool, languageCode);
+  const trace = {
+    slot_id: slot && slot.slot_id ? slot.slot_id : null,
+    pool,
+    text: fallbackText,
+    language: issuedLanguage,
+    language_matches_user: issuedLanguage ? issuedLanguage === languageCode : null,
+  };
+  if (pool === 'fallback_generic') {
+    const setIndex = currentFallbackSetIndex();
+    const activeLanguage = activeFallbackLanguage(languageCode);
+    const set = FALLBACK_PHRASES[activeLanguage][setIndex] || [];
+    trace.set_index = setIndex;
+    trace.phrase_index = set.indexOf(fallbackText);
+  }
+  return trace;
+}
+
+function pickFallbackTextForSlot(slot, languageCode, seenTexts, fallbackTexts, validationContext = {}, rejectedDetail = null, fallbackTrace = null) {
   if (slot && MORNING_ANCHOR_TYPES.has(slot.type)) {
     const missingReason = missingAnchorReason(slot);
     if (missingReason) {
@@ -1599,6 +1787,9 @@ function pickFallbackTextForSlot(slot, languageCode, seenTexts, fallbackTexts, v
     const normalized = normalizeTextForDedupe(groundedFallback);
     if (!isUnusableLockScreenText(groundedFallback) && !seenTexts.has(normalized)) {
       logMorningAnchorFallback(slot, rejectedDetail, groundedFallback);
+      if (fallbackTrace) {
+        fallbackTrace.push(fallbackTraceForText(slot, groundedFallback, languageCode, fallbackTexts));
+      }
       return groundedFallback;
     }
     logMissingMorningAnchor(slot, validationContext, seenTexts.has(normalized) ? 'duplicate_grounded_fallback' : 'unusable_grounded_fallback');
@@ -1609,6 +1800,9 @@ function pickFallbackTextForSlot(slot, languageCode, seenTexts, fallbackTexts, v
   if (slotFallback) {
     const normalized = normalizeTextForDedupe(slotFallback);
     if (!isUnusableLockScreenText(slotFallback) && !seenTexts.has(normalized)) {
+      if (fallbackTrace) {
+        fallbackTrace.push(fallbackTraceForText(slot, slotFallback, languageCode, fallbackTexts));
+      }
       return slotFallback;
     }
   }
@@ -1617,18 +1811,22 @@ function pickFallbackTextForSlot(slot, languageCode, seenTexts, fallbackTexts, v
     const trimmed = text.trim();
     const normalized = normalizeTextForDedupe(trimmed);
     if (!isUnusableLockScreenText(trimmed) && !seenTexts.has(normalized)) {
+      if (fallbackTrace) {
+        fallbackTrace.push(fallbackTraceForText(slot, trimmed, languageCode, fallbackTexts));
+      }
       return trimmed;
     }
   }
   return null;
 }
 
-function assembleByExpectedSlotOrder(generated, languageCode, expectedSlots, validationContext = {}, rejectedDetails = []) {
+function assembleByExpectedSlotOrder(generated, languageCode, expectedSlots, validationContext = {}, rejectedDetails = [], traceParts = null) {
   const fallbackPhrases = activeFallbackPhrases(languageCode);
   const shuffledFallback = [...fallbackPhrases].sort(() => Math.random() - 0.5);
   const generatedBySlot = new Map(generated.map((item) => [item.slot_id, item]));
   const rejectedBySlot = new Map(rejectedDetails.map((item) => [item.slot_id, item]));
   const seenTexts = new Set(generated.map((item) => normalizeTextForDedupe(item.text)));
+  const fallbackTrace = traceParts ? traceParts.fallback : null;
 
   const result = expectedSlots.map((slot) => {
     const generatedItem = generatedBySlot.get(slot.slot_id);
@@ -1641,7 +1839,8 @@ function assembleByExpectedSlotOrder(generated, languageCode, expectedSlots, val
       seenTexts,
       shuffledFallback,
       validationContext,
-      rejectedBySlot.get(slot.slot_id) || null
+      rejectedBySlot.get(slot.slot_id) || null,
+      fallbackTrace
     );
     if (!fallbackText) {
       return null;
@@ -1653,10 +1852,10 @@ function assembleByExpectedSlotOrder(generated, languageCode, expectedSlots, val
   if (result.some((item) => !item)) {
     return null;
   }
-  return assignUniqueStyleIds(result);
+  return assignUniqueStyleIds(result, traceParts ? traceParts.styleDedupe : null);
 }
 
-function fillWithFallbackPhrases(generated, languageCode) {
+function fillWithFallbackPhrases(generated, languageCode, traceParts = null) {
   const result = [...generated];
   const seenTexts = new Set(result.map((item) => normalizeTextForDedupe(item.text)));
   const fallbackPhrases = activeFallbackPhrases(languageCode);
@@ -1672,27 +1871,33 @@ function fillWithFallbackPhrases(generated, languageCode) {
       continue;
     }
     seenTexts.add(normalized);
+    if (traceParts && traceParts.fallback) {
+      traceParts.fallback.push(fallbackTraceForText(null, trimmed, languageCode, fallbackPhrases));
+    }
     result.push({ text: trimmed, style_id: null });
   }
   if (result.length !== BATCH_SIZE) {
     return null;
   }
-  return assignUniqueStyleIds(result);
+  return assignUniqueStyleIds(result, traceParts ? traceParts.styleDedupe : null);
 }
 
-function assembleBatchFromGeneratedPhrases(phrases, languageCode, validationContext = {}, expectedSlots = null) {
+function assembleBatchFromGeneratedPhrases(phrases, languageCode, validationContext = {}, expectedSlots = null, traceParts = null) {
   const expectedSlotIds = Array.isArray(expectedSlots) ? expectedSlots.map((slot) => slot.slot_id) : null;
   const collected = collectUsablePhrases(phrases, languageCode, validationContext, expectedSlotIds);
   if (!collected) {
     return null;
   }
+  if (traceParts && Array.isArray(expectedSlots) && !traceParts.firstPass) {
+    traceParts.firstPass = traceResultsFromCollected(collected, expectedSlots);
+  }
   const generated = collected.accepted.slice(0, BATCH_SIZE);
   const fallbackFillCount = BATCH_SIZE - generated.length;
   const assembled = Array.isArray(expectedSlots)
-    ? assembleByExpectedSlotOrder(generated, languageCode, expectedSlots, validationContext, collected.rejectedDetails)
+    ? assembleByExpectedSlotOrder(generated, languageCode, expectedSlots, validationContext, collected.rejectedDetails, traceParts)
     : fallbackFillCount > 0
-      ? fillWithFallbackPhrases(generated, languageCode)
-      : assignUniqueStyleIds(generated);
+      ? fillWithFallbackPhrases(generated, languageCode, traceParts)
+      : assignUniqueStyleIds(generated, traceParts ? traceParts.styleDedupe : null);
 
   if (!assembled || !validateFinalBatch(assembled)) {
     return {
@@ -1715,6 +1920,9 @@ function assembleBatchFromGeneratedPhrases(phrases, languageCode, validationCont
     rejectionReasons: collected.rejectionReasons,
     rejectedSlotIds: collected.rejectedSlotIds,
     rejectedDetails: collected.rejectedDetails,
+    acceptedSlotIds: generated.map((item) => item.slot_id),
+    fallbackDetails: traceParts && traceParts.fallback ? traceParts.fallback : [],
+    styleDedupeChanges: traceParts && traceParts.styleDedupe ? traceParts.styleDedupe : [],
     reason: fallbackFillCount === 0
       ? 'success'
       : generated.length === 0
@@ -1739,23 +1947,124 @@ function logBatchResult({ generatedCount, rejectedCount, fallbackFillCount, reas
   );
 }
 
-function buildLoggedFallbackResult(languageCode, context, reason, rejectedCount = 0) {
+function buildTraceForFullFallback(trace, languageCode, slots, phrases) {
+  safeTrace(() => {
+    if (!trace || !Array.isArray(phrases)) {
+      return;
+    }
+    // buildFallbackBatch() always draws every phrase from the single generic
+    // FALLBACK_PHRASES pool (see its definition), regardless of slot type --
+    // it never calls the per-type grounded/anchor/zodiac/numerology/weather
+    // fallback helpers. So unlike fallbackTraceForText() used for a PARTIAL,
+    // per-slot fallback (where the pool genuinely depends on slot.type), every
+    // entry here must be labeled fallback_generic; tagging it by slot type
+    // would misrepresent where the text actually came from.
+    const fallbackPhrases = activeFallbackPhrases(languageCode);
+    const setIndex = currentFallbackSetIndex();
+    const issuedLanguage = activeFallbackLanguage(languageCode);
+    trace.fallback = phrases.map((phrase) => ({
+      slot_id: null,
+      pool: 'fallback_generic',
+      text: phrase.text,
+      language: issuedLanguage,
+      language_matches_user: issuedLanguage === languageCode,
+      set_index: setIndex,
+      phrase_index: fallbackPhrases.indexOf(phrase.text),
+    }));
+    trace.final = phrases.map((phrase, index) => {
+      const slot = slots && slots[index] ? slots[index] : null;
+      return {
+        position: index + 1,
+        slot_id: slot ? slot.slot_id : null,
+        type: slot ? slot.type : null,
+        final_source: 'fallback_generic',
+        text: phrase.text,
+        style_id: phrase.style_id,
+        moved: false,
+      };
+    });
+  });
+}
+
+function summarizeTrace(trace, slots, rejectionReasons = {}) {
+  safeTrace(() => {
+    if (!trace) {
+      return;
+    }
+    const finalSourceCounts = {};
+    for (const item of trace.final || []) {
+      const source = item.final_source || 'unknown';
+      finalSourceCounts[source] = (finalSourceCounts[source] || 0) + 1;
+    }
+    const genericTypes = new Set(['free_ai_thought', 'everyday_lifehack', 'smart_humor_observation', 'city_afisha']);
+    const plannedGenericCount = Array.isArray(slots)
+      ? slots.filter((slot) => genericTypes.has(slot.type)).length
+      : 0;
+    const fallbackGenericCount = (trace.fallback || []).filter((item) => item.pool === 'fallback_generic').length;
+    trace.summary = {
+      final_source_counts: finalSourceCounts,
+      rejection_reasons: rejectionReasons || {},
+      generic_total: plannedGenericCount + fallbackGenericCount,
+      language_mismatch_count: (trace.fallback || []).filter((item) => item.language_matches_user === false).length,
+    };
+  });
+}
+
+function traceFinalAssembly(trace, assembly, slots, repairedSlotIds = new Set()) {
+  safeTrace(() => {
+    if (!trace || !assembly || !Array.isArray(assembly.phrases) || !Array.isArray(slots)) {
+      return;
+    }
+    const plannedPositionBySlot = new Map(slots.map((slot, index) => [slot.slot_id, index + 1]));
+    const typeBySlot = new Map(slots.map((slot) => [slot.slot_id, slot.type]));
+    const fallbackBySlot = new Map((assembly.fallbackDetails || []).map((item) => [item.slot_id, item]));
+    trace.fallback = assembly.fallbackDetails || trace.fallback || [];
+    trace.style_dedupe = assembly.styleDedupeChanges || trace.style_dedupe || [];
+    trace.final = assembly.phrases.map((item, index) => {
+      const fallback = fallbackBySlot.get(item.slot_id);
+      const finalSource = fallback
+        ? fallback.pool
+        : repairedSlotIds.has(item.slot_id)
+          ? 'openai_repair'
+          : 'openai_first';
+      return {
+        position: index + 1,
+        slot_id: item.slot_id || null,
+        type: typeBySlot.get(item.slot_id) || null,
+        final_source: finalSource,
+        text: item.text,
+        style_id: item.style_id,
+        moved: plannedPositionBySlot.has(item.slot_id)
+          ? plannedPositionBySlot.get(item.slot_id) !== index + 1
+          : true,
+      };
+    });
+  });
+}
+
+function buildLoggedFallbackResult(languageCode, context, reason, rejectedCount = 0, trace = null, slots = []) {
   logBatchResult({
     generatedCount: 0,
     rejectedCount,
     fallbackFillCount: BATCH_SIZE,
     reason,
   });
-  return { phrases: buildFallbackBatch(languageCode), source: 'fallback', context };
+  const phrases = buildFallbackBatch(languageCode);
+  buildTraceForFullFallback(trace, languageCode, slots, phrases);
+  markWholeBatchFallback(trace, reason);
+  summarizeTrace(trace, slots, {});
+  return { phrases, source: 'fallback', context, trace };
 }
 
-function buildLoggedOpenAiResult(assembly, context) {
+function buildLoggedOpenAiResult(assembly, context, trace = null, slots = [], repairedSlotIds = new Set()) {
   logBatchResult(assembly);
+  traceFinalAssembly(trace, assembly, slots, repairedSlotIds);
+  summarizeTrace(trace, slots, assembly.rejectionReasons);
   const phrases = assembly.phrases.map((item) => ({ text: item.text, style_id: item.style_id }));
-  return { phrases, source: assembly.generatedCount > 0 ? 'openai' : 'fallback', context };
+  return { phrases, source: assembly.generatedCount > 0 ? 'openai' : 'fallback', context, trace };
 }
 
-function buildLoggedFinalAssemblyFallback(languageCode, context, assembly) {
+function buildLoggedFinalAssemblyFallback(languageCode, context, assembly, trace = null, slots = []) {
   logBatchResult({
     generatedCount: assembly ? assembly.generatedCount : 0,
     rejectedCount: assembly ? assembly.rejectedCount : 0,
@@ -1763,7 +2072,11 @@ function buildLoggedFinalAssemblyFallback(languageCode, context, assembly) {
     reason: 'final_assembly_fallback',
     rejectionReasons: assembly ? assembly.rejectionReasons : undefined,
   });
-  return { phrases: buildFallbackBatch(languageCode), source: 'fallback', context };
+  const phrases = buildFallbackBatch(languageCode);
+  buildTraceForFullFallback(trace, languageCode, slots, phrases);
+  markWholeBatchFallback(trace, 'final_assembly_fallback');
+  summarizeTrace(trace, slots, assembly ? assembly.rejectionReasons : {});
+  return { phrases, source: 'fallback', context, trace };
 }
 
 function parseOpenAiBatchResponse(response) {
@@ -1843,7 +2156,7 @@ async function createOpenAiBatch(client, context, languageCode, count = BATCH_SI
   });
 }
 
-async function regenerateRejectedSlots(client, basePayload, slots, rejectedSlotIds, languageCode, validationContext) {
+async function regenerateRejectedSlots(client, basePayload, slots, rejectedSlotIds, languageCode, validationContext, trace = null) {
   if (!Array.isArray(rejectedSlotIds) || rejectedSlotIds.length === 0) {
     return null;
   }
@@ -1852,6 +2165,12 @@ async function regenerateRejectedSlots(client, basePayload, slots, rejectedSlotI
   if (repairSlots.length === 0) {
     return null;
   }
+  safeTrace(() => {
+    if (trace) {
+      trace.repair.called = true;
+      trace.repair.sent_slot_ids = repairSlots.map((slot) => slot.slot_id);
+    }
+  });
   const repairPayload = {
     ...basePayload,
     repair: 'rewrite_only_these_rejected_slots',
@@ -1878,6 +2197,11 @@ async function regenerateRejectedSlots(client, basePayload, slots, rejectedSlotI
     validationContext,
     repairSlots.map((slot) => slot.slot_id)
   );
+  safeTrace(() => {
+    if (trace) {
+      trace.repair.results = traceResultsFromCollected(repaired, repairSlots);
+    }
+  });
   return repaired && repaired.accepted.length > 0 ? repaired.accepted : null;
 }
 
@@ -2293,6 +2617,8 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
   }, { recentContentMemory });
 
   const context = buildContextPrompt(device, window, signals, weather, languageCode, slots, dateContext);
+  const trace = buildInitialTrace(device, window, languageCode, dateContext);
+  tracePlannedSlots(trace, window, slots);
   const validationContext = {
     dateContext,
     signals,
@@ -2301,7 +2627,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
   };
 
   if (!apiKey) {
-    return buildLoggedFallbackResult(languageCode, context, 'no_api_key_fallback');
+    return buildLoggedFallbackResult(languageCode, context, 'no_api_key_fallback', 0, trace, slots);
   }
 
   let response;
@@ -2315,7 +2641,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
 
   } catch (err) {
     console.error(`AI_BATCH_ERROR reason=openai_error error=${err.name || 'Error'}`);
-    return buildLoggedFallbackResult(languageCode, context, 'openai_error');
+    return buildLoggedFallbackResult(languageCode, context, 'openai_error', 0, trace, slots);
   }
 
   let parsed;
@@ -2323,21 +2649,26 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
     parsed = parseOpenAiBatchResponse(response);
   } catch (err) {
     console.error(`AI_BATCH_ERROR reason=parse_or_schema_error error=${err.name || 'Error'}`);
-    return buildLoggedFallbackResult(languageCode, context, 'parse_or_schema_error');
+    return buildLoggedFallbackResult(languageCode, context, 'parse_or_schema_error', 0, trace, slots);
   }
 
   let assembly;
+  const firstPassTraceParts = { fallback: [], styleDedupe: [], firstPass: null };
   try {
-    assembly = assembleBatchFromGeneratedPhrases(parsed.phrases, languageCode, validationContext, slots);
+    assembly = assembleBatchFromGeneratedPhrases(parsed.phrases, languageCode, validationContext, slots, firstPassTraceParts);
+    safeTrace(() => {
+      trace.first_pass = firstPassTraceParts.firstPass || [];
+    });
   } catch (err) {
     console.error(`AI_BATCH_ERROR reason=final_assembly_fallback error=${err.name || 'Error'}`);
-    return buildLoggedFallbackResult(languageCode, context, 'final_assembly_fallback');
+    return buildLoggedFallbackResult(languageCode, context, 'final_assembly_fallback', 0, trace, slots);
   }
 
   if (!assembly) {
-    return buildLoggedFallbackResult(languageCode, context, 'parse_or_schema_error');
+    return buildLoggedFallbackResult(languageCode, context, 'parse_or_schema_error', 0, trace, slots);
   }
 
+  const repairedSlotIds = new Set();
   if (assembly.rejectedSlotIds && assembly.rejectedSlotIds.length > 0 && assembly.generatedCount > 0) {
     try {
       const basePayload = JSON.parse(context);
@@ -2347,14 +2678,19 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
         slots,
         assembly.rejectedSlotIds,
         languageCode,
-        validationContext
+        validationContext,
+        trace
       );
       if (repaired && repaired.length > 0) {
+        for (const item of repaired) {
+          repairedSlotIds.add(item.slot_id);
+        }
         const acceptedSlotIds = new Set(assembly.generatedSlotIds);
         const merged = parsed.phrases
           .filter((phrase) => acceptedSlotIds.has(phrase.slot_id))
           .concat(repaired);
-        const repairedAssembly = assembleBatchFromGeneratedPhrases(merged, languageCode, validationContext, slots);
+        const repairTraceParts = { fallback: [], styleDedupe: [], firstPass: [] };
+        const repairedAssembly = assembleBatchFromGeneratedPhrases(merged, languageCode, validationContext, slots, repairTraceParts);
         if (repairedAssembly && repairedAssembly.phrases) {
           repairedAssembly.reason = repairedAssembly.rejectedCount === 0
             ? 'success_after_slot_regeneration'
@@ -2368,7 +2704,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
   }
 
   if (!assembly.phrases) {
-    return buildLoggedFinalAssemblyFallback(languageCode, context, assembly);
+    return buildLoggedFinalAssemblyFallback(languageCode, context, assembly, trace, slots);
   }
 
   // Record planned daily-bank categories for this batch. With slot-based
@@ -2380,7 +2716,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
   recordLearnedWords(device.device_id, slots, assembly.generatedSlotIds);
   recordRecalledWords(device.device_id, slots, assembly.generatedSlotIds);
 
-  return buildLoggedOpenAiResult(assembly, context);
+  return buildLoggedOpenAiResult(assembly, context, trace, slots, repairedSlotIds);
 }
 
 module.exports = {

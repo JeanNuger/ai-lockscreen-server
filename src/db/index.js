@@ -41,6 +41,7 @@ db.exec(`
     phrases TEXT NOT NULL,      -- JSON array of {text, style_id}
     source TEXT NOT NULL,       -- 'openai' | 'fallback'
     context TEXT,               -- JSON: what was sent to OpenAI as context (for admin monitoring)
+    trace_json TEXT,            -- JSON: per-slot generation trace for debugging
     delivered_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (device_id) REFERENCES devices(device_id)
   );
@@ -156,6 +157,11 @@ db.exec(`
 const deviceColumnNames = db.prepare('PRAGMA table_info(devices)').all().map((col) => col.name);
 if (!deviceColumnNames.includes('name')) {
   db.exec('ALTER TABLE devices ADD COLUMN name TEXT');
+}
+
+const contentBatchColumnNames = db.prepare('PRAGMA table_info(content_batches)').all().map((col) => col.name);
+if (!contentBatchColumnNames.includes('trace_json')) {
+  db.exec('ALTER TABLE content_batches ADD COLUMN trace_json TEXT');
 }
 
 module.exports = db;
