@@ -1234,6 +1234,8 @@ const MORNING_ANCHOR_TYPES = new Set([
   'history_today',
   'word_learning',
   'weather_lifehack',
+  'daily_horoscope',
+  'daily_numerology',
 ]);
 
 function collectUsablePhrases(phrases, languageCode, validationContext = {}, expectedSlotIds = null) {
@@ -1398,6 +1400,68 @@ const ANCHOR_FALLBACK_TEXT = {
   },
 };
 
+const ZODIAC_FALLBACK_TEXT = {
+  ru: {
+    Aries: 'Овен сегодня связан с одним ясным шагом',
+    Taurus: 'Телец сегодня связан с устойчивым темпом',
+    Gemini: 'Близнецы сегодня связаны с лёгким разговором',
+    Cancer: 'Рак сегодня связан с бережным ритмом',
+    Leo: 'Лев сегодня связан с тихой уверенностью',
+    Virgo: 'Дева сегодня связана с ровностью и порядком',
+    Libra: 'Весы сегодня связаны с равновесием в решениях',
+    Scorpio: 'Скорпион сегодня связан с собранным вниманием',
+    Sagittarius: 'Стрелец сегодня связан с более широким взглядом',
+    Capricorn: 'Козерог сегодня связан с практичным движением',
+    Aquarius: 'Водолей сегодня связан с новым углом зрения',
+    Pisces: 'Рыбы сегодня связаны с мягким воображением',
+  },
+  en: {
+    Aries: 'Aries energy today favors one clear step',
+    Taurus: 'Taurus energy today favors steady priorities',
+    Gemini: 'Gemini energy today favors simple conversations',
+    Cancer: 'Cancer energy today favors a gentler rhythm',
+    Leo: 'Leo energy today favors quiet confidence',
+    Virgo: 'Virgo energy today favors calm order',
+    Libra: 'Libra energy today favors balanced choices',
+    Scorpio: 'Scorpio energy today favors focused attention',
+    Sagittarius: 'Sagittarius energy today favors a wider view',
+    Capricorn: 'Capricorn energy today favors practical progress',
+    Aquarius: 'Aquarius energy today favors fresh thinking',
+    Pisces: 'Pisces energy today favors calm imagination',
+  },
+};
+
+const NUMEROLOGY_FALLBACK_TEXT = {
+  ru: {
+    1: 'Личный день 1 символически связан с новым началом',
+    2: 'Личный день 2 символически связан с терпением',
+    3: 'Личный день 3 символически связан с общением и идеями',
+    4: 'Личный день 4 символически связан с порядком',
+    5: 'Личный день 5 символически связан с гибкостью',
+    6: 'Личный день 6 символически связан с заботой и балансом',
+    7: 'Личный день 7 символически связан с размышлением',
+    8: 'Личный день 8 символически связан с практичным фокусом',
+    9: 'Личный день 9 символически связан с завершением',
+    11: 'Личный день 11 символически связан с интуицией',
+    22: 'Личный день 22 символически связан с терпеливой сборкой',
+    33: 'Личный день 33 символически связан с щедрым вниманием',
+  },
+  en: {
+    1: 'Personal day 1 symbolically favors a fresh start',
+    2: 'Personal day 2 symbolically favors patience',
+    3: 'Personal day 3 symbolically favors ideas and contact',
+    4: 'Personal day 4 symbolically favors order',
+    5: 'Personal day 5 symbolically favors flexibility',
+    6: 'Personal day 6 symbolically favors care and balance',
+    7: 'Personal day 7 symbolically favors reflection',
+    8: 'Personal day 8 symbolically favors practical focus',
+    9: 'Personal day 9 symbolically favors completion',
+    11: 'Personal day 11 symbolically favors intuition',
+    22: 'Personal day 22 symbolically favors building patiently',
+    33: 'Personal day 33 symbolically favors generous attention',
+  },
+};
+
 function fallbackTextForSlot(slot, languageCode) {
   const byType = slot && ANCHOR_FALLBACK_TEXT[slot.type];
   if (!byType) {
@@ -1460,6 +1524,14 @@ function groundedFallbackTextForSlot(slot, languageCode) {
     };
     return truncateFallbackText(leanText[facts.condition_lean] || bandText[facts.temp_band]);
   }
+  if (slot.type === 'daily_horoscope') {
+    const bySign = ZODIAC_FALLBACK_TEXT[languageCode] || ZODIAC_FALLBACK_TEXT.en;
+    return truncateFallbackText(bySign[facts.zodiac_sign]);
+  }
+  if (slot.type === 'daily_numerology') {
+    const byNumber = NUMEROLOGY_FALLBACK_TEXT[languageCode] || NUMEROLOGY_FALLBACK_TEXT.en;
+    return truncateFallbackText(byNumber[facts.personal_day_number]);
+  }
   return null;
 }
 
@@ -1479,6 +1551,12 @@ function missingAnchorReason(slot) {
   }
   if (slot.type === 'weather_lifehack') {
     return facts.temp_band || facts.condition_lean ? null : 'missing_weather_facts';
+  }
+  if (slot.type === 'daily_horoscope') {
+    return compactFactText(facts.zodiac_sign) ? null : 'missing_zodiac_sign';
+  }
+  if (slot.type === 'daily_numerology') {
+    return Number.isFinite(facts.personal_day_number) ? null : 'missing_personal_day_number';
   }
   return null;
 }
@@ -2150,7 +2228,7 @@ function buildSystemPrompt(languageCode) {
 Запрет: ?, «пусть», открытки, уют/чай/тихий свет/мысли/мечты/магия/чудеса/счастье/фея/чайник, ночная поэзия про ночь/луну/звезды/тишину/покой/шорох/фонари/небо/свечи/гирлянды, «верь в себя», «ты справишься», вода, коучинг, выдуманные факты, выдуманные названия мероприятий/фильмов/выставок.
 ЗАПРЕЩЕНО использовать повелительное наклонение и команды (используй, выбери, держи, создай, читай, проверяй). Пиши в формате короткого факта или наблюдения.
 Экономь слова, но не сокращай мысль искусственно — длина зависит от slot.length_hint, см. ниже.
-По типу slot: greeting_name — тёплое личное приветствие по имени (если оно есть в profile) и лёгкое светлое напутствие на день, каждый день другими словами; goodnight_care — мягкое пожелание доброго отдыха по имени (если есть), без потока «тишина/звёзды/фонари»; weather_lifehack — только простая бытовая фраза про одежду, зонт, обувь или солнце, без температуры и любых цифр; context_signal — тёплая, заботливая реакция на facts.signal (низкий заряд/много разблокировок/поздний час), без чисел и без тревожности; holiday_today/history_today — по делу, не энциклопедия; smart_humor_observation — тонкое ироничное наблюдение об обыденной жизни, не анекдот и не насмешка; city_afisha — только общее наблюдение о городской жизни/сезоне (парки, вечерние прогулки, привычки города), НИКОГДА не выдумывай конкретное название события/фильма/выставки или дату; free_ai_thought — одна короткая, по-настоящему интересная мысль о людях или цифровом мире.
+По типу slot: greeting_name — тёплое личное приветствие по имени (если оно есть в profile) и лёгкое светлое напутствие на день, каждый день другими словами; goodnight_care — мягкое пожелание доброго отдыха по имени (если есть), без потока «тишина/звёзды/фонари»; weather_lifehack — только простая бытовая фраза про одежду, зонт, обувь или солнце, без температуры и любых цифр; context_signal — тёплая, заботливая реакция на facts.signal (низкий заряд/много разблокировок/поздний час), без чисел и без тревожности; holiday_today/history_today — по делу, не энциклопедия; daily_horoscope — развлекательная символическая карточка по уже рассчитанному facts.zodiac_sign, не вычисляй знак, если называешь знак вслух, переведи его на язык ответа, не обещай события, без медицинских/финансовых/юридических предсказаний и без страха; daily_numerology — мягкая символическая карточка по уже рассчитанным числам, главный акцент на facts.personal_day_number, не вычисляй числа и не выдавай нумерологию за науку; smart_humor_observation — тонкое ироничное наблюдение об обыденной жизни, не анекдот и не насмешка; city_afisha — только общее наблюдение о городской жизни/сезоне (парки, вечерние прогулки, привычки города), НИКОГДА не выдумывай конкретное название события/фильма/выставки или дату; free_ai_thought — одна короткая, по-настоящему интересная мысль о людях или цифровом мире.
 Только факты из slot/profile/now; погода только бытовыми словами без температуры и цифр, но опирайся на facts.temp_band/facts.condition_lean, если они есть — разная погода должна звучать по-разному, а не одним и тем же «оденься теплее» каждый раз; утром можно имя 1 раз; gender/age дают только аккуратный практичный оттенок, без стереотипов и обращений вроде «для настоящих мужчин» или «для девочек»; facts.age_bracket (teen/young_adult/adult/mature/senior) можно использовать только как мягкий ориентир уместности темы и сложности тона, никогда не называя сам возраст или диапазон вслух; interest_hint и gender_lean_hint используй незаметно, без «since you like».
 Персонализация всегда должна выглядеть естественной, а не как отчёт о данных пользователя: никогда не пиши прямо «ты выбрал спорт», «раз тебе нравится X», «поскольку тебе N лет», «мы видим, что ты разблокировал телефон N раз» — только едва заметный сдвиг темы или тона, без ссылки на источник.
 context_signal: many_unlocks — тёплое, ненавязчивое наблюдение, никогда не упрёк и не «ты слишком много сидишь в телефоне»; low_battery — короткий практичный контекст без нравоучений; late_hour — спокойный, некатегоричный тон, без предположений о том, что человек уже спит.

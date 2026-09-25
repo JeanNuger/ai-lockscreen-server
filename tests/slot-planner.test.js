@@ -83,6 +83,91 @@ async function main() {
   assert.strictEqual(new Set(planned.slots.map((slot) => slot.slot_id)).size, BATCH_SIZE, 'slot IDs must be unique');
   assertFactualSlotsAreGrounded(planned.slots);
 
+  assert.strictEqual(plannerTest.zodiacSignForBirthDate('1995-05-20'), 'Taurus', 'ordinary birth date must resolve to Taurus');
+  assert.strictEqual(plannerTest.zodiacSignForBirthDate('1995-08-22'), 'Leo', 'zodiac boundary day before Virgo must stay Leo');
+  assert.strictEqual(plannerTest.zodiacSignForBirthDate('1995-08-23'), 'Virgo', 'zodiac boundary must switch to Virgo on Aug 23');
+  assert.strictEqual(plannerTest.zodiacSignForBirthDate('1995-12-21'), 'Sagittarius', 'day before Capricorn boundary must be Sagittarius');
+  assert.strictEqual(plannerTest.zodiacSignForBirthDate('1995-12-22'), 'Capricorn', 'December Capricorn boundary must work');
+  assert.strictEqual(plannerTest.zodiacSignForBirthDate('1995-01-19'), 'Capricorn', 'January Capricorn boundary must work');
+  assert.strictEqual(plannerTest.zodiacSignForBirthDate('1995-01-20'), 'Aquarius', 'January Aquarius boundary must work');
+  assert.strictEqual(plannerTest.zodiacSignForBirthDate('not-a-date'), null, 'invalid birth_date must not resolve to a zodiac sign');
+
+  assert.strictEqual(plannerTest.lifePathNumberForBirthDate('1990-07-15'), 5, 'life path must reduce full birth-date digits');
+  assert.strictEqual(plannerTest.lifePathNumberForBirthDate('2000-01-08'), 11, 'life path master number 11 must not reduce');
+  assert.strictEqual(plannerTest.lifePathNumberForBirthDate('2008-09-03'), 22, 'life path master number 22 must not reduce');
+  assert.strictEqual(plannerTest.lifePathNumberForBirthDate('1999-01-04'), 33, 'life path master number 33 must not reduce');
+  assert.strictEqual(plannerTest.personalYearNumberForBirthDate('1990-07-15', '2026-09-25'), 5, 'personal year must use birth month/day plus digits of local year');
+  assert.strictEqual(plannerTest.personalDayNumberForBirthDate('1990-07-15', '2026-09-25'), 3, 'personal day must use personal year plus local month/day');
+  assert.notStrictEqual(
+    plannerTest.personalDayNumberForBirthDate('1990-07-15', '2026-09-25'),
+    plannerTest.personalDayNumberForBirthDate('1990-07-15', '2026-09-26'),
+    'changing resolved local_date must change personal day when the reduced value differs'
+  );
+
+  const morningPersonal = planSlots({ ...baseInput, window: 'morning' }, { seed: 'personal-morning-seed' });
+  assert.strictEqual(morningPersonal.slots.length, BATCH_SIZE, 'personalized morning batch must remain exactly 12 slots');
+  const horoscopeSlot = morningPersonal.slots.find((slot) => slot.type === 'daily_horoscope');
+  const numerologySlot = morningPersonal.slots.find((slot) => slot.type === 'daily_numerology');
+  assert(horoscopeSlot, 'morning with valid birth_date must include daily_horoscope');
+  assert(numerologySlot, 'morning with valid birth_date must include daily_numerology');
+  assert.strictEqual(horoscopeSlot.facts.zodiac_sign, 'Taurus');
+  assert(!('birth_date' in horoscopeSlot.facts), 'horoscope facts must not expose raw birth_date');
+  assert.strictEqual(typeof numerologySlot.facts.life_path_number, 'number');
+  assert.strictEqual(typeof numerologySlot.facts.personal_year_number, 'number');
+  assert.strictEqual(typeof numerologySlot.facts.personal_day_number, 'number');
+  assert(!('birth_date' in numerologySlot.facts), 'numerology facts must not expose raw birth_date');
+
+  for (const window of ['day', 'evening', 'night']) {
+    const plannedWindow = planSlots({ ...baseInput, window }, { seed: `personal-${window}-seed` });
+    assert(!plannedWindow.slots.some((slot) => slot.type === 'daily_horoscope'), `${window} must not include daily_horoscope`);
+    assert(!plannedWindow.slots.some((slot) => slot.type === 'daily_numerology'), `${window} must not include daily_numerology`);
+  }
+
+  const invalidBirthDateMorning = planSlots({
+    ...baseInput,
+    window: 'morning',
+    device: { ...baseInput.device, birth_date: '1995-02-30' },
+  }, { seed: 'invalid-birth-date-seed' });
+  assert(!invalidBirthDateMorning.slots.some((slot) => slot.type === 'daily_horoscope'), 'invalid birth_date must not create horoscope slot');
+  assert(!invalidBirthDateMorning.slots.some((slot) => slot.type === 'daily_numerology'), 'invalid birth_date must not create numerology slot');
+
+  const missingBirthDateMorning = planSlots({
+    ...baseInput,
+    window: 'morning',
+    device: { ...baseInput.device, birth_date: null },
+  }, { seed: 'missing-birth-date-seed' });
+  assert(!missingBirthDateMorning.slots.some((slot) => slot.type === 'daily_horoscope'), 'missing birth_date must not create horoscope slot');
+  assert(!missingBirthDateMorning.slots.some((slot) => slot.type === 'daily_numerology'), 'missing birth_date must not create numerology slot');
+
+  const personalPayload = JSON.parse(contentTest.buildContextPrompt(
+    baseInput.device,
+    'morning',
+    { system_language: 'en' },
+    baseInput.weather,
+    'en',
+    morningPersonal.slots,
+    baseInput.dateContext
+  ));
+  const personalPayloadText = JSON.stringify(personalPayload);
+  const payloadHoroscope = personalPayload.slots.find((slot) => slot.type === 'daily_horoscope');
+  const payloadNumerology = personalPayload.slots.find((slot) => slot.type === 'daily_numerology');
+  assert.strictEqual(payloadHoroscope.facts.zodiac_sign, 'Taurus', 'OpenAI payload must get deterministic zodiac_sign');
+  assert.strictEqual(typeof payloadNumerology.facts.personal_day_number, 'number', 'OpenAI payload must get deterministic numerology numbers');
+  assert(!personalPayloadText.includes(baseInput.device.birth_date), 'OpenAI payload must not include raw birth_date');
+
+  const ruPersonalPayload = JSON.parse(contentTest.buildContextPrompt(
+    baseInput.device,
+    'morning',
+    { system_language: 'ru' },
+    baseInput.weather,
+    'ru',
+    morningPersonal.slots,
+    baseInput.dateContext
+  ));
+  const ruPersonalPayloadText = JSON.stringify(ruPersonalPayload);
+  assert.strictEqual(ruPersonalPayload.now.language, 'Russian', 'OpenAI prompt context must inherit resolved Russian language');
+  assert(!ruPersonalPayloadText.includes(baseInput.device.birth_date), 'Russian OpenAI payload must not include raw birth_date');
+
   assert.strictEqual(
     plannerTest.antiRepeatPenalty(
       plannerTest.createCandidate({ id: 'recent-content', type: 'science_tech', priority: 50, facts: { text: 'Recent' } }),
@@ -606,6 +691,58 @@ async function main() {
   );
   assert.strictEqual(wordAnchorRejected.phrases[0].text, 'Break the ice means ease tension');
 
+  const horoscopeAnchorSlots = anchorRegressionSlots({
+    id: 'daily_horoscope_anchor',
+    type: 'daily_horoscope',
+    facts: { zodiac_sign: 'Virgo', interpretation_focus: 'organization' },
+  });
+  const horoscopeAnchorRejected = contentTest.assembleBatchFromGeneratedPhrases(
+    generatedWithRejectedFirst(horoscopeAnchorSlots),
+    'en',
+    {},
+    horoscopeAnchorSlots
+  );
+  assert.strictEqual(horoscopeAnchorRejected.phrases[0].text, 'Virgo energy today favors calm order');
+  const ruHoroscopeAnchorRejected = contentTest.assembleBatchFromGeneratedPhrases(
+    generatedWithRejectedFirst(horoscopeAnchorSlots),
+    'ru',
+    {},
+    horoscopeAnchorSlots
+  );
+  assert.strictEqual(ruHoroscopeAnchorRejected.phrases[0].text, 'Дева сегодня связана с ровностью и порядком');
+  assert(!ruHoroscopeAnchorRejected.phrases[0].text.includes('Virgo'), 'ru horoscope fallback must not expose canonical English zodiac sign');
+  assert.notStrictEqual(
+    horoscopeAnchorRejected.phrases[0].text,
+    'Иногда достаточно просто мирно пережить день',
+    'generic fallback phrase must never replace daily_horoscope'
+  );
+
+  const numerologyAnchorSlots = anchorRegressionSlots({
+    id: 'daily_numerology_anchor',
+    type: 'daily_numerology',
+    facts: { life_path_number: 5, personal_year_number: 8, personal_day_number: 3, interpretation_focus: 'communication' },
+  });
+  const numerologyAnchorRejected = contentTest.assembleBatchFromGeneratedPhrases(
+    generatedWithRejectedFirst(numerologyAnchorSlots),
+    'en',
+    {},
+    numerologyAnchorSlots
+  );
+  assert.strictEqual(numerologyAnchorRejected.phrases[0].text, 'Personal day 3 symbolically favors ideas and contact');
+  const ruNumerologyAnchorRejected = contentTest.assembleBatchFromGeneratedPhrases(
+    generatedWithRejectedFirst(numerologyAnchorSlots),
+    'ru',
+    {},
+    numerologyAnchorSlots
+  );
+  assert.strictEqual(ruNumerologyAnchorRejected.phrases[0].text, 'Личный день 3 символически связан с общением и идеями');
+  assert(/Личный день 3/.test(ruNumerologyAnchorRejected.phrases[0].text), 'ru numerology fallback must use Russian wording around the same number');
+  assert.notStrictEqual(
+    numerologyAnchorRejected.phrases[0].text,
+    'Иногда достаточно просто мирно пережить день',
+    'generic fallback phrase must never replace daily_numerology'
+  );
+
   const missingAnchorWarnings = [];
   const originalWarn = console.warn;
   console.warn = (message) => {
@@ -728,6 +865,11 @@ async function main() {
   assert(/незаметно/i.test(systemPromptText), 'system prompt must require invisible personalization');
   assert(/since you like/i.test(systemPromptText), 'system prompt must explicitly forbid profile-revealing phrasing like "since you like X"');
   assert(/выдуманные факты/i.test(systemPromptText), 'system prompt must forbid inventing facts/connections to satisfy an interest hint');
+  assert(/daily_horoscope/i.test(systemPromptText), 'system prompt must document daily_horoscope');
+  assert(/facts\.zodiac_sign/i.test(systemPromptText), 'system prompt must tell OpenAI to use precomputed zodiac_sign');
+  assert(/переведи его на язык ответа/i.test(systemPromptText), 'system prompt must require localized zodiac sign names in user-visible text');
+  assert(/daily_numerology/i.test(systemPromptText), 'system prompt must document daily_numerology');
+  assert(/facts\.personal_day_number/i.test(systemPromptText), 'system prompt must emphasize precomputed personal_day_number');
 
   const bankDate = getBankDateString();
   db.prepare(`

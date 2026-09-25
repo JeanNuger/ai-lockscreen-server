@@ -19,6 +19,8 @@ const CONTENT_TYPES = [
   'holiday_today',
   'history_today',
   'word_learning',
+  'daily_horoscope',
+  'daily_numerology',
   'learning_recall',
   'science_tech',
   'money_economics',
@@ -62,6 +64,8 @@ const TYPE_LENGTH_HINTS = {
   smart_humor_observation: 'short',
   weather_lifehack: 'medium',
   holiday_today: 'medium',
+  daily_horoscope: 'medium',
+  daily_numerology: 'medium',
   free_ai_thought: 'medium',
   context_signal: 'medium',
   age_context: 'medium',
@@ -90,6 +94,8 @@ const FACTUAL_TYPES = new Set([
   'holiday_today',
   'history_today',
   'word_learning',
+  'daily_horoscope',
+  'daily_numerology',
   'learning_recall',
   'science_tech',
   'money_economics',
@@ -196,6 +202,8 @@ const SYNTHETIC_POOL = [
 const TYPE_CAPS = {
   greeting_name: 1,
   goodnight_care: 1,
+  daily_horoscope: 1,
+  daily_numerology: 1,
   context_signal: 1,
   smart_humor_observation: 2,
   city_afisha: 2,
@@ -239,8 +247,9 @@ const MAX_GENERIC_FILLER_PER_BATCH = 4;
 const GENERIC_FILLER_COUNT_KEY = Symbol('genericFillerCount');
 
 // Window-aware fixed slots (product decision, see task history): morning
-// positions 1-5 are a strict sequence -- greeting_name, weather_lifehack,
-// holiday_today, history_today, word_learning, in that exact order -- not
+// positions 1-7 are a strict sequence -- greeting_name, weather_lifehack,
+// holiday_today, history_today, word_learning, daily_horoscope,
+// daily_numerology, in that exact order when each candidate exists -- not
 // merely "guaranteed somewhere in the batch." Night's second-to-last slot is
 // learning_recall (if a candidate exists) with goodnight_care fixed last, via
 // the existing separate mandatory-last mechanism in planSlots. day/evening
@@ -256,8 +265,8 @@ const GENERIC_FILLER_COUNT_KEY = Symbol('genericFillerCount');
 // mechanism (selectGuaranteedSlots/guaranteedTypesForWindow) is kept in
 // place, not deleted, in case a future window needs a "guaranteed, but not a
 // fixed position" category without reintroducing this same bug.
-const MORNING_FIXED_TYPES = ['greeting_name', 'weather_lifehack', 'holiday_today', 'history_today', 'word_learning'];
-const MORNING_ONLY_TYPES = new Set(['weather_lifehack', 'holiday_today', 'history_today', 'word_learning']);
+const MORNING_FIXED_TYPES = ['greeting_name', 'weather_lifehack', 'holiday_today', 'history_today', 'word_learning', 'daily_horoscope', 'daily_numerology'];
+const MORNING_ONLY_TYPES = new Set(['weather_lifehack', 'holiday_today', 'history_today', 'word_learning', 'daily_horoscope', 'daily_numerology']);
 const GUARANTEED_TYPES_BY_WINDOW = {
   morning: [],
   day: [],
@@ -440,6 +449,148 @@ function computeAge(birthDate, now = new Date()) {
   return age >= 0 ? age : null;
 }
 
+function parseBirthDateParts(birthDate) {
+  if (typeof birthDate !== 'string') {
+    return null;
+  }
+  const match = birthDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return null;
+  }
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month - 1 ||
+    parsed.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return { year, month, day };
+}
+
+const ZODIAC_BOUNDARIES = [
+  { sign: 'Capricorn', startMonth: 1, startDay: 1 },
+  { sign: 'Aquarius', startMonth: 1, startDay: 20 },
+  { sign: 'Pisces', startMonth: 2, startDay: 19 },
+  { sign: 'Aries', startMonth: 3, startDay: 21 },
+  { sign: 'Taurus', startMonth: 4, startDay: 20 },
+  { sign: 'Gemini', startMonth: 5, startDay: 21 },
+  { sign: 'Cancer', startMonth: 6, startDay: 21 },
+  { sign: 'Leo', startMonth: 7, startDay: 23 },
+  { sign: 'Virgo', startMonth: 8, startDay: 23 },
+  { sign: 'Libra', startMonth: 9, startDay: 23 },
+  { sign: 'Scorpio', startMonth: 10, startDay: 23 },
+  { sign: 'Sagittarius', startMonth: 11, startDay: 22 },
+  { sign: 'Capricorn', startMonth: 12, startDay: 22 },
+];
+
+function zodiacSignForBirthDate(birthDate) {
+  const parts = parseBirthDateParts(birthDate);
+  if (!parts) {
+    return null;
+  }
+  let sign = 'Capricorn';
+  for (const boundary of ZODIAC_BOUNDARIES) {
+    if (
+      parts.month > boundary.startMonth ||
+      (parts.month === boundary.startMonth && parts.day >= boundary.startDay)
+    ) {
+      sign = boundary.sign;
+    }
+  }
+  return sign;
+}
+
+const MASTER_NUMBERS = new Set([11, 22, 33]);
+
+function digitSum(value) {
+  return String(value || '')
+    .replace(/\D/g, '')
+    .split('')
+    .reduce((sum, digit) => sum + Number(digit), 0);
+}
+
+function reduceNumerologyNumber(value) {
+  let current = Number(value);
+  if (!Number.isFinite(current) || current <= 0) {
+    return null;
+  }
+  current = Math.trunc(current);
+  while (current > 9 && !MASTER_NUMBERS.has(current)) {
+    current = digitSum(current);
+  }
+  return current;
+}
+
+function lifePathNumberForBirthDate(birthDate) {
+  const parts = parseBirthDateParts(birthDate);
+  if (!parts) {
+    return null;
+  }
+  return reduceNumerologyNumber(digitSum(`${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`));
+}
+
+function parseLocalDateParts(localDate) {
+  return parseBirthDateParts(localDate);
+}
+
+function personalYearNumberForBirthDate(birthDate, localDate) {
+  const birth = parseBirthDateParts(birthDate);
+  const date = parseLocalDateParts(localDate);
+  if (!birth || !date) {
+    return null;
+  }
+  return reduceNumerologyNumber(birth.month + birth.day + digitSum(date.year));
+}
+
+function personalDayNumberForBirthDate(birthDate, localDate) {
+  const date = parseLocalDateParts(localDate);
+  const personalYear = personalYearNumberForBirthDate(birthDate, localDate);
+  if (!date || !personalYear) {
+    return null;
+  }
+  return reduceNumerologyNumber(personalYear + date.month + date.day);
+}
+
+const PERSONAL_FOCUS_HINTS = ['focus', 'communication', 'rest', 'organization', 'creativity'];
+
+function deterministicFocusHint(deviceId, localDate, contentType) {
+  const seed = `${deviceId || 'device'}|${localDate || 'date'}|${contentType}`;
+  return PERSONAL_FOCUS_HINTS[hashString(seed) % PERSONAL_FOCUS_HINTS.length];
+}
+
+function personalMorningFacts(device, dateContext) {
+  const localDate = dateContext && dateContext.date;
+  if (!device || !localDate || !parseBirthDateParts(device.birth_date)) {
+    return null;
+  }
+  const zodiacSign = zodiacSignForBirthDate(device.birth_date);
+  const lifePathNumber = lifePathNumberForBirthDate(device.birth_date);
+  const personalYearNumber = personalYearNumberForBirthDate(device.birth_date, localDate);
+  const personalDayNumber = personalDayNumberForBirthDate(device.birth_date, localDate);
+  if (!zodiacSign || !lifePathNumber || !personalYearNumber || !personalDayNumber) {
+    return null;
+  }
+  return {
+    horoscope: {
+      zodiac_sign: zodiacSign,
+      interpretation_focus: deterministicFocusHint(device.device_id, localDate, 'daily_horoscope'),
+    },
+    numerology: {
+      life_path_number: lifePathNumber,
+      personal_year_number: personalYearNumber,
+      personal_day_number: personalDayNumber,
+      interpretation_focus: deterministicFocusHint(device.device_id, localDate, 'daily_numerology'),
+    },
+  };
+}
+
 const PHONE_TREND_KEYS = new Set([
   'unlocks_vs_yesterday',
   'steps_vs_yesterday',
@@ -602,6 +753,28 @@ function collectCandidates(input = {}) {
       source: 'weather',
       constraints: ['avoid_exact_right_now', 'safe_for_batch_delay', 'temperature_grounding_only', 'do_not_state_exact_temperature', 'no_digits', 'simple_clothing_umbrella_shoes_sun_advice', 'vary_advice_by_temp_band_and_condition'],
     }));
+  }
+
+  if (window === 'morning') {
+    const personalFacts = personalMorningFacts(device, dateContext);
+    if (personalFacts) {
+      candidates.push(createCandidate({
+        id: 'daily_horoscope_profile',
+        type: 'daily_horoscope',
+        priority: 58,
+        facts: personalFacts.horoscope,
+        source: 'profile',
+        constraints: ['symbolic_entertainment_only', 'no_predictions', 'no_medical_financial_legal_claims', 'no_fear', 'short_reflective_tone'],
+      }));
+      candidates.push(createCandidate({
+        id: 'daily_numerology_profile',
+        type: 'daily_numerology',
+        priority: 57,
+        facts: personalFacts.numerology,
+        source: 'profile',
+        constraints: ['symbolic_entertainment_only', 'emphasize_personal_day_number', 'no_scientific_claim', 'no_predictions', 'short_reflective_tone'],
+      }));
+    }
   }
 
   const contextSignal = resolveContextSignal(signals, dateContext);
@@ -1274,6 +1447,13 @@ module.exports = {
     GENERIC_FILLER_TYPES,
     MAX_GENERIC_FILLER_PER_BATCH,
     ageBracketFor,
+    parseBirthDateParts,
+    zodiacSignForBirthDate,
+    reduceNumerologyNumber,
+    lifePathNumberForBirthDate,
+    personalYearNumberForBirthDate,
+    personalDayNumberForBirthDate,
+    deterministicFocusHint,
     temperatureBand,
     weatherConditionLean,
     contextSignalConstraints,

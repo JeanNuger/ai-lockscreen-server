@@ -1,8 +1,9 @@
 // Regression coverage for window-aware FIXED slots (replaces the earlier
-// "guaranteed anywhere in the batch, any window" design): morning positions
-// 1-5 must be the strict sequence greeting_name -> weather_lifehack ->
-// holiday_today -> history_today -> word_learning; day/evening must never
-// offer these 4 types as candidates at all; night must never offer them
+// "guaranteed anywhere in the batch, any window" design): morning starts with
+// the strict sequence greeting_name -> weather_lifehack -> holiday_today ->
+// history_today -> word_learning, and with a valid birth_date adds the two
+// personal anchors daily_horoscope -> daily_numerology; day/evening must never
+// offer these morning-only types as candidates at all; night must never offer them
 // either, and its second-to-last slot must be learning_recall (if a
 // candidate exists) with goodnight_care last. Runs planSlots() directly (no
 // OpenAI calls) across many seeds to prove this holds every time, not just
@@ -11,10 +12,11 @@ const assert = require('assert');
 const { BATCH_SIZE } = require('../src/constants');
 const { planSlots, _test: plannerTest } = require('../src/slotPlanner');
 
-const WINDOW_RESTRICTED_TYPES = ['weather_lifehack', 'holiday_today', 'history_today', 'word_learning'];
+const WINDOW_RESTRICTED_TYPES = ['weather_lifehack', 'holiday_today', 'history_today', 'word_learning', 'daily_horoscope', 'daily_numerology'];
+const LEGACY_MORNING_PREFIX = ['greeting_name', 'weather_lifehack', 'holiday_today', 'history_today', 'word_learning'];
 
 const baseInput = {
-  device: { device_id: 'guaranteed-device' },
+  device: { device_id: 'guaranteed-device', birth_date: '1995-05-20' },
   window: 'morning',
   dateContext: {
     date: '2026-09-21',
@@ -31,7 +33,7 @@ const baseInput = {
     // Plenty of high-volume competitive content so the fixed types have real
     // competition to win against -- if the fixed-position mechanism were
     // broken (still just weighted-random), some of the runs below would miss
-    // one of the 4 fixed types by chance, or land it out of sequence.
+    // one of the fixed types by chance, or land it out of sequence.
     { id: 4, category: 'quote', content_text: 'A quote to fill a slot.', tags: ['global'] },
     { id: 5, category: 'fact', content_text: 'A fact to fill a slot.', tags: ['global'] },
     { id: 6, category: 'statistic', content_text: 'A statistic to fill a slot.', tags: ['global'] },
@@ -51,30 +53,30 @@ function main() {
   // 1. Direct list check requested by the task: the approved fixed sequence.
   assert.deepStrictEqual(
     plannerTest.MORNING_FIXED_TYPES,
-    ['greeting_name', 'weather_lifehack', 'holiday_today', 'history_today', 'word_learning'],
-    'morning fixed-position sequence must match the agreed 1-5 order'
+    ['greeting_name', 'weather_lifehack', 'holiday_today', 'history_today', 'word_learning', 'daily_horoscope', 'daily_numerology'],
+    'morning fixed-position sequence must include legacy anchors followed by personal anchors'
   );
   assert.deepStrictEqual(
     [...plannerTest.MORNING_ONLY_TYPES].sort(),
     WINDOW_RESTRICTED_TYPES.slice().sort(),
-    'weather/holiday/history/word_learning must be the exact morning-only type set'
+    'morning-only type set must include weather/holiday/history/word_learning plus personal anchors'
   );
 
-  // 2. Morning: positions 1-5 must be the EXACT strict sequence, every run,
-  // when content for all 4 restricted types exists -- not just "present
+  // 2. Morning: fixed positions must be the EXACT strict sequence, every run,
+  // when content for all restricted types exists -- not just "present
   // somewhere," the literal index order.
   const RUN_COUNT = 30;
   for (let i = 0; i < RUN_COUNT; i++) {
     const planned = planSlots(baseInput, { seed: `morning-run-${i}` });
     assert.strictEqual(planned.slots.length, BATCH_SIZE, `run ${i} must still return ${BATCH_SIZE} slots`);
-    const firstFive = planned.slots.slice(0, 5).map((slot) => slot.type);
+    const fixedPrefix = planned.slots.slice(0, plannerTest.MORNING_FIXED_TYPES.length).map((slot) => slot.type);
     assert.deepStrictEqual(
-      firstFive,
+      fixedPrefix,
       plannerTest.MORNING_FIXED_TYPES,
-      `run ${i} (seed morning-run-${i}): positions 1-5 must be exactly ${JSON.stringify(plannerTest.MORNING_FIXED_TYPES)}, got ${JSON.stringify(firstFive)}`
+      `run ${i} (seed morning-run-${i}): fixed positions must be exactly ${JSON.stringify(plannerTest.MORNING_FIXED_TYPES)}, got ${JSON.stringify(fixedPrefix)}`
     );
-    // None of the 4 restricted types may appear a second time in positions 6-12.
-    const rest = planned.slots.slice(5).map((slot) => slot.type);
+    // None of the restricted types may appear a second time after its fixed position.
+    const rest = planned.slots.slice(plannerTest.MORNING_FIXED_TYPES.length).map((slot) => slot.type);
     for (const restrictedType of WINDOW_RESTRICTED_TYPES) {
       assert(
         !rest.includes(restrictedType),
@@ -83,7 +85,7 @@ function main() {
     }
   }
 
-  // 3. day/evening: the 4 restricted types must never be candidates at all,
+  // 3. day/evening: restricted types must never be candidates at all,
   // even though the same rich bankItems/weather input is supplied.
   for (const window of ['day', 'evening']) {
     for (let i = 0; i < 10; i++) {
@@ -99,7 +101,7 @@ function main() {
     }
   }
 
-  // 4. night: the 4 restricted types must never appear either; when a
+  // 4. night: restricted types must never appear either; when a
   // learning_recall candidate exists it must sit at the second-to-last
   // position (index BATCH_SIZE - 2), with goodnight_care last.
   {
@@ -152,13 +154,25 @@ function main() {
   for (let i = 0; i < 10; i++) {
     const planned = planSlots(noWeatherInput, { seed: `no-weather-run-${i}` });
     assert.strictEqual(planned.slots.length, BATCH_SIZE);
-    const firstFour = planned.slots.slice(0, 4).map((slot) => slot.type);
+    const firstSix = planned.slots.slice(0, 6).map((slot) => slot.type);
     assert.deepStrictEqual(
-      firstFour,
-      ['greeting_name', 'holiday_today', 'history_today', 'word_learning'],
-      `no-weather run ${i}: fixed sequence must condense, not leave a gap, got ${JSON.stringify(firstFour)}`
+      firstSix,
+      ['greeting_name', 'holiday_today', 'history_today', 'word_learning', 'daily_horoscope', 'daily_numerology'],
+      `no-weather run ${i}: fixed sequence must condense, not leave a gap, got ${JSON.stringify(firstSix)}`
     );
     assert(!slotTypes(planned.slots).has('weather_lifehack'), `no-weather run ${i} must not have a weather slot when there is no weather data`);
+  }
+
+  const noBirthDateInput = { ...baseInput, device: { device_id: 'no-birth-date-device' } };
+  for (let i = 0; i < 5; i++) {
+    const planned = planSlots(noBirthDateInput, { seed: `no-birth-date-run-${i}` });
+    assert.deepStrictEqual(
+      planned.slots.slice(0, LEGACY_MORNING_PREFIX.length).map((slot) => slot.type),
+      LEGACY_MORNING_PREFIX,
+      `no-birth-date run ${i}: legacy morning prefix must stay intact`
+    );
+    assert(!planned.slots.some((slot) => slot.type === 'daily_horoscope'), `no-birth-date run ${i}: must not invent horoscope`);
+    assert(!planned.slots.some((slot) => slot.type === 'daily_numerology'), `no-birth-date run ${i}: must not invent numerology`);
   }
 
   // 6. Type caps still respected: the fixed-position pick plus a second,
