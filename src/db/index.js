@@ -143,6 +143,31 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_device_learning_memory_recall
     ON device_learning_memory(device_id, recalled_at, learned_at);
+
+  -- morning_packs: the "morning pack" feature -- a fixed, mandatory 7-slot set
+  -- (greeting_name -> holiday_today -> weather_lifehack -> history_today ->
+  -- daily_horoscope -> daily_numerology -> word_learning) generated the
+  -- EVENING BEFORE and delivered to the client alongside a normal /batch
+  -- response, so it's already cached locally with no network needed at wake
+  -- time. Keyed by (device_id, local_date) with a UNIQUE constraint so the
+  -- pack for a given device/date is generated exactly once -- a second
+  -- concurrent request that loses the race on INSERT reads back the winner's
+  -- row instead of generating (or storing) a duplicate. local_date is the
+  -- pack's target_date (the calendar date the pack's content is FOR), not the
+  -- date it was generated/requested on.
+  CREATE TABLE IF NOT EXISTS morning_packs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    local_date TEXT NOT NULL,
+    pack_json TEXT NOT NULL,
+    trace_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (device_id, local_date),
+    FOREIGN KEY (device_id) REFERENCES devices(device_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_morning_packs_device_date
+    ON morning_packs(device_id, local_date);
 `);
 
 // One-off migration: devices.name is new as of 2026-09-12. This project has no

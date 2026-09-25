@@ -14,7 +14,7 @@ const {
   recordLearnedWords,
   recordRecalledWords,
 } = require('./learningMemory');
-const { planSlots, MORNING_FIXED_TYPES } = require('./slotPlanner');
+const { planSlots, planMorningPack, MORNING_FIXED_TYPES } = require('./slotPlanner');
 const {
   hasQuestionMark,
   validateLockScreenText,
@@ -1820,6 +1820,40 @@ function pickFallbackTextForSlot(slot, languageCode, seenTexts, fallbackTexts, v
   return null;
 }
 
+// Morning-pack-only fallback picker: unlike pickFallbackTextForSlot (the
+// ordinary batch path), this NEVER falls through to the generic
+// FALLBACK_PHRASES pool (pack rule: "NO FALLBACK_PHRASES ... ever") -- it
+// only ever considers the same per-type grounded/anchor/zodiac/numerology/
+// weather fallback text the ordinary morning anchors already use, and only
+// accepts it if fallbackLanguageForPool says that text is actually in the
+// user's target language. A pack slot whose grounded fallback would be in
+// the wrong language (e.g. an English-only zodiac line for a Japanese pack)
+// is dropped instead of ever being shown -- returns null in every case where
+// the ordinary path would have reached further into the generic pool.
+function pickPackFallbackTextForSlot(slot, languageCode, seenTexts, fallbackTrace) {
+  if (!slot || !MORNING_ANCHOR_TYPES.has(slot.type)) {
+    return null;
+  }
+  if (missingAnchorReason(slot)) {
+    return null;
+  }
+  const groundedFallback = groundedFallbackTextForSlot(slot, languageCode);
+  if (!groundedFallback) {
+    return null;
+  }
+  const pool = fallbackPoolForSlot(slot, groundedFallback, languageCode, []);
+  const issuedLanguage = fallbackLanguageForPool(pool, languageCode);
+  if (issuedLanguage !== languageCode) {
+    return null;
+  }
+  const normalized = normalizeTextForDedupe(groundedFallback);
+  if (isUnusableLockScreenText(groundedFallback) || seenTexts.has(normalized)) {
+    return null;
+  }
+  fallbackTrace.push(fallbackTraceForText(slot, groundedFallback, languageCode, []));
+  return groundedFallback;
+}
+
 function assembleByExpectedSlotOrder(generated, languageCode, expectedSlots, validationContext = {}, rejectedDetails = [], traceParts = null) {
   const fallbackPhrases = activeFallbackPhrases(languageCode);
   const shuffledFallback = [...fallbackPhrases].sort(() => Math.random() - 0.5);
@@ -1928,6 +1962,31 @@ function assembleBatchFromGeneratedPhrases(phrases, languageCode, validationCont
       : generated.length === 0
         ? 'all_invalid_fallback'
         : 'partial_validation_fill',
+  };
+}
+
+// Morning-pack-only assembly: reuses collectUsablePhrases (identical
+// validation) but never fills missing/rejected slots with anything -- the
+// caller (generateMorningPack) is responsible for either dropping a still-
+// missing slot or, only for the MORNING_ANCHOR_TYPES the pack always uses,
+// trying pickPackFallbackTextForSlot's language-safe grounded fallback.
+// Returns the accepted subset unordered (slot order is restored by the
+// caller, which walks packSlots itself) plus everything needed to drive a
+// repair pass identical to the ordinary batch's.
+function assemblePackFromGeneratedPhrases(phrases, languageCode, validationContext, packSlots, traceParts = null) {
+  const expectedSlotIds = packSlots.map((slot) => slot.slot_id);
+  const collected = collectUsablePhrases(phrases, languageCode, validationContext, expectedSlotIds);
+  if (!collected) {
+    return { phrases: [], rejectedSlotIds: expectedSlotIds, rejectedDetails: [], rejectionReasons: {} };
+  }
+  if (traceParts && !traceParts.firstPass) {
+    traceParts.firstPass = traceResultsFromCollected(collected, packSlots);
+  }
+  return {
+    phrases: collected.accepted,
+    rejectedSlotIds: collected.rejectedSlotIds,
+    rejectedDetails: collected.rejectedDetails,
+    rejectionReasons: collected.rejectionReasons,
   };
 }
 
@@ -2042,7 +2101,14 @@ function traceFinalAssembly(trace, assembly, slots, repairedSlotIds = new Set())
   });
 }
 
-function buildLoggedFallbackResult(languageCode, context, reason, rejectedCount = 0, trace = null, slots = []) {
+// dateContext (last param, optional): carried through onto the returned
+// object only -- never serialized into the HTTP response itself (routes/
+// batch.js only ever reads `.phrases`/`.source`/`.context`/`.trace` off the
+// old shape, so this is purely additive) -- added so routes/batch.js can
+// compute the morning-pack target_date without recomputing
+// resolveLocalDateContext a second time. Omitted (undefined) by every
+// pre-existing call site that doesn't pass it, which is harmless.
+function buildLoggedFallbackResult(languageCode, context, reason, rejectedCount = 0, trace = null, slots = [], dateContext = null) {
   logBatchResult({
     generatedCount: 0,
     rejectedCount,
@@ -2053,18 +2119,18 @@ function buildLoggedFallbackResult(languageCode, context, reason, rejectedCount 
   buildTraceForFullFallback(trace, languageCode, slots, phrases);
   markWholeBatchFallback(trace, reason);
   summarizeTrace(trace, slots, {});
-  return { phrases, source: 'fallback', context, trace };
+  return { phrases, source: 'fallback', context, trace, dateContext };
 }
 
-function buildLoggedOpenAiResult(assembly, context, trace = null, slots = [], repairedSlotIds = new Set()) {
+function buildLoggedOpenAiResult(assembly, context, trace = null, slots = [], repairedSlotIds = new Set(), dateContext = null) {
   logBatchResult(assembly);
   traceFinalAssembly(trace, assembly, slots, repairedSlotIds);
   summarizeTrace(trace, slots, assembly.rejectionReasons);
   const phrases = assembly.phrases.map((item) => ({ text: item.text, style_id: item.style_id }));
-  return { phrases, source: assembly.generatedCount > 0 ? 'openai' : 'fallback', context, trace };
+  return { phrases, source: assembly.generatedCount > 0 ? 'openai' : 'fallback', context, trace, dateContext };
 }
 
-function buildLoggedFinalAssemblyFallback(languageCode, context, assembly, trace = null, slots = []) {
+function buildLoggedFinalAssemblyFallback(languageCode, context, assembly, trace = null, slots = [], dateContext = null) {
   logBatchResult({
     generatedCount: assembly ? assembly.generatedCount : 0,
     rejectedCount: assembly ? assembly.rejectedCount : 0,
@@ -2076,7 +2142,7 @@ function buildLoggedFinalAssemblyFallback(languageCode, context, assembly, trace
   buildTraceForFullFallback(trace, languageCode, slots, phrases);
   markWholeBatchFallback(trace, 'final_assembly_fallback');
   summarizeTrace(trace, slots, assembly ? assembly.rejectionReasons : {});
-  return { phrases, source: 'fallback', context, trace };
+  return { phrases, source: 'fallback', context, trace, dateContext };
 }
 
 function parseOpenAiBatchResponse(response) {
@@ -2312,6 +2378,28 @@ function resolveLocalDateContext(timezone, forcedLocalDate = null) {
 
 function getLocalDateContext(timezone) {
   return resolveLocalDateContext(timezone).dateContext;
+}
+
+// Same shape as resolveLocalDateContext's dateContext, but for an arbitrary
+// calendar date (the morning pack's target_date) rather than "now" in some
+// timezone -- weekday-of-a-calendar-date is timezone-independent (see
+// weekdayForDateString's own UTC-anchored implementation), so this needs no
+// timezone input at all. No `time` field: the pack is generated the evening
+// before for a future morning, so "now.time" has no honest value to report
+// (see buildContextPrompt, which simply omits now.time when dateContext.time
+// is undefined) -- and context_signal (the one type that reads dateContext.time)
+// is never a pack slot type anyway.
+function buildTargetDateContext(targetDate) {
+  if (!isValidDateString(targetDate)) {
+    return null;
+  }
+  const weekday = weekdayForDateString(targetDate);
+  const tomorrowDate = addDaysToDateString(targetDate, 1);
+  const tomorrowWeekday = tomorrowDate ? weekdayForDateString(tomorrowDate) : null;
+  if (!weekday || !tomorrowDate || !tomorrowWeekday) {
+    return null;
+  }
+  return { date: targetDate, weekday, tomorrow_date: tomorrowDate, tomorrow_weekday: tomorrowWeekday };
 }
 
 // Formats `instant` as the calendar date (YYYY-MM-DD) it falls on within
@@ -2563,6 +2651,251 @@ ${LOCK_SCREEN_TEXT_MAX_LENGTH} символов — это ТОЛЬКО авар
 }
 
 /**
+ * Generates the "morning pack" -- a fixed, mandatory 7-slot set (see
+ * planMorningPack/MORNING_FIXED_TYPES) for a specific target_date, as a
+ * SEPARATE OpenAI call from the ordinary batch. Reuses createOpenAiBatch/
+ * regenerateRejectedSlots/collectUsablePhrases/assignUniqueStyleIds -- the
+ * exact same generation, repair and style-assignment machinery the ordinary
+ * batch path uses -- but never falls back to FALLBACK_PHRASES and never
+ * pads the result: a slot that can't be grounded, or fails validation and
+ * repair, is simply dropped (see pickPackFallbackTextForSlot for the one
+ * exception -- a language-safe grounded/anchor fallback, same as the
+ * ordinary morning anchors already use).
+ *
+ * Never throws -- every failure path (no candidates, no API key, OpenAI
+ * error, parse error, everything rejected) returns `{ phrases: [], trace }`
+ * so the caller can safely treat that as "no pack this time" without any
+ * special-casing, and a failure here must never be allowed to affect the
+ * ordinary batch response (see routes/batch.js, which wraps this whole call
+ * in its own try/catch as a second line of defense).
+ *
+ * @param {object} device - row from the devices table (or a stub {device_id})
+ * @param {string} targetDate - YYYY-MM-DD, the calendar date the pack is FOR
+ * @param {object} [signals] - device signals (resolves target language)
+ * @param {object} [weather] - resolveWeather() result, reused only for its
+ *   countryCode (prompt context), not for weather facts
+ * @param {object} [weatherForecast] - resolveWeatherForecast() result for
+ *   targetDate (same shape as resolveWeather's), used for weather_lifehack facts
+ * @returns {Promise<{phrases: Array<{slot_id, type, text, style_id}>, trace: object|null}>}
+ */
+async function generateMorningPack(device, targetDate, signals, weather, weatherForecast) {
+  const languageCode = resolveTargetLanguageCode(signals);
+  const targetDateContext = buildTargetDateContext(targetDate);
+  if (!targetDateContext) {
+    return { phrases: [], trace: null };
+  }
+
+  const countryCode = weather && typeof weather.countryCode === 'string' && weather.countryCode
+    ? weather.countryCode
+    : signals && typeof signals.region === 'string'
+      ? signals.region
+      : null;
+
+  // count=0: GUARANTEED_SELECTION_CATEGORIES (holiday/on_this_day/idiom)
+  // inside selectBankItemsForDevice are always picked first when available,
+  // ahead of `count` -- passing 0 asks for exactly those 3 guaranteed
+  // categories and nothing else, since the pack only ever needs
+  // holiday_today/history_today/word_learning from the bank. deviceLocalDate
+  // is intentionally targetDate here (not "today"), so the date-sensitive
+  // holiday/on_this_day lookup resolves against target_date -- see rule 3e.
+  const bankItems = selectBankItemsForDevice(
+    device.device_id,
+    getBankDateString(),
+    targetDate,
+    device.gender,
+    countryCode,
+    0
+  );
+
+  const packSlots = planMorningPack({ device, targetDateContext, weatherForecast, bankItems });
+
+  const trace = {
+    kind: 'morning_pack',
+    meta: {
+      pack_id: null,
+      device_id: device && device.device_id ? device.device_id : null,
+      target_date: targetDate,
+      lang: languageCode,
+      model: 'gpt-4o-mini',
+      timestamp: new Date().toISOString(),
+    },
+    planned: [],
+    first_pass: [],
+    repair: { called: false, sent_slot_ids: [], results: [] },
+    fallback: [],
+    final: [],
+    summary: {},
+  };
+  tracePlannedSlots(trace, 'morning', packSlots);
+
+  if (packSlots.length === 0) {
+    trace.summary = { reason: 'no_pack_candidates' };
+    return { phrases: [], trace };
+  }
+
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    trace.summary = { reason: 'no_api_key' };
+    return { phrases: [], trace };
+  }
+
+  // window is hard-coded 'morning' here regardless of the actual request
+  // window (rule 3e) -- the pack is always framed as tomorrow/today's
+  // morning, never "tonight"/"this evening", since that's when it will
+  // actually be shown.
+  const context = buildContextPrompt(device, 'morning', signals, weather, languageCode, packSlots, targetDateContext);
+  const validationContext = {
+    dateContext: targetDateContext,
+    signals,
+    weather,
+    contextFlags: { traffic: false },
+  };
+
+  let client;
+  let response;
+  try {
+    const OpenAI = require('openai');
+    client = new OpenAI({ apiKey });
+    response = await createOpenAiBatch(client, context, languageCode, packSlots.length, 'lock_screen_morning_pack');
+  } catch (err) {
+    console.error(`PACK_ERROR reason=openai_error error=${err.name || 'Error'}`);
+    trace.summary = { reason: 'openai_error' };
+    return { phrases: [], trace };
+  }
+
+  let parsed;
+  try {
+    parsed = parseOpenAiBatchResponse(response);
+  } catch (err) {
+    console.error(`PACK_ERROR reason=parse_or_schema_error error=${err.name || 'Error'}`);
+    trace.summary = { reason: 'parse_or_schema_error' };
+    return { phrases: [], trace };
+  }
+
+  const traceParts = { firstPass: null };
+  let assembly = assemblePackFromGeneratedPhrases(parsed.phrases, languageCode, validationContext, packSlots, traceParts);
+  safeTrace(() => {
+    trace.first_pass = traceParts.firstPass || [];
+  });
+
+  const repairedSlotIds = new Set();
+  if (assembly.rejectedSlotIds.length > 0) {
+    try {
+      const basePayload = JSON.parse(context);
+      const repaired = await regenerateRejectedSlots(
+        client,
+        basePayload,
+        packSlots,
+        assembly.rejectedSlotIds,
+        languageCode,
+        validationContext,
+        trace
+      );
+      if (repaired && repaired.length > 0) {
+        for (const item of repaired) {
+          repairedSlotIds.add(item.slot_id);
+        }
+        const merged = assembly.phrases.concat(repaired);
+        assembly = assemblePackFromGeneratedPhrases(merged, languageCode, validationContext, packSlots, {});
+      }
+    } catch (err) {
+      console.error(`PACK_ERROR reason=slot_regeneration_error error=${err.name || 'Error'}`);
+    }
+  }
+
+  // Rule: a slot still missing after repair either gets a language-safe
+  // grounded/anchor fallback (pickPackFallbackTextForSlot) or is dropped --
+  // NEVER the generic FALLBACK_PHRASES pool. Slot order here is restored by
+  // walking packSlots itself, so a dropped slot never disturbs the relative
+  // order of the ones that remain.
+  const acceptedBySlot = new Map(assembly.phrases.map((item) => [item.slot_id, item]));
+  const seenTexts = new Set(assembly.phrases.map((item) => normalizeTextForDedupe(item.text)));
+  const finalUnstyled = [];
+  const fallbackTrace = [];
+  for (const slot of packSlots) {
+    const generatedItem = acceptedBySlot.get(slot.slot_id);
+    if (generatedItem) {
+      finalUnstyled.push({
+        slot_id: generatedItem.slot_id,
+        text: generatedItem.text,
+        style_id: generatedItem.style_id,
+        _source: repairedSlotIds.has(slot.slot_id) ? 'openai_repair' : 'openai_first',
+      });
+      continue;
+    }
+    const fallbackText = pickPackFallbackTextForSlot(slot, languageCode, seenTexts, fallbackTrace);
+    if (fallbackText) {
+      seenTexts.add(normalizeTextForDedupe(fallbackText));
+      finalUnstyled.push({ slot_id: slot.slot_id, text: fallbackText, style_id: null, _source: 'fallback_grounded' });
+    }
+    // else: dropped -- no entry pushed, pack simply gets shorter.
+  }
+  trace.fallback = fallbackTrace;
+
+  if (finalUnstyled.length === 0) {
+    trace.final = [];
+    trace.summary = { reason: 'all_slots_dropped' };
+    return { phrases: [], trace };
+  }
+
+  const styleDedupe = [];
+  const styled = assignUniqueStyleIds(
+    finalUnstyled.map(({ slot_id, text, style_id }) => ({ slot_id, text, style_id })),
+    styleDedupe
+  );
+  trace.style_dedupe = styleDedupe;
+
+  const sourceBySlot = new Map(finalUnstyled.map((item) => [item.slot_id, item._source]));
+  const typeBySlot = new Map(packSlots.map((slot) => [slot.slot_id, slot.type]));
+
+  trace.final = styled.map((item, index) => ({
+    position: index + 1,
+    slot_id: item.slot_id,
+    type: typeBySlot.get(item.slot_id) || null,
+    final_source: sourceBySlot.get(item.slot_id) || 'unknown',
+    text: item.text,
+    style_id: item.style_id,
+  }));
+  const finalSourceCounts = {};
+  for (const item of trace.final) {
+    finalSourceCounts[item.final_source] = (finalSourceCounts[item.final_source] || 0) + 1;
+  }
+  trace.summary = {
+    planned_count: packSlots.length,
+    kept_count: styled.length,
+    final_source_counts: finalSourceCounts,
+  };
+
+  // Memory bookkeeping (rule 5): reuse the exact same recording calls the
+  // ordinary batch path uses, at generation time, for the pack's own slots.
+  // shown_categories is recorded for every KEPT slot (mirrors generateBatch,
+  // which records for every PLANNED slot regardless of source -- a dropped
+  // pack slot was never shown, so it's excluded here, unlike the ordinary
+  // path where every planned slot always ends up shown one way or another).
+  // content_memory/learning_memory are recorded only for genuinely
+  // OpenAI-generated slots (openai_first/openai_repair), matching
+  // recordLearnedWords' own "fallback-filled slots never reach here" rule.
+  const keptSlots = packSlots.filter((slot) => sourceBySlot.has(slot.slot_id));
+  const openaiSlotIds = [...sourceBySlot.entries()]
+    .filter(([, source]) => source === 'openai_first' || source === 'openai_repair')
+    .map(([slotId]) => slotId);
+  const usedCategories = extractUsedCategoriesFromSlots(keptSlots);
+  recordShownCategories(device.device_id, targetDate, usedCategories);
+  recordShownContentMemory(device.device_id, keptSlots, openaiSlotIds);
+  recordLearnedWords(device.device_id, keptSlots, openaiSlotIds);
+  recordRecalledWords(device.device_id, keptSlots, openaiSlotIds);
+
+  const phrases = styled.map((item) => ({
+    slot_id: item.slot_id,
+    type: typeBySlot.get(item.slot_id) || null,
+    text: item.text,
+    style_id: item.style_id,
+  }));
+
+  return { phrases, trace };
+}
+
+/**
  * Generates a batch of {text, style_id} phrases for a device.
  * Falls back to a local static batch if no API key is configured or the
  * OpenAI call fails for any reason — the endpoint should never 500 just
@@ -2605,6 +2938,11 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
   );
   const recentContentMemory = getRecentContentMemory(device.device_id);
   const recallCandidate = getRecallCandidate(device.device_id);
+  // excludeMorningPackTypes (morning-pack feature): a supports_morning_pack=1
+  // request must never also offer the 7 pack types as ordinary batch slots,
+  // in any window (see planSlots' excludeTypes option and MORNING_FIXED_TYPES'
+  // own comment) -- left undefined for every pre-existing caller, which keeps
+  // this a strict no-op / byte-identical path when the option is absent.
   const { slots } = planSlots({
     device,
     window,
@@ -2614,7 +2952,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
     phoneTrends,
     recallCandidate,
     signals,
-  }, { recentContentMemory });
+  }, { recentContentMemory, excludeTypes: options.excludeMorningPackTypes ? MORNING_FIXED_TYPES : undefined });
 
   const context = buildContextPrompt(device, window, signals, weather, languageCode, slots, dateContext);
   const trace = buildInitialTrace(device, window, languageCode, dateContext);
@@ -2627,7 +2965,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
   };
 
   if (!apiKey) {
-    return buildLoggedFallbackResult(languageCode, context, 'no_api_key_fallback', 0, trace, slots);
+    return buildLoggedFallbackResult(languageCode, context, 'no_api_key_fallback', 0, trace, slots, dateContext);
   }
 
   let response;
@@ -2641,7 +2979,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
 
   } catch (err) {
     console.error(`AI_BATCH_ERROR reason=openai_error error=${err.name || 'Error'}`);
-    return buildLoggedFallbackResult(languageCode, context, 'openai_error', 0, trace, slots);
+    return buildLoggedFallbackResult(languageCode, context, 'openai_error', 0, trace, slots, dateContext);
   }
 
   let parsed;
@@ -2649,7 +2987,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
     parsed = parseOpenAiBatchResponse(response);
   } catch (err) {
     console.error(`AI_BATCH_ERROR reason=parse_or_schema_error error=${err.name || 'Error'}`);
-    return buildLoggedFallbackResult(languageCode, context, 'parse_or_schema_error', 0, trace, slots);
+    return buildLoggedFallbackResult(languageCode, context, 'parse_or_schema_error', 0, trace, slots, dateContext);
   }
 
   let assembly;
@@ -2661,11 +2999,11 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
     });
   } catch (err) {
     console.error(`AI_BATCH_ERROR reason=final_assembly_fallback error=${err.name || 'Error'}`);
-    return buildLoggedFallbackResult(languageCode, context, 'final_assembly_fallback', 0, trace, slots);
+    return buildLoggedFallbackResult(languageCode, context, 'final_assembly_fallback', 0, trace, slots, dateContext);
   }
 
   if (!assembly) {
-    return buildLoggedFallbackResult(languageCode, context, 'parse_or_schema_error', 0, trace, slots);
+    return buildLoggedFallbackResult(languageCode, context, 'parse_or_schema_error', 0, trace, slots, dateContext);
   }
 
   const repairedSlotIds = new Set();
@@ -2704,7 +3042,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
   }
 
   if (!assembly.phrases) {
-    return buildLoggedFinalAssemblyFallback(languageCode, context, assembly, trace, slots);
+    return buildLoggedFinalAssemblyFallback(languageCode, context, assembly, trace, slots, dateContext);
   }
 
   // Record planned daily-bank categories for this batch. With slot-based
@@ -2716,12 +3054,14 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
   recordLearnedWords(device.device_id, slots, assembly.generatedSlotIds);
   recordRecalledWords(device.device_id, slots, assembly.generatedSlotIds);
 
-  return buildLoggedOpenAiResult(assembly, context, trace, slots, repairedSlotIds);
+  return buildLoggedOpenAiResult(assembly, context, trace, slots, repairedSlotIds, dateContext);
 }
 
 module.exports = {
   generateBatch,
+  generateMorningPack,
   buildFallbackBatch,
+  resolveLocalDateContext,
   _test: {
     cleanUsablePhrases,
     hasQuestionMark,

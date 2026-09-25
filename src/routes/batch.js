@@ -6,6 +6,7 @@ const { consumePendingMessages } = require('../adminMessages');
 const { parseDeviceSignals } = require('../deviceSignals');
 const { computePhoneTrends, recordPhoneSignalSample } = require('../phoneAnalytics');
 const { resolveWeather } = require('../weather');
+const { getOrGenerateMorningPack } = require('../morningPack');
 
 const router = express.Router();
 
@@ -82,6 +83,13 @@ function logBatchTrace(traceJson) {
 // devices) are appended to the normal AI/fallback batch, not substituted for
 // it — per product decision, an admin message is one extra phrase mixed into
 // the regular rotation, not a takeover of the whole batch.
+//
+// Morning pack (optional, backward-compatible extension): a client that
+// sends supports_morning_pack=1 additionally gets a `batch_id` and a
+// `morning_pack` field in the response — see PRODUCT_REBUILD_PLAN.md and
+// src/morningPack.js/src/contentGenerator.js's generateMorningPack for the
+// full design. Without that param, the response is byte-identical to before
+// this feature existed — no batch_id, no morning_pack key at all.
 router.get('/batch', async (req, res, next) => {
   try {
     const { device_id, window } = req.query;
@@ -105,9 +113,18 @@ router.get('/batch', async (req, res, next) => {
       device.timezone = requestTimezone;
     }
 
+    const supportsMorningPack = req.query.supports_morning_pack === '1';
+    const packDateHeld = supportsMorningPack ? cleanLocalDate(req.query.pack_date_held) : null;
+
     const phoneTrends = computePhoneTrends(device, window, signals);
-    const { phrases, source, context, trace } = await generateBatch(device, window, signals, weather, phoneTrends, {
+    const { phrases, source, context, trace, dateContext } = await generateBatch(device, window, signals, weather, phoneTrends, {
       localDate: requestLocalDate,
+      // The 7 morning-pack types are excluded from ordinary batch planning in
+      // every window once the client supports the pack — they're delivered
+      // exclusively via morning_pack below (see planSlots' excludeTypes and
+      // MORNING_FIXED_TYPES). No-op (undefined) when the flag is absent, so
+      // the ordinary response stays byte-identical for old clients.
+      excludeMorningPackTypes: supportsMorningPack,
     });
     recordPhoneSignalSample(device, window, signals);
     const adminPhrases = consumePendingMessages(device_id);
@@ -126,7 +143,31 @@ router.get('/batch', async (req, res, next) => {
       logBatchTrace(traceJson);
     }
 
-    res.status(200).json({ phrases: combinedPhrases });
+    const responseBody = { phrases: combinedPhrases };
+    if (supportsMorningPack) {
+      responseBody.batch_id = insertResult.lastInsertRowid;
+      let morningPack = null;
+      try {
+        morningPack = await getOrGenerateMorningPack({
+          device,
+          window,
+          dateContext,
+          signals,
+          weather,
+          ip: req.ip,
+          packDateHeld,
+        });
+      } catch (err) {
+        // Defense in depth on top of getOrGenerateMorningPack's own
+        // try/catch — a pack failure must NEVER break the ordinary batch
+        // response that has already been computed and stored above.
+        console.error(`MORNING_PACK_ROUTE_ERROR error=${err.name || 'Error'}`);
+        morningPack = null;
+      }
+      responseBody.morning_pack = morningPack;
+    }
+
+    res.status(200).json(responseBody);
   } catch (err) {
     next(err);
   }

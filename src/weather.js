@@ -123,4 +123,95 @@ async function resolveWeather(ip) {
   };
 }
 
-module.exports = { resolveWeather };
+// --- Morning pack forecast (added for the morning-pack feature) ---
+// The pack is generated the evening before for a future calendar day
+// (target_date), so it needs a DAY forecast for that date rather than
+// `current_weather`. Open-Meteo's `daily` parameter gives exactly that.
+// Follows the same "never fail the caller, degrade to null" philosophy as
+// resolveWeather above, plus a small in-memory cache -- unlike resolveWeather
+// (called once per live /batch request, so a miss is cheap), the pack path
+// can be hit by several requests for the same device/date in a short window
+// (retries, repeated requests before the pack is stored), so caching by
+// rounded coordinates + target date for a few hours avoids redundant
+// Open-Meteo calls for what is, for this purpose, the same forecast.
+const FORECAST_CACHE_TTL_MS = 3 * 60 * 60 * 1000; // 3 hours
+const forecastCache = new Map();
+
+// Rounds to 1 decimal degree (~11km at the equator) -- plenty precise for a
+// "umbrella vs sunglasses" lock-screen lifehack, and coalesces nearby
+// requests (e.g. two devices in the same city) onto the same cache entry.
+function roundCoord(value) {
+  return Math.round(value * 10) / 10;
+}
+
+function pruneExpiredForecastCacheEntries(now) {
+  for (const [key, entry] of forecastCache) {
+    if (now - entry.at >= FORECAST_CACHE_TTL_MS) {
+      forecastCache.delete(key);
+    }
+  }
+}
+
+/**
+ * @param {string} ip - the requesting client's IP (see resolveWeather)
+ * @param {string} targetDate - YYYY-MM-DD, the calendar date to forecast
+ * @returns {Promise<{countryCode: string|null, city: string|null, temperatureC?: number, description?: string|null} | null>}
+ */
+async function resolveWeatherForecast(ip, targetDate) {
+  if (isPrivateOrLocalIp(ip) || typeof targetDate !== 'string' || !targetDate) {
+    return null;
+  }
+
+  const geo = await fetchWithTimeout(
+    `https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country_code,city,latitude,longitude`,
+    IPWHOIS_TIMEOUT_MS
+  );
+  if (!geo || geo.success !== true) {
+    return null;
+  }
+  const countryCode = typeof geo.country_code === 'string' && geo.country_code ? geo.country_code : null;
+  const city = geo.city || null;
+  if (typeof geo.latitude !== 'number' || typeof geo.longitude !== 'number') {
+    return { countryCode, city };
+  }
+
+  const now = Date.now();
+  pruneExpiredForecastCacheEntries(now);
+  const cacheKey = `${roundCoord(geo.latitude)},${roundCoord(geo.longitude)},${targetDate}`;
+  const cached = forecastCache.get(cacheKey);
+  if (cached) {
+    return cached.value ? { ...cached.value, countryCode, city } : { countryCode, city };
+  }
+
+  const forecast = await fetchWithTimeout(
+    `https://api.open-meteo.com/v1/forecast?latitude=${geo.latitude}&longitude=${geo.longitude}` +
+      `&daily=weathercode,precipitation_probability_max,temperature_2m_max,temperature_2m_min,uv_index_max` +
+      `&timezone=auto&start_date=${targetDate}&end_date=${targetDate}`,
+    OPEN_METEO_TIMEOUT_MS
+  );
+  const daily = forecast && forecast.daily;
+  const times = daily && Array.isArray(daily.time) ? daily.time : null;
+  const dayIndex = times ? times.indexOf(targetDate) : -1;
+  const tempMaxArr = daily && Array.isArray(daily.temperature_2m_max) ? daily.temperature_2m_max : null;
+  const codeArr = daily && Array.isArray(daily.weathercode) ? daily.weathercode : null;
+
+  if (dayIndex === -1 || !tempMaxArr || typeof tempMaxArr[dayIndex] !== 'number') {
+    forecastCache.set(cacheKey, { at: now, value: null });
+    return { countryCode, city };
+  }
+
+  // temperature_2m_max is used as the representative "for the day" figure --
+  // the pack's weather_lifehack slot reasons about the day as a whole
+  // (umbrella/sunglasses/warm clothes), not a single instant, and this reuses
+  // the exact same temperatureBand/weatherConditionLean shaping as the
+  // current-weather path (see slotPlanner.js), which only ever takes a single
+  // temperatureC + description pair.
+  const value = {
+    temperatureC: tempMaxArr[dayIndex],
+    description: (codeArr && WEATHER_CODE_DESCRIPTIONS[codeArr[dayIndex]]) || null,
+  };
+  forecastCache.set(cacheKey, { at: now, value });
+  return { ...value, countryCode, city };
+}
+
+module.exports = { resolveWeather, resolveWeatherForecast };

@@ -266,6 +266,15 @@ const GENERIC_FILLER_COUNT_KEY = Symbol('genericFillerCount');
 // place, not deleted, in case a future window needs a "guaranteed, but not a
 // fixed position" category without reintroducing this same bug.
 const MORNING_FIXED_TYPES = ['greeting_name', 'weather_lifehack', 'holiday_today', 'history_today', 'word_learning', 'daily_horoscope', 'daily_numerology'];
+
+// Morning-pack feature: the pack's own required slot order (product spec) is
+// a DIFFERENT sequence from the ordinary batch's MORNING_FIXED_TYPES above --
+// note word_learning moves to last, and weather_lifehack/holiday_today swap
+// relative order. Same 7 types (a Set-equal pair), different order -- kept as
+// a distinct constant rather than reordering MORNING_FIXED_TYPES itself,
+// since that would change the ordinary morning batch's own fixed-position
+// sequence, which must stay byte-identical for backward compatibility.
+const MORNING_PACK_ORDER = ['greeting_name', 'holiday_today', 'weather_lifehack', 'history_today', 'daily_horoscope', 'daily_numerology', 'word_learning'];
 const MORNING_ONLY_TYPES = new Set(['weather_lifehack', 'holiday_today', 'history_today', 'word_learning', 'daily_horoscope', 'daily_numerology']);
 const GUARANTEED_TYPES_BY_WINDOW = {
   morning: [],
@@ -1302,7 +1311,17 @@ function addSlotIds(candidates) {
 
 function planSlots(input = {}, options = {}) {
   const rawCandidates = options.candidates || collectCandidates(input);
-  const candidates = rawCandidates.filter((candidate) => isCandidateAllowedInWindow(candidate, input.window));
+  // excludeTypes (morning-pack feature, backward-compatible additive option):
+  // when the calling device supports the morning pack, the 7 pack types
+  // (MORNING_FIXED_TYPES) are delivered exclusively via the pack and must
+  // never also be offered as ordinary batch candidates, in ANY window --
+  // see contentGenerator.js's generateBatch, which only ever passes this for
+  // a supports_morning_pack=1 request. Left undefined (every existing
+  // caller/test), this is a no-op filter -- ordinary behavior is completely
+  // unchanged.
+  const excludeTypes = options.excludeTypes ? new Set(options.excludeTypes) : null;
+  const candidates = rawCandidates.filter((candidate) => isCandidateAllowedInWindow(candidate, input.window)
+    && (!excludeTypes || !excludeTypes.has(candidate.type)));
   const seed = options.seed || [
     input.device && input.device.device_id,
     input.window,
@@ -1420,11 +1439,105 @@ function planSlots(input = {}, options = {}) {
   };
 }
 
+// Builds the (at most 7) candidates for the morning pack -- the same strict
+// sequence as MORNING_FIXED_TYPES, generated for a specific `targetDate`/
+// `targetDateContext` rather than "today". Deliberately NOT built on top of
+// collectCandidates/planSlots' competitive lottery -- there is no selection
+// here at all, just "does a genuine, grounded candidate exist for this type
+// on target_date, in the required order, skip it if not" (rule: a type with
+// no real grounding is dropped, never filled with a synthetic/creative
+// candidate -- the pack must never contain fallback-pool content).
+// Reuses the exact same fact-computation helpers the ordinary morning
+// candidates use (createCandidate/bankItemToCandidate/personalMorningFacts/
+// temperatureBand/weatherConditionLean) so the pack's grounding logic can
+// never drift from the ordinary morning batch's.
+function planMorningPack(input = {}) {
+  const { device = {}, targetDateContext, weatherForecast, bankItems = [] } = input;
+  const slotsByType = new Map();
+
+  const nameFacts = {};
+  if (device.name) nameFacts.name = device.name;
+  slotsByType.set('greeting_name', createCandidate({
+    id: 'pack_greeting_name',
+    type: 'greeting_name',
+    priority: 100,
+    facts: nameFacts,
+    source: 'editorial',
+    constraints: ['warm', 'one_per_batch', 'no_fixed_template', 'name_if_known', 'light_send_off_for_the_day'],
+  }));
+
+  if (weatherForecast && typeof weatherForecast.temperatureC === 'number') {
+    const facts = { temperature_c: Math.round(weatherForecast.temperatureC) };
+    const band = temperatureBand(weatherForecast.temperatureC);
+    if (band) facts.temp_band = band;
+    const lean = weatherConditionLean(weatherForecast.description);
+    if (lean) facts.condition_lean = lean;
+    if (weatherForecast.city) facts.city = weatherForecast.city;
+    if (weatherForecast.description) facts.condition = weatherForecast.description;
+    // Only a genuinely usable grounded fact (a temp band or a condition lean)
+    // makes this a real candidate -- mirrors the "no weather forecast
+    // available -> drop the weather slot" pack rule.
+    if (facts.temp_band || facts.condition_lean) {
+      slotsByType.set('weather_lifehack', createCandidate({
+        id: 'pack_weather_forecast',
+        type: 'weather_lifehack',
+        priority: 62,
+        facts,
+        source: 'weather',
+        constraints: ['avoid_exact_right_now', 'forecast_for_target_date', 'temperature_grounding_only', 'do_not_state_exact_temperature', 'no_digits', 'simple_clothing_umbrella_shoes_sun_advice', 'vary_advice_by_temp_band_and_condition'],
+      }));
+    }
+  }
+
+  const bankByType = new Map();
+  for (let i = 0; i < bankItems.length; i++) {
+    const candidate = bankItemToCandidate(bankItems[i], i);
+    if (!candidate) continue;
+    const existing = bankByType.get(candidate.type);
+    if (!existing || candidate.priority > existing.priority) {
+      bankByType.set(candidate.type, candidate);
+    }
+  }
+  for (const type of ['holiday_today', 'history_today', 'word_learning']) {
+    if (bankByType.has(type)) {
+      slotsByType.set(type, bankByType.get(type));
+    }
+  }
+
+  const personalFacts = personalMorningFacts(device, targetDateContext);
+  if (personalFacts) {
+    slotsByType.set('daily_horoscope', createCandidate({
+      id: 'pack_daily_horoscope',
+      type: 'daily_horoscope',
+      priority: 58,
+      facts: personalFacts.horoscope,
+      source: 'profile',
+      constraints: ['symbolic_entertainment_only', 'no_predictions', 'no_medical_financial_legal_claims', 'no_fear', 'short_reflective_tone'],
+    }));
+    slotsByType.set('daily_numerology', createCandidate({
+      id: 'pack_daily_numerology',
+      type: 'daily_numerology',
+      priority: 57,
+      facts: personalFacts.numerology,
+      source: 'profile',
+      constraints: ['symbolic_entertainment_only', 'emphasize_personal_day_number', 'no_scientific_claim', 'no_predictions', 'short_reflective_tone'],
+    }));
+  }
+
+  const ordered = MORNING_PACK_ORDER
+    .map((type) => slotsByType.get(type))
+    .filter(Boolean);
+  return addSlotIds(ordered);
+}
+
 module.exports = {
   CONTENT_TYPES,
   FACTUAL_TYPES,
   collectCandidates,
   planSlots,
+  planMorningPack,
+  MORNING_FIXED_TYPES,
+  MORNING_PACK_ORDER,
   createSeededRng,
   _test: {
     bankItemToCandidate,
