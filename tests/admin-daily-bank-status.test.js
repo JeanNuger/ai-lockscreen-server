@@ -9,7 +9,7 @@ delete process.env.OPENAI_API_KEY;
 
 const db = require('../src/db');
 const adminRoute = require('../src/routes/admin');
-const { getBankDateString } = require('../src/dailyContentBank');
+const { getBankDateString, getPreparedBankDates } = require('../src/dailyContentBank');
 
 const { buildDailyBankStatusResponse } = adminRoute._test;
 
@@ -21,6 +21,9 @@ function main() {
     assert.strictEqual(response.is_current, false, 'empty bank must never report is_current true');
     assert.strictEqual(response.total_items, 0);
     assert.deepStrictEqual(response.categories, {});
+    assert.deepStrictEqual(response.required_categories.holiday, { present: false, count: 0 });
+    assert.deepStrictEqual(response.required_categories.on_this_day, { present: false, count: 0 });
+    assert.deepStrictEqual(response.required_categories.idiom, { present: false, count: 0 });
     assert.deepStrictEqual(response.sample_items, []);
   }
 
@@ -32,10 +35,34 @@ function main() {
       { category: 'science', content_text: 'Another science fact.' },
       { category: 'holiday', content_text: 'A holiday fact.' },
     ];
-    const response = buildDailyBankStatusResponse(today, today, rows);
+    const preparedDates = getPreparedBankDates(today);
+    const rowsByDate = {
+      [preparedDates[0]]: [
+        { category: 'holiday', content_text: 'Yesterday holiday.' },
+        { category: 'on_this_day', content_text: 'Yesterday history.' },
+      ],
+      [today]: rows,
+      [preparedDates[2]]: [
+        { category: 'holiday', content_text: 'Tomorrow holiday.' },
+        { category: 'on_this_day', content_text: 'Tomorrow history.' },
+      ],
+    };
+    const response = buildDailyBankStatusResponse(today, today, rows, {
+      preparedDates,
+      requestedDate: today,
+      rowsByDate,
+    });
     assert.strictEqual(response.is_current, true, 'latest_bank_date matching expected_bank_date must report is_current true');
+    assert.strictEqual(response.requested_date, today);
     assert.strictEqual(response.total_items, 3);
     assert.deepStrictEqual(response.categories, { science: 2, holiday: 1 }, 'categories must be grouped with correct counts');
+    assert.deepStrictEqual(response.required_categories.holiday, { present: true, count: 1 });
+    assert.deepStrictEqual(response.required_categories.on_this_day, { present: false, count: 0 });
+    assert.deepStrictEqual(response.required_categories.idiom, { present: false, count: 0 });
+    assert.strictEqual(response.prepared_dates.length, 3);
+    assert.strictEqual(response.prepared[preparedDates[0]].required_categories.on_this_day.present, true);
+    assert.strictEqual(response.prepared[today].categories.science, 2);
+    assert.strictEqual(response.prepared[preparedDates[2]].required_categories.holiday.present, true);
   }
 
   // --- stale bank (latest date is older than today): is_current must be false ---
@@ -64,6 +91,37 @@ function main() {
     const responseText = JSON.stringify(response);
     assert(!responseText.includes('INTERNAL_CRON_SECRET'), 'response must never mention INTERNAL_CRON_SECRET');
     assert(!('secret' in response), 'response must not carry any secret field');
+  }
+
+  // --- requested date can be inspected independently from latest/expected ---
+  {
+    const today = '2026-09-25';
+    const requestedDate = '2026-09-24';
+    const preparedDates = ['2026-09-24', '2026-09-25', '2026-09-26'];
+    const rows = [
+      { category: 'holiday', content_text: 'Requested holiday.' },
+      { category: 'on_this_day', content_text: 'Requested history.' },
+      { category: 'idiom', content_text: 'Requested idiom.' },
+      { category: 'idiom', content_text: 'Second idiom.' },
+    ];
+    const response = buildDailyBankStatusResponse('2026-09-26', today, rows, {
+      preparedDates,
+      requestedDate,
+      rowsByDate: {
+        [requestedDate]: rows,
+        [today]: [{ category: 'holiday', content_text: 'Today holiday.' }],
+        '2026-09-26': [{ category: 'on_this_day', content_text: 'Tomorrow history.' }],
+      },
+    });
+    assert.strictEqual(response.requested_date, requestedDate);
+    assert.strictEqual(response.categories.idiom, 2);
+    assert.deepStrictEqual(response.required_categories, {
+      holiday: { present: true, count: 1 },
+      on_this_day: { present: true, count: 1 },
+      idiom: { present: true, count: 2 },
+    });
+    assert.strictEqual(response.prepared[today].required_categories.on_this_day.present, false);
+    assert.strictEqual(response.prepared['2026-09-26'].required_categories.on_this_day.present, true);
   }
 
   // --- the route itself is registered behind requireAdminAuth (same

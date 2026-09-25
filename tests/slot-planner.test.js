@@ -538,6 +538,101 @@ async function main() {
     'morning greeting fallback must be greeting-specific'
   );
 
+  function anchorRegressionSlots(anchorSlot) {
+    return [
+      anchorSlot,
+      ...Array.from({ length: BATCH_SIZE - 1 }, (_, index) => plannerTest.createCandidate({
+        id: `anchor_regression_filler_${anchorSlot.type}_${index}`,
+        type: index % 2 === 0 ? 'free_ai_thought' : 'everyday_lifehack',
+        facts: {},
+      })),
+    ].map((slot, index) => ({
+      ...slot,
+      slot_id: `s${index + 1}`,
+      length_hint: 'medium',
+    }));
+  }
+
+  function generatedWithRejectedFirst(slots) {
+    const generated = validSlotPhrases(slots);
+    generated[0] = { slot_id: slots[0].slot_id, text: 'This anchor is invalid?', style_id: STYLE_IDS[0] };
+    return generated;
+  }
+
+  const holidayAnchorSlots = anchorRegressionSlots({
+    id: 'bank_holiday_anchor',
+    type: 'holiday_today',
+    facts: { text: 'World Cleanup Day highlights cleaner public spaces' },
+    bank_category: 'holiday',
+  });
+  const holidayAnchorRejected = contentTest.assembleBatchFromGeneratedPhrases(
+    generatedWithRejectedFirst(holidayAnchorSlots),
+    'en',
+    {},
+    holidayAnchorSlots
+  );
+  assert.strictEqual(holidayAnchorRejected.phrases[0].text, 'World Cleanup Day highlights cleaner public spaces');
+  assert.notStrictEqual(
+    holidayAnchorRejected.phrases[0].text,
+    'Иногда достаточно просто мирно пережить день',
+    'generic fallback phrase must never replace holiday_today'
+  );
+
+  const historyAnchorSlots = anchorRegressionSlots({
+    id: 'bank_history_anchor',
+    type: 'history_today',
+    facts: { text: 'In 1960, USS Enterprise launched' },
+    bank_category: 'on_this_day',
+  });
+  const historyAnchorRejected = contentTest.assembleBatchFromGeneratedPhrases(
+    generatedWithRejectedFirst(historyAnchorSlots),
+    'en',
+    {},
+    historyAnchorSlots
+  );
+  assert.strictEqual(historyAnchorRejected.phrases[0].text, 'In 1960, USS Enterprise launched');
+
+  const wordAnchorSlots = anchorRegressionSlots({
+    id: 'bank_word_anchor',
+    type: 'word_learning',
+    facts: { word: 'Break the ice means ease tension' },
+    bank_category: 'idiom',
+  });
+  const wordAnchorRejected = contentTest.assembleBatchFromGeneratedPhrases(
+    generatedWithRejectedFirst(wordAnchorSlots),
+    'en',
+    {},
+    wordAnchorSlots
+  );
+  assert.strictEqual(wordAnchorRejected.phrases[0].text, 'Break the ice means ease tension');
+
+  const missingAnchorWarnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => {
+    missingAnchorWarnings.push(String(message));
+  };
+  try {
+    const missingFactsSlots = anchorRegressionSlots({
+      id: 'bank_holiday_missing_facts',
+      type: 'holiday_today',
+      facts: {},
+      bank_category: 'holiday',
+    });
+    const missingFactsResult = contentTest.assembleBatchFromGeneratedPhrases(
+      generatedWithRejectedFirst(missingFactsSlots),
+      'en',
+      { dateContext: { date: '2026-09-25' } },
+      missingFactsSlots
+    );
+    assert.strictEqual(missingFactsResult.phrases, null, 'bank-backed anchor without facts must not be filled with generic fallback');
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert(
+    missingAnchorWarnings.some((line) => line.includes('MISSING_MORNING_ANCHOR') && line.includes('type=holiday_today') && line.includes('date=2026-09-25')),
+    'missing bank-backed morning anchor facts must be logged explicitly'
+  );
+
   const nightSlots = planSlots({ ...baseInput, window: 'night' }, { seed: 'night-reject-seed' }).slots;
   const nightGenerated = validSlotPhrases(nightSlots);
   nightGenerated[nightGenerated.length - 1] = {

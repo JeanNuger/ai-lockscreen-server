@@ -555,6 +555,7 @@ module.exports = {
   selectBankItemsForDevice,
   recordShownCategories,
   getBankDateString,
+  getPreparedBankDates,
   BANK_CATEGORIES,
   EVERGREEN_COMPATIBLE_CATEGORIES,
   _test: {

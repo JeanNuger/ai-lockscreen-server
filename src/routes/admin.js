@@ -5,7 +5,7 @@ const rateLimit = require('express-rate-limit');
 const db = require('../db');
 const { requireAdminAuth } = require('../adminAuth');
 const { STYLE_IDS } = require('../constants');
-const { getBankDateString } = require('../dailyContentBank');
+const { getBankDateString, getPreparedBankDates } = require('../dailyContentBank');
 
 const router = express.Router();
 
@@ -125,25 +125,65 @@ const latestBankDateStatement = db.prepare(`
   SELECT bank_date FROM daily_content_bank ORDER BY bank_date DESC LIMIT 1
 `);
 const bankRowsForDateStatement = db.prepare(`
-  SELECT category, content_text FROM daily_content_bank WHERE bank_date = ? ORDER BY id ASC
+  SELECT category, content_text, created_at FROM daily_content_bank WHERE bank_date = ? ORDER BY id ASC
 `);
+const bankRowsForDatesStatement = db.prepare(`
+  SELECT bank_date, category, content_text, created_at FROM daily_content_bank
+  WHERE bank_date IN (?, ?, ?)
+  ORDER BY bank_date ASC, id ASC
+`);
+
+const REQUIRED_BANK_CATEGORIES = ['holiday', 'on_this_day', 'idiom'];
+
+function categoryCounts(rows) {
+  const categories = {};
+  for (const row of rows) {
+    categories[row.category] = (categories[row.category] || 0) + 1;
+  }
+  return categories;
+}
+
+function requiredCategoryStatus(rows) {
+  const categories = categoryCounts(rows);
+  const required = {};
+  for (const category of REQUIRED_BANK_CATEGORIES) {
+    required[category] = {
+      present: Boolean(categories[category]),
+      count: categories[category] || 0,
+    };
+  }
+  return required;
+}
 
 // Pure response-shaping, kept separate from the DB reads/route wiring so it
 // can be unit-tested directly (see tests/admin-daily-bank-status.test.js)
 // without needing an HTTP/session test harness -- same split every other
 // module in this codebase already uses (DB-touching code stays thin, the
 // actual logic is a plain function exposed via _test).
-function buildDailyBankStatusResponse(latestBankDate, expectedBankDate, rows) {
-  const categories = {};
-  for (const row of rows) {
-    categories[row.category] = (categories[row.category] || 0) + 1;
+function buildDailyBankStatusResponse(latestBankDate, expectedBankDate, rows, options = {}) {
+  const preparedDates = options.preparedDates || getPreparedBankDates(expectedBankDate);
+  const requestedDate = options.requestedDate || latestBankDate || expectedBankDate;
+  const rowsByDate = options.rowsByDate || { [requestedDate]: rows };
+  const prepared = {};
+  for (const date of preparedDates) {
+    const dateRows = rowsByDate[date] || [];
+    prepared[date] = {
+      total_items: dateRows.length,
+      categories: categoryCounts(dateRows),
+      required_categories: requiredCategoryStatus(dateRows),
+    };
   }
+  const categories = categoryCounts(rows);
   return {
     latest_bank_date: latestBankDate,
     expected_bank_date: expectedBankDate,
-    is_current: latestBankDate === expectedBankDate,
+    prepared_dates: preparedDates,
+    requested_date: requestedDate,
+    is_current: preparedDates.includes(latestBankDate) && prepared[expectedBankDate] && prepared[expectedBankDate].total_items > 0,
     total_items: rows.length,
     categories,
+    required_categories: requiredCategoryStatus(rows),
+    prepared,
     sample_items: rows.slice(0, 5).map((row) => ({ category: row.category, content_text: row.content_text })),
   };
 }
@@ -156,9 +196,25 @@ router.get('/api/daily-bank-status', requireAdminAuth, (req, res) => {
   // rather than reimplemented, so this can never silently drift out of sync
   // with what generateDailyBank() actually considers "today".
   const expectedBankDate = getBankDateString();
-  const rows = latestBankDate ? bankRowsForDateStatement.all(latestBankDate) : [];
+  const preparedDates = getPreparedBankDates(expectedBankDate);
+  const requestedDate = typeof req.query.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date)
+    ? req.query.date
+    : expectedBankDate;
+  const preparedRows = bankRowsForDatesStatement.all(preparedDates[0], preparedDates[1], preparedDates[2]);
+  const rowsByDate = {};
+  for (const row of preparedRows) {
+    if (!rowsByDate[row.bank_date]) {
+      rowsByDate[row.bank_date] = [];
+    }
+    rowsByDate[row.bank_date].push(row);
+  }
+  const rows = bankRowsForDateStatement.all(requestedDate);
 
-  res.status(200).json(buildDailyBankStatusResponse(latestBankDate, expectedBankDate, rows));
+  res.status(200).json(buildDailyBankStatusResponse(latestBankDate, expectedBankDate, rows, {
+    preparedDates,
+    requestedDate,
+    rowsByDate,
+  }));
 });
 
 // --- Admin messages (send to one device or broadcast to all) ---
@@ -208,6 +264,6 @@ router.post('/api/messages/:id/deactivate', requireAdminAuth, (req, res) => {
 // _test property the same way every other module here exposes pure logic
 // for direct unit testing -- app.use('/admin', require('./routes/admin'))
 // is unaffected, this is purely additive.
-router._test = { buildDailyBankStatusResponse };
+router._test = { buildDailyBankStatusResponse, requiredCategoryStatus, categoryCounts };
 
 module.exports = router;

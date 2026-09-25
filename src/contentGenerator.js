@@ -1228,6 +1228,14 @@ function incrementReason(reasonCounts, reason) {
   reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
 }
 
+const MORNING_ANCHOR_TYPES = new Set([
+  'greeting_name',
+  'holiday_today',
+  'history_today',
+  'word_learning',
+  'weather_lifehack',
+]);
+
 function collectUsablePhrases(phrases, languageCode, validationContext = {}, expectedSlotIds = null) {
   if (!Array.isArray(phrases)) {
     return null;
@@ -1238,11 +1246,19 @@ function collectUsablePhrases(phrases, languageCode, validationContext = {}, exp
   const expectedSlotSet = Array.isArray(expectedSlotIds) ? new Set(expectedSlotIds) : null;
   const accepted = [];
   const rejectedSlotIds = new Set();
+  const rejectedDetails = [];
   let rejectedCount = 0;
   const rejectionReasons = {};
-  const reject = (reason, slotId) => {
+  const reject = (reason, slotId, text) => {
     rejectedCount += 1;
     incrementReason(rejectionReasons, reason);
+    if (typeof slotId === 'string') {
+      rejectedDetails.push({
+        slot_id: slotId,
+        reason,
+        text: typeof text === 'string' ? text : null,
+      });
+    }
     if (expectedSlotSet && typeof slotId === 'string' && expectedSlotSet.has(slotId)) {
       rejectedSlotIds.add(slotId);
     }
@@ -1262,17 +1278,17 @@ function collectUsablePhrases(phrases, languageCode, validationContext = {}, exp
     const text = phrase.text.trim();
     const reason = rejectionReasonForText(text, languageCode, validationContext);
     if (reason) {
-      reject(reason, phrase.slot_id);
+      reject(reason, phrase.slot_id, text);
       continue;
     }
     if (languageCode && !isValidLanguageText(text, languageCode)) {
-      reject('language', phrase.slot_id);
+      reject('language', phrase.slot_id, text);
       continue;
     }
 
     const normalized = normalizeTextForDedupe(text);
     if (seenTexts.has(normalized)) {
-      reject('duplicate', phrase.slot_id);
+      reject('duplicate', phrase.slot_id, text);
       continue;
     }
     seenTexts.add(normalized);
@@ -1293,7 +1309,7 @@ function collectUsablePhrases(phrases, languageCode, validationContext = {}, exp
     }
   }
 
-  return { accepted, rejectedCount, inputCount: phrases.length, rejectionReasons, rejectedSlotIds: [...rejectedSlotIds] };
+  return { accepted, rejectedCount, inputCount: phrases.length, rejectionReasons, rejectedSlotIds: [...rejectedSlotIds], rejectedDetails };
 }
 
 function cleanUsablePhrases(phrases, languageCode, validationContext = {}) {
@@ -1391,7 +1407,126 @@ function fallbackTextForSlot(slot, languageCode) {
   return variants[currentFallbackSetIndex()];
 }
 
-function pickFallbackTextForSlot(slot, languageCode, seenTexts, fallbackTexts) {
+function compactFactText(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const text = value.trim().replace(/\s+/g, ' ');
+  return text || null;
+}
+
+function truncateFallbackText(text) {
+  const cleaned = compactFactText(text);
+  if (!cleaned || cleaned.length <= LOCK_SCREEN_TEXT_MAX_LENGTH) {
+    return cleaned;
+  }
+  const sliced = cleaned.slice(0, LOCK_SCREEN_TEXT_MAX_LENGTH + 1);
+  const boundary = Math.max(sliced.lastIndexOf('.'), sliced.lastIndexOf(';'), sliced.lastIndexOf(','));
+  if (boundary >= 24) {
+    return sliced.slice(0, boundary).trim();
+  }
+  const space = sliced.lastIndexOf(' ');
+  return sliced.slice(0, space >= 24 ? space : LOCK_SCREEN_TEXT_MAX_LENGTH).trim();
+}
+
+function groundedFallbackTextForSlot(slot, languageCode) {
+  if (!slot || !MORNING_ANCHOR_TYPES.has(slot.type)) {
+    return null;
+  }
+  const facts = slot.facts || {};
+  if (slot.type === 'greeting_name') {
+    return fallbackTextForSlot(slot, languageCode);
+  }
+  if (slot.type === 'holiday_today' || slot.type === 'history_today') {
+    return truncateFallbackText(facts.text);
+  }
+  if (slot.type === 'word_learning') {
+    return truncateFallbackText(facts.word || facts.text);
+  }
+  if (slot.type === 'weather_lifehack') {
+    const bandText = {
+      cold: 'Cold weather today; warm clothes make sense',
+      cool: 'Cool weather today; a light jacket fits',
+      mild: 'Mild weather today; light layers fit',
+      warm: 'Warm weather today; light clothes fit',
+      hot: 'Hot weather today; sun protection helps',
+    };
+    const leanText = {
+      rain: 'Rain is possible today; an umbrella helps',
+      snow: 'Snowy weather today; warm shoes help',
+      wind: 'Windy weather today; a secure jacket helps',
+      sun: 'Sunny weather today; sun protection helps',
+      cloudy: 'Cloudy weather today; light layers fit',
+    };
+    return truncateFallbackText(leanText[facts.condition_lean] || bandText[facts.temp_band]);
+  }
+  return null;
+}
+
+function missingAnchorReason(slot) {
+  if (!slot || !MORNING_ANCHOR_TYPES.has(slot.type)) {
+    return null;
+  }
+  if (slot.type === 'greeting_name') {
+    return null;
+  }
+  const facts = slot.facts || {};
+  if (slot.type === 'holiday_today' || slot.type === 'history_today') {
+    return compactFactText(facts.text) ? null : 'missing_grounded_text';
+  }
+  if (slot.type === 'word_learning') {
+    return compactFactText(facts.word || facts.text) ? null : 'missing_grounded_word';
+  }
+  if (slot.type === 'weather_lifehack') {
+    return facts.temp_band || facts.condition_lean ? null : 'missing_weather_facts';
+  }
+  return null;
+}
+
+function summarizeFactsForLog(slot) {
+  const facts = slot && slot.facts ? slot.facts : {};
+  return Object.keys(facts).sort().join(',') || 'none';
+}
+
+function logMissingMorningAnchor(slot, validationContext, reason) {
+  console.warn(
+    `MISSING_MORNING_ANCHOR date=${validationContext && validationContext.dateContext ? validationContext.dateContext.date : 'unknown'} type=${slot && slot.type ? slot.type : 'unknown'} reason=${reason || 'unknown'} facts=${summarizeFactsForLog(slot)} category=${slot && slot.bank_category ? slot.bank_category : 'none'}`
+  );
+}
+
+function logMorningAnchorFallback(slot, rejectedDetail, fallbackText) {
+  if (!slot || !MORNING_ANCHOR_TYPES.has(slot.type)) {
+    return;
+  }
+  const safeOriginal = rejectedDetail && rejectedDetail.text
+    ? rejectedDetail.text.replace(/\s+/g, ' ').slice(0, 160)
+    : '';
+  console.warn(
+    `MORNING_ANCHOR_FALLBACK type=${slot.type} rejection_reason=${rejectedDetail && rejectedDetail.reason ? rejectedDetail.reason : 'missing'} original_text=${JSON.stringify(safeOriginal)} fallback_text=${JSON.stringify(fallbackText)}`
+  );
+}
+
+function pickFallbackTextForSlot(slot, languageCode, seenTexts, fallbackTexts, validationContext = {}, rejectedDetail = null) {
+  if (slot && MORNING_ANCHOR_TYPES.has(slot.type)) {
+    const missingReason = missingAnchorReason(slot);
+    if (missingReason) {
+      logMissingMorningAnchor(slot, validationContext, missingReason);
+      return null;
+    }
+    const groundedFallback = groundedFallbackTextForSlot(slot, languageCode);
+    if (!groundedFallback) {
+      logMissingMorningAnchor(slot, validationContext, 'no_grounded_fallback');
+      return null;
+    }
+    const normalized = normalizeTextForDedupe(groundedFallback);
+    if (!isUnusableLockScreenText(groundedFallback) && !seenTexts.has(normalized)) {
+      logMorningAnchorFallback(slot, rejectedDetail, groundedFallback);
+      return groundedFallback;
+    }
+    logMissingMorningAnchor(slot, validationContext, seenTexts.has(normalized) ? 'duplicate_grounded_fallback' : 'unusable_grounded_fallback');
+    return null;
+  }
+
   const slotFallback = fallbackTextForSlot(slot, languageCode);
   if (slotFallback) {
     const normalized = normalizeTextForDedupe(slotFallback);
@@ -1410,10 +1545,11 @@ function pickFallbackTextForSlot(slot, languageCode, seenTexts, fallbackTexts) {
   return null;
 }
 
-function assembleByExpectedSlotOrder(generated, languageCode, expectedSlots) {
+function assembleByExpectedSlotOrder(generated, languageCode, expectedSlots, validationContext = {}, rejectedDetails = []) {
   const fallbackPhrases = activeFallbackPhrases(languageCode);
   const shuffledFallback = [...fallbackPhrases].sort(() => Math.random() - 0.5);
   const generatedBySlot = new Map(generated.map((item) => [item.slot_id, item]));
+  const rejectedBySlot = new Map(rejectedDetails.map((item) => [item.slot_id, item]));
   const seenTexts = new Set(generated.map((item) => normalizeTextForDedupe(item.text)));
 
   const result = expectedSlots.map((slot) => {
@@ -1421,7 +1557,14 @@ function assembleByExpectedSlotOrder(generated, languageCode, expectedSlots) {
     if (generatedItem) {
       return generatedItem;
     }
-    const fallbackText = pickFallbackTextForSlot(slot, languageCode, seenTexts, shuffledFallback);
+    const fallbackText = pickFallbackTextForSlot(
+      slot,
+      languageCode,
+      seenTexts,
+      shuffledFallback,
+      validationContext,
+      rejectedBySlot.get(slot.slot_id) || null
+    );
     if (!fallbackText) {
       return null;
     }
@@ -1468,7 +1611,7 @@ function assembleBatchFromGeneratedPhrases(phrases, languageCode, validationCont
   const generated = collected.accepted.slice(0, BATCH_SIZE);
   const fallbackFillCount = BATCH_SIZE - generated.length;
   const assembled = Array.isArray(expectedSlots)
-    ? assembleByExpectedSlotOrder(generated, languageCode, expectedSlots)
+    ? assembleByExpectedSlotOrder(generated, languageCode, expectedSlots, validationContext, collected.rejectedDetails)
     : fallbackFillCount > 0
       ? fillWithFallbackPhrases(generated, languageCode)
       : assignUniqueStyleIds(generated);
@@ -1481,6 +1624,7 @@ function assembleBatchFromGeneratedPhrases(phrases, languageCode, validationCont
       fallbackFillCount,
       reason: 'final_assembly_fallback',
       rejectionReasons: collected.rejectionReasons,
+      rejectedDetails: collected.rejectedDetails,
     };
   }
 
@@ -1492,6 +1636,7 @@ function assembleBatchFromGeneratedPhrases(phrases, languageCode, validationCont
     fallbackFillCount,
     rejectionReasons: collected.rejectionReasons,
     rejectedSlotIds: collected.rejectedSlotIds,
+    rejectedDetails: collected.rejectedDetails,
     reason: fallbackFillCount === 0
       ? 'success'
       : generated.length === 0
