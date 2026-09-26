@@ -3270,6 +3270,7 @@ module.exports = {
   generateMorningPack,
   buildFallbackBatch,
   resolveLocalDateContext,
+  addDaysToDateString,
   _test: {
     cleanUsablePhrases,
     hasQuestionMark,

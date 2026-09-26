@@ -38,6 +38,8 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     device_id TEXT NOT NULL,
     window TEXT NOT NULL,       -- 'morning' | 'day' | 'evening' | 'night'
+    local_date TEXT,            -- device-local date used for generation/cache key
+    supports_morning_pack INTEGER NOT NULL DEFAULT 0,
     phrases TEXT NOT NULL,      -- JSON array of {text, style_id}
     source TEXT NOT NULL,       -- 'openai' | 'fallback'
     context TEXT,               -- JSON: what was sent to OpenAI as context (for admin monitoring)
@@ -48,6 +50,8 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_content_batches_device ON content_batches(device_id);
   CREATE INDEX IF NOT EXISTS idx_content_batches_delivered_at ON content_batches(delivered_at);
+  CREATE INDEX IF NOT EXISTS idx_content_batches_reuse_key
+    ON content_batches(device_id, window, local_date, supports_morning_pack, id);
 
   CREATE TABLE IF NOT EXISTS admin_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -185,8 +189,18 @@ if (!deviceColumnNames.includes('name')) {
 }
 
 const contentBatchColumnNames = db.prepare('PRAGMA table_info(content_batches)').all().map((col) => col.name);
+if (!contentBatchColumnNames.includes('local_date')) {
+  db.exec('ALTER TABLE content_batches ADD COLUMN local_date TEXT');
+}
+if (!contentBatchColumnNames.includes('supports_morning_pack')) {
+  db.exec('ALTER TABLE content_batches ADD COLUMN supports_morning_pack INTEGER NOT NULL DEFAULT 0');
+}
 if (!contentBatchColumnNames.includes('trace_json')) {
   db.exec('ALTER TABLE content_batches ADD COLUMN trace_json TEXT');
 }
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_content_batches_reuse_key
+    ON content_batches(device_id, window, local_date, supports_morning_pack, id)
+`);
 
 module.exports = db;

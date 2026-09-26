@@ -53,6 +53,13 @@ function rowToPackResult(row) {
   return { pack_id: `pack_${row.id}`, local_date: row.local_date, phrases: parsed.phrases };
 }
 
+function getExistingMorningPack(deviceId, targetDate) {
+  if (!deviceId || !targetDate) {
+    return null;
+  }
+  return rowToPackResult(selectPackStatement.get(deviceId, targetDate));
+}
+
 // Resolves the morning_pack field for a supports_morning_pack=1 /batch
 // request. Never throws -- every failure (weather lookup, OpenAI, DB race,
 // anything) is caught and logged, returning null (no pack this time) rather
@@ -128,5 +135,6 @@ async function getOrGenerateMorningPack({ device, window, dateContext, signals, 
 
 module.exports = {
   computeTargetDate,
+  getExistingMorningPack,
   getOrGenerateMorningPack,
 };
