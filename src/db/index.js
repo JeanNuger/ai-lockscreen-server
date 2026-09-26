@@ -50,8 +50,6 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_content_batches_device ON content_batches(device_id);
   CREATE INDEX IF NOT EXISTS idx_content_batches_delivered_at ON content_batches(delivered_at);
-  CREATE INDEX IF NOT EXISTS idx_content_batches_reuse_key
-    ON content_batches(device_id, window, local_date, supports_morning_pack, id);
 
   CREATE TABLE IF NOT EXISTS admin_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
