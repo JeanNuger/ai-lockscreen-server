@@ -442,6 +442,132 @@ function bankItemToCandidate(item, index = 0) {
   });
 }
 
+// --- Same-topic Daily Bank duplicate detection (production incident,
+// batch_id 19, 2026-09-26): a `holiday` item ("European Day of Languages...")
+// and a `country_fact` item ("European Union marks European Day of
+// Languages...") both landed in the same batch, describing the exact same
+// real-world event. This is a general risk whenever the bank generation for
+// a given day independently surfaces two items about the same underlying
+// event/topic under different categories (holiday/country_fact/history/etc)
+// -- not specific to the geolocation bug that also happened to be present in
+// that trace. Detected here, at candidate-pool build time, so the SECOND
+// occurrence is dropped before ranking/selection ever sees it (never
+// reaches the model, never just deduped after the fact).
+//
+// Heuristic (deliberately simple, no external calls, no embeddings):
+// normalize both texts (reusing normalizeTextForTopicKey's NFKC/lowercase/
+// punctuation-strip), tokenize on whitespace, drop short (<3 char) tokens
+// and a small stopword list (function words carry no topic information and
+// would inflate overlap between otherwise-unrelated sentences), then compare
+// the two token SETS. Overlap ratio = |intersection| / min(|set A|, |set B|)
+// -- dividing by the smaller set (not the union) is deliberate: it asks "is
+// (nearly) everything meaningful in the shorter text also present in the
+// longer one", which is exactly the "same event, reworded/expanded" shape
+// (e.g. "European Day of Languages" (3 significant tokens) is fully
+// contained in "European Union marks European Day of Languages" (6 tokens)
+// -> ratio 3/3 = 1.0). Two genuinely different facts that happen to share one
+// or two common words (e.g. both mention a country name) stay well below the
+// threshold. Threshold picked at 0.5 (50%) -- high enough that two unrelated
+// items sharing a couple of incidental words don't false-positive, low
+// enough to catch reworded/expanded restatements of the same event; see
+// tests/production-incident-batch19.test.js for the trace-19-shaped case and
+// a genuinely-different-items control case. Also requires at least
+// DUPLICATE_TOPIC_MIN_SHARED_TOKENS actual shared words (see below), not just
+// a high ratio, to avoid false positives between short, generically-worded
+// texts.
+const DUPLICATE_TOPIC_OVERLAP_THRESHOLD = 0.5;
+
+// Minimal multi-language stopword set -- only function words common enough
+// in this project's bank content (currently generated in en/ru, see
+// dailyContentBank.js) to meaningfully skew overlap ratios. Not an attempt
+// at exhaustive stopword coverage for every SUPPORTED_LANGUAGES language;
+// worst case for an uncovered language is a slightly noisier overlap ratio,
+// never a crash (normalizeTextForTopicKey/tokenizing still work fine).
+const TOPIC_OVERLAP_STOPWORDS = new Set([
+  'the', 'and', 'for', 'are', 'was', 'were', 'with', 'that', 'this',
+  'from', 'has', 'have', 'had', 'its', 'into', 'about', 'also', 'who',
+  'which', 'their', 'his', 'her', 'they', 'them', 'been', 'being', 'will',
+  'more', 'than', 'over', 'one', 'first',
+  // NOTE: 'day'/'year' are deliberately NOT stopwords here, unlike a typical
+  // stopword list -- for this project's holiday_today/history_today/
+  // country_fact content specifically, "day"/"year" are often part of the
+  // actual event name (e.g. "European Day of Languages", "Independence Day"),
+  // not filler -- stripping them was found (via this module's own tests) to
+  // suppress genuine trace-19-shaped duplicate detections.
+  'на', 'по', 'из', 'от', 'для', 'как', 'это', 'этот', 'эта', 'эти',
+  'что', 'его', 'она', 'они', 'был', 'была', 'были', 'быть', 'также',
+  'который', 'которая', 'которые', 'года', 'году', 'день',
+]);
+
+function significantTopicTokens(text) {
+  return normalizeTextForTopicKey(text)
+    .split(' ')
+    .filter((token) => token.length >= 3 && !TOPIC_OVERLAP_STOPWORDS.has(token));
+}
+
+function sharedSignificantTokenCount(textA, textB) {
+  const tokensA = new Set(significantTopicTokens(textA));
+  const tokensB = new Set(significantTopicTokens(textB));
+  let intersection = 0;
+  for (const token of tokensA) {
+    if (tokensB.has(token)) {
+      intersection += 1;
+    }
+  }
+  return { intersection, sizeA: tokensA.size, sizeB: tokensB.size };
+}
+
+function topicOverlapRatio(textA, textB) {
+  const { intersection, sizeA, sizeB } = sharedSignificantTokenCount(textA, textB);
+  if (sizeA === 0 || sizeB === 0) {
+    return 0;
+  }
+  return intersection / Math.min(sizeA, sizeB);
+}
+
+// Minimum number of ACTUAL shared significant tokens required, on top of the
+// ratio threshold -- guards against short, generically-worded texts (e.g.
+// two Daily Bank filler items that both happen to end in the single word
+// "fact") that would otherwise hit a high ratio off just ONE shared word
+// (found via this module's own tests: "A science fact."/"A country fact."
+// share only "fact", but with 2-token texts that's already a 0.5 ratio).
+// Real same-topic pairs (like the trace-19 case) always share several
+// meaningful words, not just one.
+const DUPLICATE_TOPIC_MIN_SHARED_TOKENS = 2;
+
+function isSameTopicText(textA, textB) {
+  const { intersection, sizeA, sizeB } = sharedSignificantTokenCount(textA, textB);
+  if (sizeA === 0 || sizeB === 0 || intersection < DUPLICATE_TOPIC_MIN_SHARED_TOKENS) {
+    return false;
+  }
+  return intersection / Math.min(sizeA, sizeB) >= DUPLICATE_TOPIC_OVERLAP_THRESHOLD;
+}
+
+// Given an ordered list of {candidate, text} entries (text = the candidate's
+// grounding text, e.g. facts.text for a bank-sourced candidate), returns the
+// candidates with any LATER entry dropped once it's judged the same
+// real-world topic as an EARLIER-kept entry (order = the order bank items
+// were supplied in, i.e. selectBankItemsForDevice's own ordering -- this
+// function does not re-rank, it only removes later duplicates). Entries
+// with no text (nothing to compare) are always kept.
+function dedupeByTopic(entries) {
+  const kept = [];
+  const keptTexts = [];
+  for (const entry of entries) {
+    if (!entry.text) {
+      kept.push(entry.candidate);
+      continue;
+    }
+    const isDuplicate = keptTexts.some((keptText) => isSameTopicText(keptText, entry.text));
+    if (isDuplicate) {
+      continue;
+    }
+    keptTexts.push(entry.text);
+    kept.push(entry.candidate);
+  }
+  return kept;
+}
+
 function computeAge(birthDate, now = new Date()) {
   if (!birthDate) {
     return null;
@@ -665,6 +791,48 @@ function contextSignalConstraints(signal) {
   return [...CONTEXT_SIGNAL_BASE_CONSTRAINTS, ...(CONTEXT_SIGNAL_EXTRA_CONSTRAINTS[signal] || [])];
 }
 
+// No-activity-yet-in-the-morning rule (production incident, batch_id 19): the
+// morning batch contained a phone_trend candidate (steps_vs_yesterday: lower)
+// and could just as easily have contained a many_unlocks context_signal --
+// both reason about activity ACCUMULATED SO FAR TODAY (steps taken, unlocks,
+// screen-on time), which is meaningless first thing in the morning since the
+// day has barely started. This is unrelated to whether the underlying raw
+// signals are present in the request (they usually still carry yesterday's
+// leftover counters at that hour) -- the candidate itself is never even
+// worth generating in the morning window, so it's filtered out of the
+// candidate pool entirely, not merely deprioritized.
+//
+// Every signal-derived candidate type/variant this module produces, and
+// which bucket each falls in:
+//   - context_signal / low_battery     -> NOT activity-based (device state at
+//     the instant of the request) -- STILL ALLOWED in morning.
+//   - context_signal / many_unlocks    -> ACTIVITY-BASED (unlocks accumulated
+//     today so far) -- EXCLUDED from morning.
+//   - context_signal / late_hour       -> NOT activity-based (wall-clock time
+//     only) -- STILL ALLOWED in morning (in practice cannot co-occur with
+//     morning anyway, since resolveContextSignal only returns late_hour for
+//     23:00-05:00, but excluded here for no other reason than that overlap
+//     being impossible -- it is not activity-based).
+//   - phone_trend / unlocks_vs_yesterday -> ACTIVITY-BASED -- EXCLUDED from
+//     morning.
+//   - phone_trend / steps_vs_yesterday   -> ACTIVITY-BASED -- EXCLUDED from
+//     morning. (phone_trend's candidate is only ever created when at least
+//     one of these two facts is present, so the whole type is excluded.)
+const ACTIVITY_BASED_CONTEXT_SIGNALS = new Set(['many_unlocks']);
+
+function isActivityBasedSignalCandidate(candidate) {
+  if (!candidate) {
+    return false;
+  }
+  if (candidate.type === 'phone_trend') {
+    return true;
+  }
+  if (candidate.type === 'context_signal') {
+    return ACTIVITY_BASED_CONTEXT_SIGNALS.has(candidate.facts && candidate.facts.signal);
+  }
+  return false;
+}
+
 // Coarse, non-exact temperature banding for weather_lifehack -- gives the
 // model something to genuinely vary advice on (umbrella vs. sun vs. layers)
 // beyond a single generic "оденься теплее" every time, while the existing
@@ -872,11 +1040,22 @@ function collectCandidates(input = {}) {
     }));
   }
 
+  const bankEntries = [];
   for (let i = 0; i < bankItems.length; i++) {
     const candidate = bankItemToCandidate(bankItems[i], i);
     if (candidate) {
-      candidates.push(candidate);
+      bankEntries.push({
+        candidate,
+        text: candidate.facts && typeof candidate.facts.text === 'string' ? candidate.facts.text : null,
+      });
     }
+  }
+  // One-topic-once-per-batch (production incident, batch_id 19): drop any
+  // bank candidate that describes the same real-world event/topic as an
+  // earlier bank candidate already kept for this batch -- see
+  // dedupeByTopic/isSameTopicText above.
+  for (const candidate of dedupeByTopic(bankEntries)) {
+    candidates.push(candidate);
   }
 
   for (const candidate of SYNTHETIC_POOL) {
@@ -1333,7 +1512,10 @@ function planSlots(input = {}, options = {}) {
   // unchanged.
   const excludeTypes = options.excludeTypes ? new Set(options.excludeTypes) : null;
   const candidates = rawCandidates.filter((candidate) => isCandidateAllowedInWindow(candidate, input.window)
-    && (!excludeTypes || !excludeTypes.has(candidate.type)));
+    && (!excludeTypes || !excludeTypes.has(candidate.type))
+    // No meaningful "today" activity yet first thing in the morning -- see
+    // isActivityBasedSignalCandidate's comment above.
+    && !(input.window === 'morning' && isActivityBasedSignalCandidate(candidate)));
   const seed = options.seed || [
     input.device && input.device.device_id,
     input.window,
@@ -1564,10 +1746,24 @@ function planMorningPack(input = {}) {
       bankByType.set(candidate.type, candidate);
     }
   }
-  for (const type of ['holiday_today', 'history_today', 'word_learning']) {
-    if (bankByType.has(type)) {
-      slotsByType.set(type, bankByType.get(type));
-    }
+  // Same one-topic-once-per-batch rule as collectCandidates' bank loop above
+  // -- the pack can independently pick a holiday_today AND a history_today
+  // bank item, and those two categories describing the same real-world event
+  // on a given date is exactly as possible as the holiday/country_fact
+  // collision from the production trace. Order matters here (first kept
+  // wins): holiday_today before history_today before word_learning, matching
+  // MORNING_PACK_ORDER's own priority for these types.
+  const packBankEntries = ['holiday_today', 'history_today', 'word_learning']
+    .filter((type) => bankByType.has(type))
+    .map((type) => {
+      const candidate = bankByType.get(type);
+      return {
+        candidate,
+        text: candidate.facts && typeof candidate.facts.text === 'string' ? candidate.facts.text : null,
+      };
+    });
+  for (const candidate of dedupeByTopic(packBankEntries)) {
+    slotsByType.set(candidate.type, candidate);
   }
 
   const personalFacts = personalMorningFacts(device, targetDateContext);
@@ -1616,6 +1812,10 @@ module.exports = {
     selectInterestAwareSlots,
     selectGenderLeanSlot,
     resolveContextSignal,
+    isActivityBasedSignalCandidate,
+    topicOverlapRatio,
+    isSameTopicText,
+    dedupeByTopic,
     candidateWeight,
     INTEREST_AFFINITY,
     interestBoostTypesForDevice,

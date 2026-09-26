@@ -7,6 +7,7 @@ const { parseDeviceSignals } = require('../deviceSignals');
 const { computePhoneTrends, recordPhoneSignalSample } = require('../phoneAnalytics');
 const { resolveWeather, resolveGeolocation } = require('../weather');
 const { getOrGenerateMorningPack } = require('../morningPack');
+const { countryForTimezone } = require('../timezoneCountry');
 
 const router = express.Router();
 
@@ -38,12 +39,42 @@ function cleanLocalDate(value) {
   return cleaned && /^\d{4}-\d{2}-\d{2}$/.test(cleaned) ? cleaned : null;
 }
 
+// IP-vs-timezone location sanity check (production incident, batch_id 19,
+// 2026-09-26): the ipwho.is geolocation of the request's IP can be wrong
+// (VPN, corporate proxy, or — as in that trace — a hosting-region proxy
+// artifact even after the trust-proxy fix in server.js). The phone's own
+// IANA timezone (an existing, independently-sent request param -- see
+// deviceSignals/the timezone query param read in the route below) gives a
+// second, unrelated signal for "what country is this phone actually in".
+// When the two disagree, per product decision (see this task's spec): the
+// TIMEZONE's country wins for content purposes, and IP-based weather (which
+// would describe the wrong city entirely) is dropped rather than
+// substituted with anything else.
+//
+// Returns null when there's nothing to compare (no IP-resolved country, no
+// mappable timezone country) or when they agree -- both treated as "no
+// mismatch", i.e. fail open to the existing behavior rather than flagging a
+// mismatch on missing data.
+function resolveLocationMismatch(geo, timezone) {
+  const ipCountry = geo && typeof geo.country_code === 'string' && geo.country_code
+    ? geo.country_code.toUpperCase()
+    : null;
+  const tzCountry = countryForTimezone(timezone);
+  if (!ipCountry || tzCountry === 'unknown') {
+    return null;
+  }
+  if (ipCountry === tzCountry) {
+    return null;
+  }
+  return { ip_country: ipCountry, tz_country: tzCountry };
+}
+
 // requestMs (optional): total wall-clock time for the whole /batch request
 // (batch generation + pack generation running concurrently, DB writes, etc.)
 // -- observation-only, see the route handler's own requestStartMs comment.
 // Distinct from trace.meta.generation_ms (contentGenerator.js), which only
 // covers the ordinary batch's own generateBatch() call.
-function finalizeBatchTrace(trace, batchId, requestMs) {
+function finalizeBatchTrace(trace, batchId, requestMs, locationMismatch) {
   if (!trace || typeof trace !== 'object') {
     return null;
   }
@@ -55,6 +86,11 @@ function finalizeBatchTrace(trace, batchId, requestMs) {
         batch_id: batchId,
         request_ms: typeof requestMs === 'number' ? requestMs : null,
       },
+      // Only present when the IP-resolved country and the phone timezone's
+      // country disagreed for this request (see resolveLocationMismatch) --
+      // absent entirely (not `null`) in the ordinary matching case, per this
+      // task's spec ("matching case ... no location_mismatch field").
+      ...(locationMismatch ? { location_mismatch: locationMismatch } : {}),
     };
     return JSON.stringify(finalizedTrace);
   } catch (err) {
@@ -145,7 +181,35 @@ router.get('/batch', async (req, res, next) => {
     // their own IP geolocation lookup would double the ipwho.is calls for
     // every request.
     const geo = await resolveGeolocation(req.ip);
-    const weather = await resolveWeather(req.ip, geo);
+
+    // IP-vs-timezone sanity check (see resolveLocationMismatch above). Uses
+    // whichever timezone we actually have for this device right now
+    // (requestTimezone if this request just sent one, else the previously
+    // stored device.timezone -- device.timezone was already updated from
+    // requestTimezone above when present, so this single field always holds
+    // the freshest value either way).
+    const locationMismatch = resolveLocationMismatch(geo, device.timezone);
+
+    // On a mismatch, IP-based weather must NOT be used at all (it would be
+    // describing the wrong city/country entirely) -- skip the Open-Meteo
+    // call altogether rather than fetching and discarding it. `weather` still
+    // carries the TIMEZONE's country code (never the IP's) so downstream
+    // country-dependent content selection (Daily Bank country_fact
+    // eligibility, the `now.country` prompt field -- see contentGenerator.js)
+    // uses the correct country per the product decision, without needing a
+    // second country-plumbing path through generateBatch/generateMorningPack.
+    const weather = locationMismatch
+      ? { countryCode: locationMismatch.tz_country, countrySource: 'timezone' }
+      : await resolveWeather(req.ip, geo);
+
+    if (locationMismatch) {
+      // Only the resolved countries are logged here -- never the raw IP
+      // (per this project's IP-privacy rule; see weather.js's own comment
+      // on the same principle).
+      console.warn(
+        `LOCATION_MISMATCH ip_country=${locationMismatch.ip_country} tz_country=${locationMismatch.tz_country}`
+      );
+    }
 
     const phoneTrends = computePhoneTrends(device, window, signals);
 
@@ -176,7 +240,13 @@ router.get('/batch', async (req, res, next) => {
         weather,
         ip: req.ip,
         packDateHeld,
-        geo,
+        // On a location mismatch, force the pack's own weather-forecast
+        // lookup to be skipped too (resolveWeatherForecast short-circuits to
+        // null when handed a null geo explicitly) -- same "no IP-based
+        // weather at all" rule as the ordinary batch's weather_lifehack
+        // above, so the morning pack's weather_lifehack candidate is also
+        // never created for a mismatched request (see planMorningPack).
+        geo: locationMismatch ? null : geo,
       }).catch((err) => {
         // Defense in depth on top of getOrGenerateMorningPack's own
         // try/catch — a pack failure must NEVER break the ordinary batch
@@ -199,7 +269,7 @@ router.get('/batch', async (req, res, next) => {
       source,
       context || null
     );
-    const traceJson = finalizeBatchTrace(trace, insertResult.lastInsertRowid, Date.now() - requestStartMs);
+    const traceJson = finalizeBatchTrace(trace, insertResult.lastInsertRowid, Date.now() - requestStartMs, locationMismatch);
     if (traceJson) {
       updateBatchTraceStatement.run(traceJson, insertResult.lastInsertRowid);
       logBatchTrace(traceJson);
@@ -218,3 +288,4 @@ router.get('/batch', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports._test = { resolveLocationMismatch, finalizeBatchTrace };

@@ -16,14 +16,33 @@ process.on('unhandledRejection', (reason) => {
 
 const app = express();
 
-// Render (and most hosting platforms) put the app behind a single reverse
-// proxy hop, so req.ip would otherwise report the proxy's own address for
-// every request — trust proxy=1 makes Express read the real client IP from
+// Render (and most hosting platforms) put the app behind a reverse-proxy
+// layer, so req.ip would otherwise report a proxy's own address for every
+// request — trust proxy makes Express read the real client IP from
 // X-Forwarded-For instead. Needed for express-rate-limit (src/routes/admin.js)
 // to actually rate-limit per real client rather than treating every request
 // as coming from the same address; express-rate-limit also refuses to start
 // without this once it sees X-Forwarded-For on an untrusted proxy setup.
-app.set('trust proxy', 1);
+//
+// Was `1` (trust exactly one hop) until the batch_id 19 production incident
+// (2026-09-26): a phone physically in Astana, Kazakhstan got back weather
+// for Frankfurt am Main — this server's own Render hosting region — meaning
+// req.ip was resolving to a Render-internal proxy address, not the phone's
+// real IP, and geolocation was faithfully geolocating THAT address. With
+// trust proxy=1, Express's proxy-addr trusts exactly one hop closest to the
+// app and returns the address just before it; if Render's edge network
+// actually forwards a request through TWO hops before it reaches this
+// process (its public-facing router, then an internal load-balancer/highway
+// layer in front of the container — both hops append to X-Forwarded-For),
+// trusting only one of them lands on that second, still-internal Render hop
+// instead of the original client IP, which naturally geolocates to Render's
+// own datacenter (Frankfurt) — exactly the observed symptom. Bumped to `2`
+// so Express walks back two trusted hops and reaches the actual client
+// entry. This is a pragmatic fix based on the observed symptom (an internal
+// Render/Frankfurt IP instead of the client's) rather than a documented
+// exact hop count from Render — if a future trace shows req.ip resolving to
+// some OTHER unexpected address, re-check this number.
+app.set('trust proxy', 2);
 
 app.use(express.json());
 

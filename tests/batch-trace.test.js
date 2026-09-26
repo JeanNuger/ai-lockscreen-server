@@ -120,6 +120,11 @@ async function testRejectRepairFallback() {
     assert.strictEqual(callCount, 2, 'rejected/missing slots should trigger one repair call');
     assert(result.trace, 'trace must be returned');
     assert.strictEqual(result.trace.repair.called, true);
+    assert.deepStrictEqual(
+      result.trace.meta.profile_present,
+      { name: true, birth_date: true, gender: true },
+      'trace metadata must only expose boolean profile field presence'
+    );
     assert(result.trace.repair.sent_slot_ids.length >= 2, 'repair should include rejected and missing slots');
     assert(result.trace.first_pass.some((item) => item.status === 'rejected'), 'trace should include first-pass rejection');
     assert(result.trace.first_pass.some((item) => item.status === 'missing'), 'trace should include missing first-pass slot');
@@ -193,6 +198,11 @@ async function testWholeBatchFallback() {
     assert(result.trace, 'trace must be returned even on whole-batch fallback');
     assert.strictEqual(result.trace.whole_batch_fallback.flag, true, 'outage must be flagged as a whole-batch fallback');
     assert.strictEqual(result.trace.whole_batch_fallback.reason, 'openai_error');
+    assert.deepStrictEqual(
+      result.trace.meta.profile_present,
+      { name: true, birth_date: true, gender: true },
+      'whole-batch fallback trace must keep boolean profile field presence'
+    );
     assert.strictEqual(result.trace.final.length, 12, 'whole-batch fallback trace still records 12 final entries');
     assert(result.trace.final.every((item) => item.final_source === 'fallback_generic'), 'every final entry must be labeled fallback_generic');
 

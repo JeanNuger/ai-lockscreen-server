@@ -1116,11 +1116,20 @@ function isFixedPositionSlot(window, slot, position) {
   return false;
 }
 
+function hasProfileValue(device, field) {
+  return Boolean(device && typeof device[field] === 'string' && device[field].trim());
+}
+
 function buildInitialTrace(device, window, languageCode, dateContext) {
   return {
     meta: {
       batch_id: null,
       device_id: device && device.device_id ? device.device_id : null,
+      profile_present: {
+        name: hasProfileValue(device, 'name'),
+        birth_date: hasProfileValue(device, 'birth_date'),
+        gender: hasProfileValue(device, 'gender'),
+      },
       window,
       lang: languageCode,
       model: 'gpt-4o-mini',
@@ -2708,7 +2717,13 @@ function buildContextPrompt(device, window, signals, weather, languageCode, slot
     : null;
   if (ipCountryCode) {
     now.country = ipCountryCode;
-    now.country_source = 'ip_approximate';
+    // Normally this country came from the IP geolocation lookup
+    // (resolveWeather -> weather.countryCode). On an IP-vs-timezone mismatch
+    // (routes/batch.js's resolveLocationMismatch), the caller instead passes
+    // a `weather` object carrying the TIMEZONE's country code and
+    // `countrySource: 'timezone'`, so this label stays accurate rather than
+    // claiming an IP-derived value that was deliberately overridden.
+    now.country_source = weather && weather.countrySource === 'timezone' ? 'timezone' : 'ip_approximate';
     if (signals && signals.region !== undefined && signals.region !== ipCountryCode) {
       now.device_region = signals.region;
     }
