@@ -1859,7 +1859,7 @@ function summarizeTrace(trace, slots, rejectionReasons = {}) {
       const source = item.final_source || 'unknown';
       finalSourceCounts[source] = (finalSourceCounts[source] || 0) + 1;
     }
-    const genericTypes = new Set(['everyday_lifehack', 'smart_humor_observation', 'city_afisha', 'warm_wish', 'poetic_thought']);
+    const genericTypes = new Set(['everyday_lifehack', 'smart_humor_observation', 'warm_wish', 'poetic_thought']);
     const plannedGenericCount = Array.isArray(slots)
       ? slots.filter((slot) => genericTypes.has(slot.type)).length
       : 0;

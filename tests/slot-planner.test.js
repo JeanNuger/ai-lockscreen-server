@@ -366,7 +366,7 @@ async function main() {
       plannerTest.createCandidate({ id: 'humor_b', type: 'smart_humor_observation', priority: 30, facts: {} }),
       plannerTest.createCandidate({ id: 'technology_a', type: 'science_tech', priority: 30, facts: { text: 'tech fact' } }),
       plannerTest.createCandidate({ id: 'lifehack_a', type: 'everyday_lifehack', priority: 20, facts: {} }),
-      plannerTest.createCandidate({ id: 'city_a', type: 'city_afisha', priority: 20, facts: {} }),
+      plannerTest.createCandidate({ id: 'good_news_a', type: 'good_news', priority: 20, facts: { text: 'good news fact' } }),
       plannerTest.createCandidate({ id: 'warm_wish_a', type: 'warm_wish', priority: 15, facts: {} }),
       plannerTest.createCandidate({ id: 'poetic_a', type: 'poetic_thought', priority: 10, facts: {} }),
       ...extra,
@@ -645,7 +645,7 @@ async function main() {
       anchorSlot,
       ...Array.from({ length: BATCH_SIZE - 1 }, (_, index) => plannerTest.createCandidate({
         id: `anchor_regression_filler_${anchorSlot.type}_${index}`,
-        type: index % 2 === 0 ? 'city_afisha' : 'everyday_lifehack',
+        type: index % 2 === 0 ? 'unusual_fact' : 'everyday_lifehack',
         facts: {},
       })),
     ].map((slot, index) => ({
@@ -1105,7 +1105,7 @@ async function main() {
     const richPool = [
       ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_lifehack_${i + 1}`, type: 'everyday_lifehack', priority: 20, facts: {} })),
       ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_humor_${i + 1}`, type: 'smart_humor_observation', priority: 20, facts: {} })),
-      ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_city_${i + 1}`, type: 'city_afisha', priority: 20, facts: {} })),
+      ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_country_${i + 1}`, type: 'country_fact', priority: 20, facts: { text: 'x' } })),
       ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_wish_${i + 1}`, type: 'warm_wish', priority: 20, facts: {} })),
       ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_science_${i + 1}`, type: 'science_tech', priority: 20, facts: { text: 'x' } })),
       ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_money_${i + 1}`, type: 'money_economics', priority: 20, facts: { text: 'x' } })),

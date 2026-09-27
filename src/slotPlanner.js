@@ -27,7 +27,6 @@ const CONTENT_TYPES = [
   'unusual_fact',
   'country_fact',
   'good_news',
-  'city_afisha',
   'everyday_lifehack',
   'smart_humor_observation',
   'warm_wish',
@@ -70,7 +69,6 @@ const TYPE_LENGTH_HINTS = {
   warm_wish: 'medium',
   poetic_thought: 'medium',
   everyday_lifehack: 'medium',
-  city_afisha: 'medium',
   learning_recall: 'medium',
   history_today: 'long',
   word_learning: 'long',
@@ -157,17 +155,6 @@ const SYNTHETIC_POOL = [
     source: 'creative',
     constraints: ['evening_image', 'stars_autumn_city_lights', 'gentle_not_pompous'],
   },
-  {
-    id: 'synthetic_city_afisha_1',
-    type: 'city_afisha',
-    priority: 16,
-    facts: {},
-    source: 'creative',
-    // No fabricated event/film/exhibition names or dates -- there is no real
-    // city-events data source wired up yet (see HANDOFF_2). Only general,
-    // non-invented city-life/season observations are allowed.
-    constraints: ['general_city_life_observation', 'season_appropriate', 'no_specific_event_names', 'no_fabricated_dates'],
-  },
 ];
 
 // Rare/one-off types (mandatory anchors, telemetry reaction) are capped at
@@ -194,8 +181,7 @@ const TYPE_CAPS = {
   daily_horoscope: 1,
   daily_numerology: 1,
   context_signal: 1,
-  smart_humor_observation: 2,
-  city_afisha: 2,
+  smart_humor_observation: 1,
   everyday_lifehack: 1,
   warm_wish: 1,
   poetic_thought: 1,
@@ -226,7 +212,6 @@ const DEFAULT_TYPE_CAP = 2;
 const GENERIC_FILLER_TYPES = new Set([
   'everyday_lifehack',
   'smart_humor_observation',
-  'city_afisha',
   'warm_wish',
   'poetic_thought',
 ]);
@@ -1197,7 +1182,7 @@ const INTEREST_AFFINITY = {
   family: ['culture', 'everyday_lifehack', 'good_news'],
   self_development: ['science_tech', 'word_learning', 'warm_wish'],
   mindfulness: ['context_signal', 'warm_wish', 'culture'],
-  creative_arts: ['culture', 'smart_humor_observation', 'city_afisha'],
+  creative_arts: ['culture', 'smart_humor_observation'],
 };
 
 // Small, bounded additive score nudge used only inside the competitive
@@ -1215,7 +1200,6 @@ const INTEREST_SELECTION_BOOST = 10;
 const INTEREST_BOOST_ELIGIBLE_TYPES = new Set([
   'everyday_lifehack',
   'smart_humor_observation',
-  'city_afisha',
   'phone_trend',
   'context_signal',
   'warm_wish',
