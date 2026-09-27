@@ -5,7 +5,7 @@ const { generateBatch, resolveLocalDateContext, addDaysToDateString } = require(
 const { consumePendingMessages } = require('../adminMessages');
 const { parseDeviceSignals } = require('../deviceSignals');
 const { computePhoneTrends, recordPhoneSignalSample } = require('../phoneAnalytics');
-const { resolveWeather, resolveGeolocation } = require('../weather');
+const { resolveWeather, resolveGeolocation, resolveWeatherByCoords, resolveWeatherForecastByCoords } = require('../weather');
 const morningPack = require('../morningPack');
 const { countryForTimezone } = require('../timezoneCountry');
 
@@ -92,8 +92,12 @@ function resolveLocationMismatch(geo, timezone) {
 // -- observation-only, see the route handler's own requestStartMs comment.
 // Distinct from trace.meta.generation_ms (contentGenerator.js), which only
 // covers the ordinary batch's own generateBatch() call.
-function buildWeatherStatus(geo, weather, locationMismatch) {
-  const geoStatus = !geo ? 'skipped' : geo.success === false ? 'failed' : 'ok';
+// source: 'city' when the device has picked a city (weather/country resolved
+// from src/cities.js, no IP lookup at all — see the hasCity branch in the
+// route handler below), 'ip' for the ordinary IP-geolocation path. Threaded
+// into trace.meta.weather_status.source for admin/debugging visibility.
+function buildWeatherStatus(geo, weather, locationMismatch, source) {
+  const geoStatus = source === 'city' ? 'skipped' : !geo ? 'skipped' : geo.success === false ? 'failed' : 'ok';
   const weatherStatus = locationMismatch
     ? 'skipped_mismatch'
     : weather && typeof weather.temperatureC === 'number'
@@ -102,6 +106,7 @@ function buildWeatherStatus(geo, weather, locationMismatch) {
   return {
     geo: geoStatus,
     weather: weatherStatus,
+    source: source === 'city' ? 'city' : 'ip',
     country: weather && typeof weather.countryCode === 'string' && weather.countryCode
       ? weather.countryCode
       : geo && typeof geo.country_code === 'string' && geo.country_code
@@ -113,6 +118,21 @@ function buildWeatherStatus(geo, weather, locationMismatch) {
         ? geo.city
         : null,
   };
+}
+
+// Whether this device has picked a city in the survey (see routes/register.js
+// / src/cities.js) — when true, weather/country resolve from that city's own
+// coordinates/country instead of IP geolocation, and the IP-vs-timezone
+// mismatch check is skipped entirely (there's no IP-derived country to
+// compare against a mismatch in the first place). Per product decision, a
+// chosen city always outranks IP — see PRODUCT_REBUILD_PLAN.md.
+function deviceHasCity(device) {
+  return Boolean(
+    device
+    && device.city_geoname_id != null
+    && typeof device.city_lat === 'number'
+    && typeof device.city_lon === 'number'
+  );
 }
 
 function finalizeBatchTrace(trace, batchId, requestMs, locationMismatch, weatherStatus) {
@@ -382,43 +402,62 @@ router.get('/batch', async (req, res, next) => {
       }));
     }
 
+    const hasCity = deviceHasCity(device);
+
     const generationPromise = (async () => {
-      // Geolocation is resolved ONCE per request and shared between the
-      // current-weather lookup (resolveWeather, needed by the ordinary batch)
-      // and the day-forecast lookup inside getOrGenerateMorningPack
-      // (resolveWeatherForecast, needed by the pack) — see weather.js's
-      // resolveGeolocation. Without this, two concurrent branches each doing
-      // their own IP geolocation lookup would double the ipwho.is calls for
-      // every request.
-      const geo = await resolveGeolocation(req.ip);
+      // City outranks IP entirely (see deviceHasCity/PRODUCT_REBUILD_PLAN.md):
+      // no ipwho.is call at all in this branch, weather comes from the
+      // city's own coordinates, and there's no IP-derived country to run the
+      // IP-vs-timezone sanity check against (that check exists specifically
+      // to catch a wrong IP geolocation, which is moot once the country isn't
+      // coming from IP in the first place).
+      let geo = null;
+      let locationMismatch = null;
+      let weather;
 
-      // IP-vs-timezone sanity check (see resolveLocationMismatch above). Uses
-      // whichever timezone we actually have for this device right now
-      // (requestTimezone if this request just sent one, else the previously
-      // stored device.timezone -- device.timezone was already updated from
-      // requestTimezone above when present, so this single field always holds
-      // the freshest value either way).
-      const locationMismatch = resolveLocationMismatch(geo, device.timezone);
+      if (hasCity) {
+        weather = await resolveWeatherByCoords(device.city_lat, device.city_lon, {
+          countryCode: device.city_country_code,
+          city: device.city_name,
+        });
+      } else {
+        // Geolocation is resolved ONCE per request and shared between the
+        // current-weather lookup (resolveWeather, needed by the ordinary batch)
+        // and the day-forecast lookup inside getOrGenerateMorningPack
+        // (resolveWeatherForecast, needed by the pack) — see weather.js's
+        // resolveGeolocation. Without this, two concurrent branches each doing
+        // their own IP geolocation lookup would double the ipwho.is calls for
+        // every request.
+        geo = await resolveGeolocation(req.ip);
 
-      // On a mismatch, IP-based weather must NOT be used at all (it would be
-      // describing the wrong city/country entirely) -- skip the Open-Meteo
-      // call altogether rather than fetching and discarding it. `weather` still
-      // carries the TIMEZONE's country code (never the IP's) so downstream
-      // country-dependent content selection (Daily Bank country_fact
-      // eligibility, the `now.country` prompt field -- see contentGenerator.js)
-      // uses the correct country per the product decision, without needing a
-      // second country-plumbing path through generateBatch/generateMorningPack.
-      const weather = locationMismatch
-        ? { countryCode: locationMismatch.tz_country, countrySource: 'timezone' }
-        : await resolveWeather(req.ip, geo);
+        // IP-vs-timezone sanity check (see resolveLocationMismatch above). Uses
+        // whichever timezone we actually have for this device right now
+        // (requestTimezone if this request just sent one, else the previously
+        // stored device.timezone -- device.timezone was already updated from
+        // requestTimezone above when present, so this single field always holds
+        // the freshest value either way).
+        locationMismatch = resolveLocationMismatch(geo, device.timezone);
 
-      if (locationMismatch) {
-        // Only the resolved countries are logged here -- never the raw IP
-        // (per this project's IP-privacy rule; see weather.js's own comment
-        // on the same principle).
-        console.warn(
-          `LOCATION_MISMATCH ip_country=${locationMismatch.ip_country} tz_country=${locationMismatch.tz_country}`
-        );
+        // On a mismatch, IP-based weather must NOT be used at all (it would be
+        // describing the wrong city/country entirely) -- skip the Open-Meteo
+        // call altogether rather than fetching and discarding it. `weather` still
+        // carries the TIMEZONE's country code (never the IP's) so downstream
+        // country-dependent content selection (Daily Bank country_fact
+        // eligibility, the `now.country` prompt field -- see contentGenerator.js)
+        // uses the correct country per the product decision, without needing a
+        // second country-plumbing path through generateBatch/generateMorningPack.
+        weather = locationMismatch
+          ? { countryCode: locationMismatch.tz_country, countrySource: 'timezone' }
+          : await resolveWeather(req.ip, geo);
+
+        if (locationMismatch) {
+          // Only the resolved countries are logged here -- never the raw IP
+          // (per this project's IP-privacy rule; see weather.js's own comment
+          // on the same principle).
+          console.warn(
+            `LOCATION_MISMATCH ip_country=${locationMismatch.ip_country} tz_country=${locationMismatch.tz_country}`
+          );
+        }
       }
 
       const phoneTrends = computePhoneTrends(device, window, signals);
@@ -456,7 +495,16 @@ router.get('/batch', async (req, res, next) => {
           // weather at all" rule as the ordinary batch's weather_lifehack
           // above, so the morning pack's weather_lifehack candidate is also
           // never created for a mismatched request (see planMorningPack).
-          geo: locationMismatch ? null : geo,
+          // hasCity: geo was never resolved at all in that branch (null
+          // already) -- weatherForecast below supplies the pack's forecast
+          // instead, from the city's own coordinates.
+          geo: hasCity ? null : (locationMismatch ? null : geo),
+          weatherForecast: hasCity
+            ? await resolveWeatherForecastByCoords(device.city_lat, device.city_lon, targetDate, {
+              countryCode: device.city_country_code,
+              city: device.city_name,
+            })
+            : undefined,
         }).catch((err) => {
           // Defense in depth on top of getOrGenerateMorningPack's own
           // try/catch — a pack failure must NEVER break the ordinary batch
@@ -480,7 +528,7 @@ router.get('/batch', async (req, res, next) => {
         source,
         context || null
       );
-      const weatherStatus = buildWeatherStatus(geo, weather, locationMismatch);
+      const weatherStatus = buildWeatherStatus(geo, weather, locationMismatch, hasCity ? 'city' : 'ip');
       const traceJson = finalizeBatchTrace(trace, insertResult.lastInsertRowid, Date.now() - requestStartMs, locationMismatch, weatherStatus);
       if (traceJson) {
         updateBatchTraceStatement.run(traceJson, insertResult.lastInsertRowid);
@@ -520,4 +568,4 @@ router.get('/batch', async (req, res, next) => {
 });
 
 module.exports = router;
-module.exports._test = { resolveLocationMismatch, buildWeatherStatus, finalizeBatchTrace, nightReuseKeyDate };
+module.exports._test = { resolveLocationMismatch, buildWeatherStatus, finalizeBatchTrace, nightReuseKeyDate, deviceHasCity };

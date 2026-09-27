@@ -201,4 +201,20 @@ db.exec(`
     ON content_batches(device_id, window, local_date, supports_morning_pack, id)
 `);
 
+// devices.city_* : the "device picks a city" survey step (see
+// PRODUCT_REBUILD_PLAN.md and src/routes/register.js). city_geoname_id is the
+// client-chosen GeoNames id (src/cities.js); name/country/lat/lon are
+// resolved and stored server-side from the city database at register time --
+// the client's own coordinates are never trusted (see register.js). Same
+// migration pattern as the columns above: ALTER TABLE guarded by
+// PRAGMA table_info so this stays a no-op after the first run against an
+// existing devices table.
+if (!deviceColumnNames.includes('city_geoname_id')) {
+  db.exec('ALTER TABLE devices ADD COLUMN city_geoname_id INTEGER');
+  db.exec('ALTER TABLE devices ADD COLUMN city_name TEXT');
+  db.exec('ALTER TABLE devices ADD COLUMN city_country_code TEXT');
+  db.exec('ALTER TABLE devices ADD COLUMN city_lat REAL');
+  db.exec('ALTER TABLE devices ADD COLUMN city_lon REAL');
+}
+
 module.exports = db;

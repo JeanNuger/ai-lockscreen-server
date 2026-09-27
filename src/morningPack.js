@@ -66,7 +66,7 @@ function getExistingMorningPack(deviceId, targetDate) {
 // than ever affecting the ordinary batch response this is called alongside
 // (see routes/batch.js, which also wraps this call in its own try/catch as
 // defense in depth).
-async function getOrGenerateMorningPack({ device, window, dateContext, signals, weather, ip, packDateHeld, geo }) {
+async function getOrGenerateMorningPack({ device, window, dateContext, signals, weather, ip, packDateHeld, geo, weatherForecast: precomputedWeatherForecast }) {
   try {
     const targetDate = computeTargetDate(window, dateContext);
     if (!targetDate) {
@@ -83,14 +83,21 @@ async function getOrGenerateMorningPack({ device, window, dateContext, signals, 
       return rowToPackResult(existing);
     }
 
-    // geo (optional, from routes/batch.js's single shared resolveGeolocation
-    // call for this request): reused here instead of resolveWeatherForecast
-    // making its own second ipwho.is call. If the caller didn't pass it
-    // (e.g. a direct test call), resolveWeatherForecast falls back to
-    // resolving geolocation itself, same as before.
-    const weatherForecast = geo !== undefined
-      ? await resolveWeatherForecast(ip, targetDate, geo)
-      : await resolveWeatherForecast(ip, targetDate);
+    // weatherForecast (optional, from routes/batch.js): when the device has
+    // picked a city, batch.js already resolved the day forecast itself from
+    // that city's coordinates (resolveWeatherForecastByCoords) and passes it
+    // straight through here -- no IP/geo lookup at all in that case (see
+    // deviceHasCity in routes/batch.js). Otherwise falls back to the
+    // IP-based lookup, same as before: geo (from routes/batch.js's single
+    // shared resolveGeolocation call for this request) is reused instead of
+    // resolveWeatherForecast making its own second ipwho.is call; if the
+    // caller didn't pass geo either (e.g. a direct test call),
+    // resolveWeatherForecast falls back to resolving geolocation itself.
+    const weatherForecast = precomputedWeatherForecast !== undefined
+      ? precomputedWeatherForecast
+      : geo !== undefined
+        ? await resolveWeatherForecast(ip, targetDate, geo)
+        : await resolveWeatherForecast(ip, targetDate);
     const { phrases, trace } = await generateMorningPack(device, targetDate, signals, weather, weatherForecast);
 
     if (!Array.isArray(phrases) || phrases.length === 0) {

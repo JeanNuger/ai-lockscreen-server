@@ -105,6 +105,26 @@ async function resolveGeolocation(ip) {
   return geo;
 }
 
+// Shared Open-Meteo "current weather" fetch, used by both the IP-based path
+// (resolveWeather) and the city-based path (resolveWeatherByCoords, added
+// for the "device picked a city" case -- see routes/batch.js and
+// PRODUCT_REBUILD_PLAN.md: a chosen city outranks IP for weather/country).
+// Returns { temperatureC, description } or null on any failure.
+async function fetchCurrentWeather(latitude, longitude) {
+  const weather = await fetchWithTimeout(
+    `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current_weather=true`,
+    OPEN_METEO_TIMEOUT_MS
+  );
+  const current = weather && weather.current_weather;
+  if (!current || typeof current.temperature !== 'number') {
+    return null;
+  }
+  return {
+    temperatureC: current.temperature,
+    description: WEATHER_CODE_DESCRIPTIONS[current.weathercode] || null,
+  };
+}
+
 /**
  * @param {string} ip - the requesting client's IP (req.ip, with Express
  *   'trust proxy' configured so this is the real client, not the reverse proxy)
@@ -129,21 +149,37 @@ async function resolveWeather(ip, precomputedGeo) {
     return { countryCode, city };
   }
 
-  const weather = await fetchWithTimeout(
-    `https://api.open-meteo.com/v1/forecast?latitude=${geo.latitude}&longitude=${geo.longitude}&current_weather=true`,
-    OPEN_METEO_TIMEOUT_MS
-  );
-  const current = weather && weather.current_weather;
-  if (!current || typeof current.temperature !== 'number') {
+  const current = await fetchCurrentWeather(geo.latitude, geo.longitude);
+  if (!current) {
     return { countryCode, city };
   }
+  return { countryCode, city, ...current };
+}
 
-  return {
-    countryCode,
-    city,
-    temperatureC: current.temperature,
-    description: WEATHER_CODE_DESCRIPTIONS[current.weathercode] || null,
-  };
+// City-based counterpart to resolveWeather -- used once a device has picked
+// a city (device.city_geoname_id set), which then outranks IP geolocation
+// entirely for weather/country (see routes/batch.js and
+// PRODUCT_REBUILD_PLAN.md's city survey step). No IP/ipwho.is call is made
+// here at all -- lat/lon and the country/city labels all come from the
+// server's own city database (src/cities.js), never from the client.
+//
+// @param {number} lat
+// @param {number} lon
+// @param {{countryCode: string|null, city: string|null}} meta - the city's
+//   own country code/name (from src/cities.js), reported back exactly like
+//   resolveWeather's IP-derived countryCode/city.
+// @returns {Promise<{countryCode: string|null, city: string|null, temperatureC?: number, description?: string|null}>}
+async function resolveWeatherByCoords(lat, lon, meta) {
+  const countryCode = (meta && meta.countryCode) || null;
+  const city = (meta && meta.city) || null;
+  if (typeof lat !== 'number' || typeof lon !== 'number') {
+    return { countryCode, city };
+  }
+  const current = await fetchCurrentWeather(lat, lon);
+  if (!current) {
+    return { countryCode, city };
+  }
+  return { countryCode, city, ...current };
 }
 
 // --- Morning pack forecast (added for the morning-pack feature) ---
@@ -175,40 +211,23 @@ function pruneExpiredForecastCacheEntries(now) {
   }
 }
 
-/**
- * @param {string} ip - the requesting client's IP (see resolveWeather)
- * @param {string} targetDate - YYYY-MM-DD, the calendar date to forecast
- * @param {object} [precomputedGeo] - an already-resolved ipwho.is geolocation
- *   object (from resolveGeolocation), reused instead of making a second
- *   ipwho.is call for the same request. Omit entirely to resolve it here,
- *   same as before.
- * @returns {Promise<{countryCode: string|null, city: string|null, temperatureC?: number, description?: string|null, precipitationProbabilityMax?: number, temperatureMinC?: number, uvIndexMax?: number} | null>}
- */
-async function resolveWeatherForecast(ip, targetDate, precomputedGeo) {
-  if (isPrivateOrLocalIp(ip) || typeof targetDate !== 'string' || !targetDate) {
-    return null;
-  }
-
-  const geo = arguments.length >= 3 ? precomputedGeo : await resolveGeolocation(ip);
-  if (!geo) {
-    return null;
-  }
-  const countryCode = typeof geo.country_code === 'string' && geo.country_code ? geo.country_code : null;
-  const city = geo.city || null;
-  if (typeof geo.latitude !== 'number' || typeof geo.longitude !== 'number') {
-    return { countryCode, city };
-  }
-
+// Shared Open-Meteo "day forecast" fetch + cache, used by both the IP-based
+// path (resolveWeatherForecast) and the city-based path
+// (resolveWeatherForecastByCoords). Returns the bare forecast fields
+// (temperatureC/description/temperatureMinC/precipitationProbabilityMax/
+// uvIndexMax) with no countryCode/city -- callers attach those themselves,
+// same split as fetchCurrentWeather/resolveWeather above.
+async function fetchDayForecast(latitude, longitude, targetDate) {
   const now = Date.now();
   pruneExpiredForecastCacheEntries(now);
-  const cacheKey = `${roundCoord(geo.latitude)},${roundCoord(geo.longitude)},${targetDate}`;
+  const cacheKey = `${roundCoord(latitude)},${roundCoord(longitude)},${targetDate}`;
   const cached = forecastCache.get(cacheKey);
   if (cached) {
-    return cached.value ? { ...cached.value, countryCode, city } : { countryCode, city };
+    return cached.value;
   }
 
   const forecast = await fetchWithTimeout(
-    `https://api.open-meteo.com/v1/forecast?latitude=${geo.latitude}&longitude=${geo.longitude}` +
+    `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}` +
       `&daily=weathercode,precipitation_probability_max,temperature_2m_max,temperature_2m_min,uv_index_max` +
       `&timezone=auto&start_date=${targetDate}&end_date=${targetDate}`,
     OPEN_METEO_TIMEOUT_MS
@@ -224,7 +243,7 @@ async function resolveWeatherForecast(ip, targetDate, precomputedGeo) {
 
   if (dayIndex === -1 || !tempMaxArr || typeof tempMaxArr[dayIndex] !== 'number') {
     forecastCache.set(cacheKey, { at: now, value: null });
-    return { countryCode, city };
+    return null;
   }
 
   // temperature_2m_max is used as the representative "for the day" figure --
@@ -254,7 +273,60 @@ async function resolveWeatherForecast(ip, targetDate, precomputedGeo) {
     value.uvIndexMax = uvArr[dayIndex];
   }
   forecastCache.set(cacheKey, { at: now, value });
-  return { ...value, countryCode, city };
+  return value;
 }
 
-module.exports = { resolveWeather, resolveWeatherForecast, resolveGeolocation };
+/**
+ * @param {string} ip - the requesting client's IP (see resolveWeather)
+ * @param {string} targetDate - YYYY-MM-DD, the calendar date to forecast
+ * @param {object} [precomputedGeo] - an already-resolved ipwho.is geolocation
+ *   object (from resolveGeolocation), reused instead of making a second
+ *   ipwho.is call for the same request. Omit entirely to resolve it here,
+ *   same as before.
+ * @returns {Promise<{countryCode: string|null, city: string|null, temperatureC?: number, description?: string|null, precipitationProbabilityMax?: number, temperatureMinC?: number, uvIndexMax?: number} | null>}
+ */
+async function resolveWeatherForecast(ip, targetDate, precomputedGeo) {
+  if (isPrivateOrLocalIp(ip) || typeof targetDate !== 'string' || !targetDate) {
+    return null;
+  }
+
+  const geo = arguments.length >= 3 ? precomputedGeo : await resolveGeolocation(ip);
+  if (!geo) {
+    return null;
+  }
+  const countryCode = typeof geo.country_code === 'string' && geo.country_code ? geo.country_code : null;
+  const city = geo.city || null;
+  if (typeof geo.latitude !== 'number' || typeof geo.longitude !== 'number') {
+    return { countryCode, city };
+  }
+
+  const value = await fetchDayForecast(geo.latitude, geo.longitude, targetDate);
+  return value ? { ...value, countryCode, city } : { countryCode, city };
+}
+
+// City-based counterpart to resolveWeatherForecast -- see
+// resolveWeatherByCoords above for why/when this is used instead (device has
+// picked a city, no IP/ipwho.is call is made at all).
+//
+// @param {number} lat
+// @param {number} lon
+// @param {string} targetDate - YYYY-MM-DD
+// @param {{countryCode: string|null, city: string|null}} meta
+async function resolveWeatherForecastByCoords(lat, lon, targetDate, meta) {
+  const countryCode = (meta && meta.countryCode) || null;
+  const city = (meta && meta.city) || null;
+  if (typeof lat !== 'number' || typeof lon !== 'number' || typeof targetDate !== 'string' || !targetDate) {
+    return { countryCode, city };
+  }
+  const value = await fetchDayForecast(lat, lon, targetDate);
+  return value ? { ...value, countryCode, city } : { countryCode, city };
+}
+
+module.exports = {
+  resolveWeather,
+  resolveWeatherForecast,
+  resolveGeolocation,
+  resolveWeatherByCoords,
+  resolveWeatherForecastByCoords,
+  isPrivateOrLocalIp,
+};

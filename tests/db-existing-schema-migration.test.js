@@ -59,6 +59,14 @@ try {
   assert(batchColumns.includes('trace_json'), 'content_batches.trace_json must be added on startup');
   assert(batchIndexes.includes('idx_content_batches_reuse_key'), 'reuse index must be created after migrated columns exist');
 
+  // City survey step (see routes/register.js / src/cities.js) -- an old DB
+  // file with no city_* columns at all must still start cleanly and gain them.
+  assert(deviceColumns.includes('city_geoname_id'), 'devices.city_geoname_id must be added on startup');
+  assert(deviceColumns.includes('city_name'), 'devices.city_name must be added on startup');
+  assert(deviceColumns.includes('city_country_code'), 'devices.city_country_code must be added on startup');
+  assert(deviceColumns.includes('city_lat'), 'devices.city_lat must be added on startup');
+  assert(deviceColumns.includes('city_lon'), 'devices.city_lon must be added on startup');
+
   db.close();
   fs.rmSync(tempDir, { recursive: true, force: true });
   console.log('db-existing-schema-migration.test.js: all assertions passed');

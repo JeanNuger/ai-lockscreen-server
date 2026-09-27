@@ -22,10 +22,26 @@ src/
   contentGenerator.js — вызов OpenAI + локальный fallback-набор фраз
   constants.js       — список из 6 style_id (должен совпадать с Android BackgroundStylePreset!)
   db/index.js        — схема SQLite, создаётся автоматически при первом запуске
+  cities.js          — поиск/подсказка города по базе GeoNames (data/cities.dat)
   routes/
     register.js      — POST /api/v1/register (сохранение анкеты)
     batch.js          — GET  /api/v1/batch    (выдача батча фраз)
+    cities.js         — GET  /api/v1/cities/search, /api/v1/cities/suggest
 ```
+
+## База городов (GeoNames)
+
+`src/data/cities.dat` собирается скриптом `scripts/build-cities-db.js` из
+дампа GeoNames [`cities15000`](https://download.geonames.org/export/dump/cities15000.zip)
+(каждый город с населением ≥ 15000). Чтобы обновить базу:
+
+```bash
+node scripts/build-cities-db.js
+```
+
+Данные GeoNames распространяются по лицензии
+[Creative Commons Attribution 4.0](https://creativecommons.org/licenses/by/4.0/) —
+© [GeoNames](https://www.geonames.org/).
 
 ## Запуск локально
 
