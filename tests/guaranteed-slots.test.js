@@ -62,8 +62,8 @@ function main() {
   // 1. Direct list check requested by the task: the approved fixed sequence.
   assert.deepStrictEqual(
     plannerTest.MORNING_FIXED_TYPES,
-    ['greeting_name', 'weather_lifehack', 'holiday_today', 'history_today', 'word_learning', 'daily_horoscope', 'daily_numerology'],
-    'morning fixed-position sequence must include legacy anchors followed by personal anchors'
+    ['greeting_name', 'weather_lifehack', 'daily_horoscope', 'holiday_today', 'history_today', 'daily_numerology', 'word_learning'],
+    'morning fixed-position sequence must match the approved order'
   );
   assert.deepStrictEqual(
     [...plannerTest.MORNING_ONLY_TYPES].sort(),
@@ -166,7 +166,7 @@ function main() {
     const firstSix = planned.slots.slice(0, 6).map((slot) => slot.type);
     assert.deepStrictEqual(
       firstSix,
-      ['greeting_name', 'holiday_today', 'history_today', 'word_learning', 'daily_horoscope', 'daily_numerology'],
+      ['greeting_name', 'daily_horoscope', 'holiday_today', 'history_today', 'daily_numerology', 'word_learning'],
       `no-weather run ${i}: fixed sequence must condense, not leave a gap, got ${JSON.stringify(firstSix)}`
     );
     assert(!slotTypes(planned.slots).has('weather_lifehack'), `no-weather run ${i} must not have a weather slot when there is no weather data`);
@@ -203,7 +203,7 @@ function main() {
       holidayCount >= 1 && holidayCount <= 2,
       `run ${i}: holiday_today count (${holidayCount}) must respect its existing cap of 2 even with a fixed-position pick already using one`
     );
-    assert.strictEqual(planned.slots[2].type, 'holiday_today', `run ${i}: position 3 (index 2) must still be the fixed holiday_today slot`);
+    assert.strictEqual(planned.slots[3].type, 'holiday_today', `run ${i}: position 4 (index 3) must still be the fixed holiday_today slot`);
   }
 
   // 7. selectGuaranteedSlots is now parameterized by `types` rather than

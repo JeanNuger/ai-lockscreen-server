@@ -237,16 +237,15 @@ const GENERIC_FILLER_COUNT_KEY = Symbol('genericFillerCount');
 // mechanism (selectGuaranteedSlots/guaranteedTypesForWindow) is kept in
 // place, not deleted, in case a future window needs a "guaranteed, but not a
 // fixed position" category without reintroducing this same bug.
-const MORNING_FIXED_TYPES = ['greeting_name', 'weather_lifehack', 'holiday_today', 'history_today', 'word_learning', 'daily_horoscope', 'daily_numerology'];
+const MORNING_FIXED_TYPES = ['greeting_name', 'weather_lifehack', 'daily_horoscope', 'holiday_today', 'history_today', 'daily_numerology', 'word_learning'];
 
-// Morning-pack feature: the pack's own required slot order (product spec) is
-// a DIFFERENT sequence from the ordinary batch's MORNING_FIXED_TYPES above --
-// note word_learning moves to last, and weather_lifehack/holiday_today swap
-// relative order. Same 7 types (a Set-equal pair), different order -- kept as
-// a distinct constant rather than reordering MORNING_FIXED_TYPES itself,
-// since that would change the ordinary morning batch's own fixed-position
-// sequence, which must stay byte-identical for backward compatibility.
-const MORNING_PACK_ORDER = ['greeting_name', 'holiday_today', 'weather_lifehack', 'history_today', 'daily_horoscope', 'daily_numerology', 'word_learning'];
+// Morning-pack feature: the pack's own required slot order (product spec)
+// now matches MORNING_FIXED_TYPES above exactly (product decision -- the two
+// sequences used to differ, see git history). Kept as a distinct constant
+// rather than having planMorningPack reuse MORNING_FIXED_TYPES directly,
+// since the two are conceptually separate contracts (ordinary batch fixed
+// positions vs. the pack's own slot order) that happen to currently agree.
+const MORNING_PACK_ORDER = ['greeting_name', 'weather_lifehack', 'daily_horoscope', 'holiday_today', 'history_today', 'daily_numerology', 'word_learning'];
 const MORNING_ONLY_TYPES = new Set(['weather_lifehack', 'holiday_today', 'history_today', 'word_learning', 'daily_horoscope', 'daily_numerology']);
 const GUARANTEED_TYPES_BY_WINDOW = {
   morning: [],

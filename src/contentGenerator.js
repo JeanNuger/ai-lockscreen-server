@@ -28,6 +28,20 @@ const {
 // enforces -- never lowered, never used to slice/truncate a phrase.
 const LOCK_SCREEN_TEXT_MAX_LENGTH = 70;
 
+// Model used for the ordinary batch, its repair round, and the morning pack
+// (all three go through createOpenAiBatch below) -- overridable via env so a
+// model swap doesn't need a code change. Daily Bank generation
+// (dailyContentBank.js's gpt-4o + web_search call) is a separate, unrelated
+// OpenAI call and is not affected by either of these.
+const OPENAI_BATCH_MODEL = process.env.OPENAI_BATCH_MODEL || 'gpt-5-mini';
+// gpt-5-mini is a reasoning model: this controls how much hidden reasoning
+// it does before writing the JSON phrases. 'low' was chosen over the
+// default (unset, effectively 'medium') after a real side-by-side compare --
+// 'medium' spent most of its output tokens (and most of its latency) on
+// reasoning tokens never seen by the user, for no measurable gain in phrase
+// quality over 'low'. Not passed to non-gpt-5 models (see createOpenAiBatch).
+const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || 'low';
+
 // `focus` (content-improvement follow-up, req 3 "усилить различие между
 // morning/day/evening/night") is a short, data-only mood/topic steer for the
 // currently-selected, non-fixed-type slots (everyday_lifehack/
@@ -932,7 +946,7 @@ function buildInitialTrace(device, window, languageCode, dateContext) {
       },
       window,
       lang: languageCode,
-      model: 'gpt-4o-mini',
+      model: OPENAI_BATCH_MODEL,
       local_date: dateContext && dateContext.date ? dateContext.date : null,
       timestamp: new Date().toISOString(),
       // Filled in by recordGenerationMs() right before this trace is
@@ -2017,15 +2031,28 @@ function buildBatchResponseFormat(name, count) {
   };
 }
 
+// gpt-5-family reasoning models don't take `temperature` and use
+// `reasoning_effort` for hidden reasoning depth; neither is relevant to
+// gpt-4o-mini or older models. Detected by model name prefix rather than a
+// fixed list so a future gpt-5.x/gpt-6-family OPENAI_BATCH_MODEL still gets
+// this without a code change. Also gates a would-be max_tokens ->
+// max_completion_tokens rename for this family -- moot today since neither
+// call here sends max_tokens/temperature at all.
+const IS_REASONING_MODEL = /^gpt-5/i.test(OPENAI_BATCH_MODEL);
+
 async function createOpenAiBatch(client, context, languageCode, count = BATCH_SIZE, schemaName = 'lock_screen_batch') {
-  return client.chat.completions.create({
-    model: 'gpt-4o-mini',
+  const params = {
+    model: OPENAI_BATCH_MODEL,
     response_format: buildBatchResponseFormat(schemaName, count),
     messages: [
       { role: 'system', content: buildSystemPrompt(languageCode) },
       { role: 'user', content: context },
     ],
-  });
+  };
+  if (IS_REASONING_MODEL) {
+    params.reasoning_effort = OPENAI_REASONING_EFFORT;
+  }
+  return client.chat.completions.create(params);
 }
 
 // rejectedDetails (optional, from assembly.rejectedDetails) carries the
@@ -2611,7 +2638,7 @@ async function generateMorningPack(device, targetDate, signals, weather, weather
       device_id: device && device.device_id ? device.device_id : null,
       target_date: targetDate,
       lang: languageCode,
-      model: 'gpt-4o-mini',
+      model: OPENAI_BATCH_MODEL,
       timestamp: new Date().toISOString(),
       generation_ms: null,
     },

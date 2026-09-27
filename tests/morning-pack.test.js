@@ -190,7 +190,7 @@ async function testPackOrderFactsAndDrop() {
     const types = phrases.map((p) => p.type);
     assert.deepStrictEqual(
       types,
-      ['greeting_name', 'holiday_today', 'weather_lifehack', 'history_today', 'daily_horoscope', 'daily_numerology', 'word_learning'],
+      ['greeting_name', 'weather_lifehack', 'daily_horoscope', 'holiday_today', 'history_today', 'daily_numerology', 'word_learning'],
       'still-rejected-after-repair word_learning must be rescued from its grounded, truncated fact rather than dropped (fallback-filled slots land after the cleanly-generated ones)'
     );
     const wordLearningPhrase = phrases.find((p) => p.type === 'word_learning');
