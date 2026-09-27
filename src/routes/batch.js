@@ -92,7 +92,30 @@ function resolveLocationMismatch(geo, timezone) {
 // -- observation-only, see the route handler's own requestStartMs comment.
 // Distinct from trace.meta.generation_ms (contentGenerator.js), which only
 // covers the ordinary batch's own generateBatch() call.
-function finalizeBatchTrace(trace, batchId, requestMs, locationMismatch) {
+function buildWeatherStatus(geo, weather, locationMismatch) {
+  const geoStatus = !geo ? 'skipped' : geo.success === false ? 'failed' : 'ok';
+  const weatherStatus = locationMismatch
+    ? 'skipped_mismatch'
+    : weather && typeof weather.temperatureC === 'number'
+      ? 'ok'
+      : 'failed';
+  return {
+    geo: geoStatus,
+    weather: weatherStatus,
+    country: weather && typeof weather.countryCode === 'string' && weather.countryCode
+      ? weather.countryCode
+      : geo && typeof geo.country_code === 'string' && geo.country_code
+        ? geo.country_code
+        : null,
+    city: weather && typeof weather.city === 'string' && weather.city
+      ? weather.city
+      : geo && typeof geo.city === 'string' && geo.city
+        ? geo.city
+        : null,
+  };
+}
+
+function finalizeBatchTrace(trace, batchId, requestMs, locationMismatch, weatherStatus) {
   if (!trace || typeof trace !== 'object') {
     return null;
   }
@@ -103,6 +126,7 @@ function finalizeBatchTrace(trace, batchId, requestMs, locationMismatch) {
         ...(trace.meta || {}),
         batch_id: batchId,
         request_ms: typeof requestMs === 'number' ? requestMs : null,
+        weather_status: weatherStatus || null,
       },
       // Only present when the IP-resolved country and the phone timezone's
       // country disagreed for this request (see resolveLocationMismatch) --
@@ -456,7 +480,8 @@ router.get('/batch', async (req, res, next) => {
         source,
         context || null
       );
-      const traceJson = finalizeBatchTrace(trace, insertResult.lastInsertRowid, Date.now() - requestStartMs, locationMismatch);
+      const weatherStatus = buildWeatherStatus(geo, weather, locationMismatch);
+      const traceJson = finalizeBatchTrace(trace, insertResult.lastInsertRowid, Date.now() - requestStartMs, locationMismatch, weatherStatus);
       if (traceJson) {
         updateBatchTraceStatement.run(traceJson, insertResult.lastInsertRowid);
         logBatchTrace(traceJson);
@@ -495,4 +520,4 @@ router.get('/batch', async (req, res, next) => {
 });
 
 module.exports = router;
-module.exports._test = { resolveLocationMismatch, finalizeBatchTrace, nightReuseKeyDate };
+module.exports._test = { resolveLocationMismatch, buildWeatherStatus, finalizeBatchTrace, nightReuseKeyDate };

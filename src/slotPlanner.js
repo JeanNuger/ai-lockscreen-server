@@ -30,11 +30,10 @@ const CONTENT_TYPES = [
   'city_afisha',
   'everyday_lifehack',
   'smart_humor_observation',
-  'free_ai_thought',
+  'warm_wish',
+  'poetic_thought',
   'culture',
-  'seasonal',
   'phone_trend',
-  'age_context',
 ];
 
 // Per-type length hint, sent to OpenAI alongside each slot (see
@@ -66,11 +65,10 @@ const TYPE_LENGTH_HINTS = {
   holiday_today: 'medium',
   daily_horoscope: 'medium',
   daily_numerology: 'medium',
-  free_ai_thought: 'medium',
   context_signal: 'medium',
-  age_context: 'medium',
   phone_trend: 'medium',
-  seasonal: 'medium',
+  warm_wish: 'medium',
+  poetic_thought: 'medium',
   everyday_lifehack: 'medium',
   city_afisha: 'medium',
   learning_recall: 'medium',
@@ -103,7 +101,6 @@ const FACTUAL_TYPES = new Set([
   'country_fact',
   'good_news',
   'phone_trend',
-  'age_context',
 ]);
 
 // Creative (non-factual) synthetic candidates -- always available regardless
@@ -112,30 +109,6 @@ const FACTUAL_TYPES = new Set([
 // TYPE_CAPS below for why each is capped low) rather than the old wide
 // poetic-leaning pool the "final purge" commit (2523b99) removed.
 const SYNTHETIC_POOL = [
-  {
-    id: 'synthetic_free_ai_thought_1',
-    type: 'free_ai_thought',
-    priority: 45,
-    facts: {},
-    source: 'creative',
-    constraints: ['practical_neutral_observation', 'no_user_facts', 'no_poetry'],
-  },
-  {
-    id: 'synthetic_free_ai_thought_2',
-    type: 'free_ai_thought',
-    priority: 38,
-    facts: {},
-    source: 'creative',
-    constraints: ['useful_everyday_observation', 'no_user_facts', 'no_poetry'],
-  },
-  {
-    id: 'synthetic_free_ai_thought_3',
-    type: 'free_ai_thought',
-    priority: 31,
-    facts: {},
-    source: 'creative',
-    constraints: ['tiny_practical_observation', 'no_user_facts', 'no_poetry'],
-  },
   {
     id: 'synthetic_everyday_lifehack_1',
     type: 'everyday_lifehack',
@@ -167,6 +140,22 @@ const SYNTHETIC_POOL = [
     facts: {},
     source: 'creative',
     constraints: ['ironic_digital_life_observation', 'no_anecdote', 'no_mocking', 'one_sentence'],
+  },
+  {
+    id: 'synthetic_warm_wish_1',
+    type: 'warm_wish',
+    priority: 19,
+    facts: {},
+    source: 'creative',
+    constraints: ['sincere_specific_kind_wish', 'no_cliche'],
+  },
+  {
+    id: 'synthetic_poetic_thought_1',
+    type: 'poetic_thought',
+    priority: 17,
+    facts: {},
+    source: 'creative',
+    constraints: ['evening_image', 'stars_autumn_city_lights', 'gentle_not_pompous'],
   },
   {
     id: 'synthetic_city_afisha_1',
@@ -207,12 +196,9 @@ const TYPE_CAPS = {
   context_signal: 1,
   smart_humor_observation: 2,
   city_afisha: 2,
-  free_ai_thought: 2,
-  // Lowered from 3 -- see GENERIC_FILLER_TYPES/MAX_GENERIC_FILLER_PER_BATCH
-  // below, the "generic filler" content-improvement task: a per-type cap
-  // alone let everyday_lifehack alone eat up to a third of the group budget,
-  // so it is trimmed to match its 3 "always available" creative siblings.
-  everyday_lifehack: 2,
+  everyday_lifehack: 1,
+  warm_wish: 1,
+  poetic_thought: 1,
   phone_trend: 1,
   learning_recall: 1,
 };
@@ -238,10 +224,11 @@ const DEFAULT_TYPE_CAP = 2;
 // remains a genuine last resort for a degenerate/near-empty candidate pool,
 // not a normal-operation path.
 const GENERIC_FILLER_TYPES = new Set([
-  'free_ai_thought',
   'everyday_lifehack',
   'smart_humor_observation',
   'city_afisha',
+  'warm_wish',
+  'poetic_thought',
 ]);
 const MAX_GENERIC_FILLER_PER_BATCH = 4;
 const GENERIC_FILLER_COUNT_KEY = Symbol('genericFillerCount');
@@ -283,21 +270,10 @@ const GUARANTEED_TYPES_BY_WINDOW = {
   night: [],
 };
 
-const CREATIVE_FILLER_BLUEPRINTS = [
-  { id: 'creative_filler_everyday_lifehack_v1', type: 'everyday_lifehack', constraints: ['practical_household_or_style_tip', 'one_sentence', 'no_command_tone', 'no_poetry'] },
-  { id: 'creative_filler_free_ai_thought_standalone_v1', type: 'free_ai_thought', constraints: ['practical_neutral_observation', 'no_user_facts', 'no_poetry'] },
-  { id: 'creative_filler_smart_humor_v1', type: 'smart_humor_observation', constraints: ['ironic_everyday_observation', 'no_anecdote', 'no_mocking', 'one_sentence'] },
-  { id: 'creative_filler_city_afisha_v1', type: 'city_afisha', constraints: ['general_city_life_observation', 'season_appropriate', 'no_specific_event_names', 'no_fabricated_dates'] },
-];
-
 const CONTENT_MEMORY_EXEMPT_TYPES = new Set([
   'greeting_name',
   'goodnight_care',
   'weather_lifehack',
-  'context_signal',
-  'seasonal',
-  'phone_trend',
-  'age_context',
 ]);
 
 function hashString(input) {
@@ -553,19 +529,140 @@ function isSameTopicText(textA, textB) {
 function dedupeByTopic(entries) {
   const kept = [];
   const keptTexts = [];
+  const fixedMorningTypes = new Set(MORNING_FIXED_TYPES);
   for (const entry of entries) {
     if (!entry.text) {
       kept.push(entry.candidate);
       continue;
     }
-    const isDuplicate = keptTexts.some((keptText) => isSameTopicText(keptText, entry.text));
-    if (isDuplicate) {
+    const duplicateIndex = keptTexts.findIndex((keptText) => isSameTopicText(keptText, entry.text));
+    if (duplicateIndex === -1) {
+      keptTexts.push(entry.text);
+      kept.push(entry.candidate);
       continue;
     }
-    keptTexts.push(entry.text);
-    kept.push(entry.candidate);
+    const previous = kept[duplicateIndex];
+    const currentIsFixed = entry.candidate && fixedMorningTypes.has(entry.candidate.type);
+    const previousIsFixed = previous && fixedMorningTypes.has(previous.type);
+    if (currentIsFixed && !previousIsFixed) {
+      keptTexts[duplicateIndex] = entry.text;
+      kept[duplicateIndex] = entry.candidate;
+    }
   }
   return kept;
+}
+
+function localDateFromTimestamp(timestamp, timezone) {
+  if (!timestamp || !timezone) {
+    return null;
+  }
+  const value = String(timestamp).includes('T')
+    ? String(timestamp)
+    : `${timestamp.replace(' ', 'T')}Z`;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(date);
+    const get = (type) => parts.find((part) => part.type === type)?.value;
+    return `${get('year')}-${get('month')}-${get('day')}`;
+  } catch (err) {
+    return timestamp.slice(0, 10);
+  }
+}
+
+function dateDiffDays(fromDate, toDate) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(fromDate || '')) || !/^\d{4}-\d{2}-\d{2}$/.test(String(toDate || ''))) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const from = new Date(`${fromDate}T00:00:00Z`).getTime();
+  const to = new Date(`${toDate}T00:00:00Z`).getTime();
+  if (Number.isNaN(from) || Number.isNaN(to)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.floor((to - from) / (24 * 60 * 60 * 1000));
+}
+
+function contentTypeFromMemoryKey(key) {
+  const value = String(key || '');
+  if (value.startsWith('context_signal_')) return 'context_signal';
+  if (value.startsWith('phone_trend_')) return 'phone_trend';
+  if (value.startsWith('synthetic_warm_wish_')) return 'warm_wish';
+  if (value.startsWith('synthetic_poetic_thought_')) return 'poetic_thought';
+  return null;
+}
+
+function buildTypeMemoryIndex(recentContentMemory = [], localDate = null, timezone = null) {
+  const todayTypes = new Set();
+  const recentDatesByType = new Map();
+  if (!Array.isArray(recentContentMemory) || !localDate) {
+    return { todayTypes, recentDatesByType };
+  }
+  for (const item of recentContentMemory) {
+    const type = contentTypeFromMemoryKey(item && item.content_key);
+    if (!type) continue;
+    const shownLocalDate = localDateFromTimestamp(item.shown_at, timezone) || (item.shown_at ? String(item.shown_at).slice(0, 10) : null);
+    if (!shownLocalDate) continue;
+    if (shownLocalDate === localDate) {
+      todayTypes.add(type);
+    }
+    const dates = recentDatesByType.get(type) || [];
+    dates.push(shownLocalDate);
+    recentDatesByType.set(type, dates);
+  }
+  return { todayTypes, recentDatesByType };
+}
+
+function wasTypeShownRecently(typeMemoryIndex, type, localDate, minDaysBetween) {
+  const dates = typeMemoryIndex.recentDatesByType.get(type) || [];
+  return dates.some((date) => {
+    const diff = dateDiffDays(date, localDate);
+    return diff >= 0 && diff < minDaysBetween;
+  });
+}
+
+function isDailyLimitedTypeAlreadyShown(typeMemoryIndex, type) {
+  return typeMemoryIndex.todayTypes.has(type);
+}
+
+function isCadencedCandidateAllowed(candidate, input, typeMemoryIndex) {
+  const window = input.window;
+  const localDate = input.dateContext && input.dateContext.date;
+  if (candidate.type === 'phone_trend' || candidate.type === 'context_signal') {
+    return (window === 'evening' || window === 'night')
+      && !isDailyLimitedTypeAlreadyShown(typeMemoryIndex, candidate.type);
+  }
+  if (candidate.type === 'warm_wish') {
+    return (window === 'day' || window === 'evening')
+      && !isDailyLimitedTypeAlreadyShown(typeMemoryIndex, candidate.type);
+  }
+  if (candidate.type === 'poetic_thought') {
+    return (window === 'evening' || window === 'night')
+      && !wasTypeShownRecently(typeMemoryIndex, 'poetic_thought', localDate, 3);
+  }
+  return true;
+}
+
+function dedupeEconomicsAndStatisticBankEntries(entries) {
+  let hasEconomicsOrStatistic = false;
+  const result = [];
+  for (const entry of entries) {
+    const category = entry.candidate && entry.candidate.bank_category;
+    if (category === 'economics' || category === 'statistic') {
+      if (hasEconomicsOrStatistic) {
+        continue;
+      }
+      hasEconomicsOrStatistic = true;
+    }
+    result.push(entry);
+  }
+  return result;
 }
 
 function computeAge(birthDate, now = new Date()) {
@@ -875,26 +972,6 @@ function weatherConditionLean(description) {
   return null;
 }
 
-// Broad, non-identifying age bracket for age_context -- replaces sending the
-// exact computed age in this candidate's own facts (profile.age, used by the
-// separate general "gender/age give a careful practical shade" instruction,
-// is untouched/out of scope here). A bracket is enough to let the model lean
-// topic/tone/complexity appropriately (req 3) without ever being able to
-// echo a specific number back at the user (req 4: no "поскольку тебе 16").
-const AGE_BRACKETS = [
-  { max: 17, id: 'teen' },
-  { max: 25, id: 'young_adult' },
-  { max: 40, id: 'adult' },
-  { max: 60, id: 'mature' },
-  { max: Infinity, id: 'senior' },
-];
-
-function ageBracketFor(age) {
-  if (!Number.isFinite(age) || age < 0) return null;
-  const match = AGE_BRACKETS.find((bracket) => age <= bracket.max);
-  return match ? match.id : null;
-}
-
 function collectCandidates(input = {}) {
   const candidates = [];
   const { device = {}, window, dateContext, weather, bankItems = [], phoneTrends = {}, recallCandidate = null, signals = {} } = input;
@@ -978,24 +1055,6 @@ function collectCandidates(input = {}) {
     }));
   }
 
-  const age = computeAge(device.birth_date);
-  const ageBracket = ageBracketFor(age);
-  if (ageBracket) {
-    candidates.push(createCandidate({
-      id: 'age_context_soft',
-      // Priority nudged up slightly (15 -> 20) so this genuinely-usable-now
-      // signal (bracket-only, no exact number -- see ageBracketFor) competes
-      // a bit more often, while staying well below mandatory/bank/weather
-      // priorities so it remains a rare accent, not a recurring bucket (req 3:
-      // "усилить... но без стереотипов").
-      priority: 20,
-      type: 'age_context',
-      facts: { age_bracket: ageBracket },
-      source: 'profile',
-      constraints: ['rare', 'avoid_stereotypes', 'no_exact_age', 'no_medical_advice', 'no_financial_advice', 'soft_topic_lean_only'],
-    }));
-  }
-
   if (Object.keys(semanticPhoneTrends).length > 0) {
     candidates.push(createCandidate({
       id: 'phone_trend_semantic',
@@ -1029,17 +1088,6 @@ function collectCandidates(input = {}) {
     }));
   }
 
-  if (dateContext && dateContext.date) {
-    candidates.push(createCandidate({
-      id: 'seasonal_date_context',
-      type: 'seasonal',
-      priority: 18,
-      facts: { date: dateContext.date, weekday: dateContext.weekday },
-      source: 'date_context',
-      constraints: ['date_stable', 'avoid_fake_holidays'],
-    }));
-  }
-
   const bankEntries = [];
   for (let i = 0; i < bankItems.length; i++) {
     const candidate = bankItemToCandidate(bankItems[i], i);
@@ -1054,7 +1102,7 @@ function collectCandidates(input = {}) {
   // bank candidate that describes the same real-world event/topic as an
   // earlier bank candidate already kept for this batch -- see
   // dedupeByTopic/isSameTopicText above.
-  for (const candidate of dedupeByTopic(bankEntries)) {
+  for (const candidate of dedupeByTopic(dedupeEconomicsAndStatisticBankEntries(bankEntries))) {
     candidates.push(candidate);
   }
 
@@ -1145,10 +1193,10 @@ const INTEREST_AFFINITY = {
   tech: ['science_tech'],
   style: ['everyday_lifehack'],
   fashion: ['everyday_lifehack'],
-  work: ['money_economics', 'everyday_lifehack', 'free_ai_thought'],
+  work: ['money_economics', 'everyday_lifehack', 'warm_wish'],
   family: ['culture', 'everyday_lifehack', 'good_news'],
-  self_development: ['science_tech', 'word_learning', 'free_ai_thought'],
-  mindfulness: ['context_signal', 'seasonal', 'culture'],
+  self_development: ['science_tech', 'word_learning', 'warm_wish'],
+  mindfulness: ['context_signal', 'warm_wish', 'culture'],
   creative_arts: ['culture', 'smart_humor_observation', 'city_afisha'],
 };
 
@@ -1165,13 +1213,13 @@ const INTEREST_SELECTION_BOOST = 10;
 // candidateWeight, so a future edit to INTEREST_AFFINITY cannot accidentally
 // start nudging Daily Bank content scoring.
 const INTEREST_BOOST_ELIGIBLE_TYPES = new Set([
-  'free_ai_thought',
   'everyday_lifehack',
   'smart_humor_observation',
   'city_afisha',
   'phone_trend',
   'context_signal',
-  'seasonal',
+  'warm_wish',
+  'poetic_thought',
 ]);
 
 // Returns the Set of non-bank types eligible for INTEREST_SELECTION_BOOST for
@@ -1404,6 +1452,15 @@ function isCandidateAllowedInWindow(candidate, window) {
   if (candidate.type === 'learning_recall') {
     return window === 'night';
   }
+  if (candidate.type === 'phone_trend' || candidate.type === 'context_signal') {
+    return window === 'evening' || window === 'night';
+  }
+  if (candidate.type === 'warm_wish') {
+    return window === 'day' || window === 'evening';
+  }
+  if (candidate.type === 'poetic_thought') {
+    return window === 'evening' || window === 'night';
+  }
   return true;
 }
 
@@ -1433,43 +1490,6 @@ function selectNonMandatory(candidates, count, rng, memoryIndex = buildRecentMem
       continue;
     }
     selected.push(entry.candidate);
-    recordType(typeCounts, type);
-  }
-
-  // Creative filler, last resort. capsExhausted starts false so normal/rich
-  // batches still respect TYPE_CAPS' diversity intent (e.g. never more than
-  // 1 smart_humor_observation) even in this loop. But BATCH_SIZE slots is a
-  // hard product invariant (see constants.js/validateFinalBatch in
-  // contentGenerator.js) that must never fail just because a sparse/
-  // degenerate input (e.g. a 'day' window with no weather/bank/telemetry/
-  // recall at all) ran out of distinct safe filler types under the new,
-  // deliberately tighter per-type caps (TYPE_CAPS.everyday_lifehack was
-  // lowered from 8 to 2 in this same rebuild) -- once every filler
-  // blueprint type has been tried enough times to hit its cap and slots are
-  // STILL unfilled, this switches to ignoring the cap and just completes
-  // the batch, rather than returning fewer than BATCH_SIZE slots.
-  let fillerIndex = 0;
-  let capsExhausted = false;
-  while (selected.length < count) {
-    const blueprint = CREATIVE_FILLER_BLUEPRINTS[fillerIndex % CREATIVE_FILLER_BLUEPRINTS.length];
-    const blueprintUseIndex = Math.floor(fillerIndex / CREATIVE_FILLER_BLUEPRINTS.length) + 1;
-    const type = blueprint.type;
-    fillerIndex += 1;
-    if (!capsExhausted && !canAddType(typeCounts, type)) {
-      if (fillerIndex > CREATIVE_FILLER_BLUEPRINTS.length * (DEFAULT_TYPE_CAP + 2)) {
-        capsExhausted = true;
-      } else {
-        continue;
-      }
-    }
-    selected.push(createCandidate({
-      id: `filler_${blueprint.id}_${blueprintUseIndex}`,
-      type,
-      priority: 1,
-      facts: {},
-      source: 'creative',
-      constraints: blueprint.constraints,
-    }));
     recordType(typeCounts, type);
   }
 
@@ -1511,7 +1531,13 @@ function planSlots(input = {}, options = {}) {
   // caller/test), this is a no-op filter -- ordinary behavior is completely
   // unchanged.
   const excludeTypes = options.excludeTypes ? new Set(options.excludeTypes) : null;
+  const typeMemoryIndex = buildTypeMemoryIndex(
+    options.recentContentMemory,
+    input.dateContext && input.dateContext.date,
+    input.device && input.device.timezone
+  );
   const candidates = rawCandidates.filter((candidate) => isCandidateAllowedInWindow(candidate, input.window)
+    && isCadencedCandidateAllowed(candidate, input, typeMemoryIndex)
     && (!excludeTypes || !excludeTypes.has(candidate.type))
     // No meaningful "today" activity yet first thing in the morning -- see
     // isActivityBasedSignalCandidate's comment above.
@@ -1825,7 +1851,6 @@ module.exports = {
     TYPE_CAPS,
     GENERIC_FILLER_TYPES,
     MAX_GENERIC_FILLER_PER_BATCH,
-    ageBracketFor,
     parseBirthDateParts,
     zodiacSignForBirthDate,
     reduceNumerologyNumber,

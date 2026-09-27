@@ -65,77 +65,31 @@ function testExactSubReasonsForProductionTexts() {
     assert(wordCount <= 16, `word count must be within the 16-word limit (was ${wordCount}), proving length alone caused the rejection`);
   }
 
-  const { reason: goodnightReason, detail: goodnightDetail } = rejectionReasonForText(GOODNIGHT_REJECTED_TEXT, 'ru', {});
-  assert.strictEqual(goodnightReason, 'blocked_phrase');
-  assert.strictEqual(goodnightDetail, 'blocked_phrase:пусть', 'must report the exact matched stop phrase, not just the coarse reason');
+  // Content-quality rebuild (requirement A): the "пусть"/postcard-cliche stop
+  // phrase (and the whole STOP_PHRASES/blocked_phrase mechanism, including
+  // the goodnight_care "пусть"/"ночи" exemption) has been removed entirely.
+  // GOODNIGHT_REJECTED_TEXT is well within the length cap, so it is simply
+  // ACCEPTED now -- not rejected for any reason.
+  const { reason: goodnightReason } = rejectionReasonForText(GOODNIGHT_REJECTED_TEXT, 'ru', {});
+  assert.strictEqual(goodnightReason, null, 'the former blocked-phrase target must no longer be rejected for any reason -- style filters were removed');
+  assert.strictEqual(require('../src/textFilter').findBlockedPhrase, undefined, 'findBlockedPhrase must no longer be exported (STOP_PHRASES mechanism was removed)');
+  assert.strictEqual(require('../src/textFilter').STOP_PHRASES, undefined, 'STOP_PHRASES must no longer be exported');
 
-  // collectUsablePhrases over the whole batch: 11 basic_quality (unchanged --
-  // the length limit fix is orthogonal to the blocked-phrase fix). The
-  // blocked_phrase count is now 0, not 1: with real slot types threaded
-  // through (s12 is goodnight_care) and the follow-up "спокойной
-  // ночи"/"покой"-collision fix, GOODNIGHT_REJECTED_TEXT itself is now
-  // ACCEPTED on first pass -- it's exactly the sanctioned wish, so it no
-  // longer needs repair at all. This is a strictly better outcome than the
-  // original production incident (which rejected it), not a regression in
-  // this test.
+  // collectUsablePhrases over the whole batch: 11 basic_quality (too_long,
+  // unchanged) plus the goodnight_care wish, which is now ALSO accepted
+  // (12th slot) since nothing else disqualifies it -- a strictly better
+  // outcome than the original production incident (which rejected all 12).
   const phrases = [...PRODUCTION_REJECTED_TEXTS, GOODNIGHT_REJECTED_TEXT].map((text, i) => ({
     slot_id: `s${i + 1}`,
     text,
     style_id: null,
   }));
-  const expectedSlots = phrases.map((p, i) => ({ slot_id: p.slot_id, type: i === 11 ? 'goodnight_care' : 'free_ai_thought' }));
+  const expectedSlots = phrases.map((p, i) => ({ slot_id: p.slot_id, type: i === 11 ? 'goodnight_care' : 'everyday_lifehack' }));
   const collected = collectUsablePhrases(phrases, 'ru', {}, expectedSlots);
-  assert.strictEqual(collected.accepted.length, 1, 'only the goodnight_care wish should be accepted -- the fixed blocked-phrase collision');
+  assert.strictEqual(collected.accepted.length, 1, 'only the goodnight_care wish should be accepted -- the 11 others are all too long');
   assert.strictEqual(collected.accepted[0].slot_id, 's12');
   assert.strictEqual(collected.rejectionReasons.basic_quality, 11);
-  assert.strictEqual(collected.rejectionReasons.blocked_phrase, undefined, 'the goodnight wish text no longer triggers blocked_phrase at all');
-
-  // B4: with slot type goodnight_care, the SAME text (minus the "ночи" part,
-  // which is a separate, still-enforced ban) must be ACCEPTED once it no
-  // longer contains "ночи" -- proving the exemption is scoped to "пусть"
-  // only, not a blanket pass for goodnight_care.
-  const goodnightFixedNoNight = 'Пусть впереди будет только хорошее.';
-  const fixedResult = rejectionReasonForText(goodnightFixedNoNight, 'ru', {}, 'goodnight_care');
-  assert.strictEqual(fixedResult.reason, null, '"пусть" must be allowed for goodnight_care once no other ban applies');
-
-  // Same "пусть" text is STILL blocked for every other slot type (the
-  // exemption must not leak).
-  const stillBlockedElsewhere = rejectionReasonForText(goodnightFixedNoNight, 'ru', {}, 'free_ai_thought');
-  assert.strictEqual(stillBlockedElsewhere.reason, 'blocked_phrase', '"пусть" must stay blocked for every slot type other than goodnight_care');
-
-  // Follow-up fix: the two fixed, idiomatic good-night wishes ("спокойной
-  // ночи"/"доброй ночи") are now allowed for goodnight_care specifically --
-  // see GOODNIGHT_CARE_ALLOWED_NIGHT_PHRASES in textFilter.js. The general
-  // "ноч" stop phrase (night-poetry ban) stays fully enforced everywhere
-  // else, including any OTHER "ноч" occurrence inside a goodnight_care text.
-
-  // The exact case from the review: the fixed wish combined with other
-  // content must be accepted for goodnight_care.
-  const wishWithContent = rejectionReasonForText('Спокойной ночи, пусть завтра будет добрым', 'ru', {}, 'goodnight_care');
-  assert.strictEqual(wishWithContent.reason, null, '"Спокойной ночи, пусть завтра будет добрым" must be accepted for goodnight_care');
-
-  const dobroyNightWishWithContent = rejectionReasonForText('Доброй ночи, пусть приснятся хорошие сны', 'ru', {}, 'goodnight_care');
-  assert.strictEqual(dobroyNightWishWithContent.reason, null, '"Доброй ночи, ..." must also be accepted for goodnight_care');
-
-  // Night POETRY (not the fixed wish itself) must still be rejected for
-  // goodnight_care -- the exemption only carves out the two literal phrases,
-  // it is not a blanket pass on "ноч".
-  const nightPoetry = rejectionReasonForText('Ночь укутает тишиной', 'ru', {}, 'goodnight_care');
-  assert.strictEqual(nightPoetry.reason, 'blocked_phrase', '"Ночь укутает тишиной" must still be rejected for goodnight_care (night-poetry ban)');
-  assert.strictEqual(nightPoetry.detail, 'blocked_phrase:ноч');
-
-  // A second, non-idiomatic "ноч" mention alongside the fixed wish must still
-  // block -- the exemption strips only the sanctioned phrase, not every "ноч".
-  const wishPlusExtraNightMention = rejectionReasonForText('Спокойной ночи, пусть эта ночь принесёт покой', 'ru', {}, 'goodnight_care');
-  assert.strictEqual(wishPlusExtraNightMention.reason, 'blocked_phrase', 'a second, non-idiomatic "ноч" mention must still block even for goodnight_care');
-
-  // The same "Спокойной ночи" wish must still be rejected for every OTHER
-  // slot type -- the exemption is scoped to goodnight_care only.
-  const nightWishElsewhere = rejectionReasonForText('Спокойной ночи, пусть завтра будет добрым', 'ru', {}, 'free_ai_thought');
-  assert.strictEqual(nightWishElsewhere.reason, 'blocked_phrase', '"Спокойной ночи" must still be rejected outside goodnight_care');
-
-  const nightWishElsewhereNoSlotType = rejectionReasonForText('Спокойной ночи.', 'ru', {});
-  assert.strictEqual(nightWishElsewhereNoSlotType.reason, 'blocked_phrase', '"Спокойной ночи" must still be rejected with no slot type at all');
+  assert.strictEqual(collected.rejectionReasons.blocked_phrase, undefined, 'blocked_phrase is no longer a possible rejection reason at all');
 
   console.log('[production-reject] sub-reason/collectUsablePhrases checks passed');
 }

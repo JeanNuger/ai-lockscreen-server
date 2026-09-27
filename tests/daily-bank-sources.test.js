@@ -353,10 +353,13 @@ async function main() {
       );
 
       assert.strictEqual(openAiCallCount, 1, 'per-user batch generation must still make exactly one OpenAI call with evergreen active');
-      assert.strictEqual(result.phrases.length, BATCH_SIZE);
+      // Content-quality rebuild (requirement B): no more padding to exactly
+      // BATCH_SIZE -- just bounded by it.
+      assert(result.phrases.length > 0 && result.phrases.length <= BATCH_SIZE);
 
       const payload = JSON.parse(capturedRequest.messages[1].content);
-      assert.strictEqual(payload.slots.length, BATCH_SIZE, 'the per-user prompt must stay bounded at BATCH_SIZE slots regardless of evergreen catalog size');
+      assert(payload.slots.length > 0 && payload.slots.length <= BATCH_SIZE, 'the per-user prompt must stay bounded at BATCH_SIZE slots regardless of evergreen catalog size');
+      assert.strictEqual(result.phrases.length, payload.slots.length, 'every planned slot got a phrase back from the mock, so none should be dropped');
 
       const payloadText = JSON.stringify(payload);
       const catalogTextsPresent = bankTest.EVERGREEN_CONTENT_BANK.filter((item) => payloadText.includes(item.content_text)).length;

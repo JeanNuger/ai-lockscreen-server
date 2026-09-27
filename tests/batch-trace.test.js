@@ -10,7 +10,7 @@ process.env.OPENAI_API_KEY = 'test-key-batch-trace';
 
 const db = require('../src/db');
 const { STYLE_IDS } = require('../src/constants');
-const { generateBatch } = require('../src/contentGenerator');
+const { generateBatch, _test: contentTest } = require('../src/contentGenerator');
 const { getBankDateString } = require('../src/dailyContentBank');
 
 function mockPhrase(slot, index, text) {
@@ -20,6 +20,12 @@ function mockPhrase(slot, index, text) {
     style_id: STYLE_IDS[index % STYLE_IDS.length],
   };
 }
+
+// Stylistic filters (question mark, blocked phrases, etc) were removed from
+// textFilter.js as part of the content-quality rebuild (requirement A) --
+// only schema/empty/too_long/language/duplicate checks remain. An overlong
+// string is now the reliable, language-independent way to force a rejection.
+const OVERLONG_TEXT = 'あ'.repeat(contentTest.LOCK_SCREEN_TEXT_MAX_LENGTH + 10);
 
 async function testRejectRepairFallback() {
   const bankDate = getBankDateString();
@@ -60,10 +66,10 @@ async function testRejectRepairFallback() {
                             .filter((slot) => slot.type !== 'daily_numerology')
                             .map((slot, index) => {
                               if (slot.type === 'greeting_name') {
-                                return mockPhrase(slot, index, 'これは質問ですか?');
+                                return mockPhrase(slot, index, OVERLONG_TEXT);
                               }
                               if (slot.type === 'daily_horoscope') {
-                                return mockPhrase(slot, index, 'これは星占いですか?');
+                                return mockPhrase(slot, index, OVERLONG_TEXT);
                               }
                               return mockPhrase(slot, index, `朝の確認 ${index + 1}`);
                             }),
@@ -83,7 +89,7 @@ async function testRejectRepairFallback() {
                               return mockPhrase(slot, index, 'アリア、おはようございます');
                             }
                             if (slot.type === 'daily_horoscope') {
-                              return mockPhrase(slot, index, 'これは修理後も質問ですか?');
+                              return mockPhrase(slot, index, OVERLONG_TEXT);
                             }
                             return mockPhrase(slot, index, `修理済み ${index + 1}`);
                           }),

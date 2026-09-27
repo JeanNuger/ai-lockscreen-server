@@ -124,42 +124,28 @@ async function main() {
     assert(!badFallbackText.includes(bad), `fallback must not include generic bad phrase: ${bad}`);
   }
 
-  assert(contentTest.hasQuestionMark('Это вопрос?'), 'question mark must be blocked');
-  assert(contentTest.hasQuestionShapeWithoutMark('Знаешь ли ты, что сегодня произошло'), 'Russian question-shaped text without ? must be blocked');
-  assert(contentTest.hasQuestionShapeWithoutMark('Почему бы не открыть план'), 'Russian "why not" question shape must be blocked');
-  assert(contentTest.isGenericBadLockScreenPhrase('Следующему действию не нужна церемония.'), 'known generic bad example must be blocked');
+  // Content-quality rebuild (requirement A): every stylistic filter (stop
+  // phrases/postcard-cliche guard, question mark, question-shape, generic-bad
+  // phrase list, imperative openers, incomplete-sentence guard, coaching,
+  // telemetry echo, unsupported-context, date-claim) has been removed from
+  // textFilter.js/contentGenerator.js entirely -- the server now only checks
+  // schema/empty/too_long/language/duplicate-slot-id/exact-duplicate-text.
+  // hasQuestionMark/hasQuestionShapeWithoutMark/isGenericBadLockScreenPhrase/
+  // findBlockedPhrase/STOP_PHRASES and friends are no longer exported at all.
+  assert.strictEqual(contentTest.hasQuestionMark, undefined, 'hasQuestionMark must no longer be exported (stylistic filters were removed)');
+  assert.strictEqual(contentTest.hasQuestionShapeWithoutMark, undefined, 'hasQuestionShapeWithoutMark must no longer be exported');
+  assert.strictEqual(contentTest.isGenericBadLockScreenPhrase, undefined, 'isGenericBadLockScreenPhrase must no longer be exported');
+  // A former "postcard cliche" phrase (uyut/chai/night poetry etc) must now
+  // survive validation untouched -- quality is the model's job (system
+  // prompt), not a server-side stylistic filter's.
   assert.strictEqual(
     contentTest.assembleBatchFromGeneratedPhrases(
       [...validGeneratedPhrases().slice(0, 11), phrase('Уют и чай наполняют день теплом.')],
       'ru'
-    ).rejectionReasons.blocked_phrase,
-    1,
-    'local textFilter must reject postcard filler without spending tokens'
+    ).rejectedCount,
+    0,
+    'former postcard-cliche filler must no longer be rejected -- style filters were removed'
   );
-  for (const badPostcard of [
-    'Пусть ночи будут спокойными.',
-    'Чайник улыбается вечернему свету.',
-    'Вечер как фея над городом.',
-    'Малиновый солнце обещает чудеса.',
-    'Свет в окне манит счастьем.',
-    'Темнота помогает сосредоточиться на мыслях.',
-    'Луна играет с облаками.',
-    'Кто-то где-то слушает шорох листвы.',
-    'Каждая ночь - это новый шанс.',
-    'Ночь дарит нам тишину и покой.',
-    'Медленно танцующие огоньки гирлянды создают атмосферу.',
-    'Свечи и ночное небо - гармония в словах.',
-    'Спокойной ночи! Завтра будет новый день.',
-  ]) {
-    assert.strictEqual(
-      contentTest.assembleBatchFromGeneratedPhrases(
-        [...validGeneratedPhrases().slice(0, 11), phrase(badPostcard)],
-        'ru'
-      ).rejectionReasons.blocked_phrase,
-      1,
-      `postcard garbage must be blocked: ${badPostcard}`
-    );
-  }
 
   const validTwelve = validGeneratedPhrases();
   const successAssembly = contentTest.assembleBatchFromGeneratedPhrases(validTwelve, 'ru');
@@ -169,25 +155,27 @@ async function main() {
   assert.strictEqual(successAssembly.fallbackFillCount, 0);
   assert.strictEqual(successAssembly.reason, 'success');
 
-  const oneQuestion = contentTest.assembleBatchFromGeneratedPhrases(
-    [...validTwelve.slice(0, 11), phrase('Это вопрос?')],
-    'ru'
+  // A question-shaped phrase (with or without an actual "?") is no longer
+  // rejected at all -- the question/question-shape guards were removed
+  // (requirement A). The remaining too-long/duplicate coverage below already
+  // exercises the partial-fill mechanics that the old oneQuestion/
+  // oneQuestionShape cases used to.
+  assert.strictEqual(
+    contentTest.assembleBatchFromGeneratedPhrases(
+      [...validTwelve.slice(0, 11), phrase('Это вопрос?')],
+      'ru'
+    ).rejectedCount,
+    0,
+    'a question mark alone must no longer cause a rejection'
   );
-  assertFinalBatch(oneQuestion.phrases);
-  assert.strictEqual(oneQuestion.generatedCount, 11);
-  assert.strictEqual(oneQuestion.rejectedCount, 1);
-  assert.strictEqual(oneQuestion.fallbackFillCount, 1);
-  assert.strictEqual(oneQuestion.reason, 'partial_validation_fill');
-  assert(oneQuestion.phrases.some((p) => p.text === 'Конкретная строка 1'), 'valid generated text must be preserved');
-
-  const oneQuestionShape = contentTest.assembleBatchFromGeneratedPhrases(
-    [...validTwelve.slice(0, 11), phrase('А ты замечал этот паттерн')],
-    'ru'
+  assert.strictEqual(
+    contentTest.assembleBatchFromGeneratedPhrases(
+      [...validTwelve.slice(0, 11), phrase('А ты замечал этот паттерн')],
+      'ru'
+    ).rejectedCount,
+    0,
+    'a question-shaped phrase without "?" must no longer cause a rejection'
   );
-  assertFinalBatch(oneQuestionShape.phrases);
-  assert.strictEqual(oneQuestionShape.generatedCount, 11);
-  assert.strictEqual(oneQuestionShape.rejectedCount, 1);
-  assert.strictEqual(oneQuestionShape.fallbackFillCount, 1);
 
   const duplicateText = contentTest.assembleBatchFromGeneratedPhrases(
     [...validTwelve.slice(0, 11), phrase('Конкретная строка 1', 'O9')],
@@ -207,8 +195,9 @@ async function main() {
   assert.strictEqual(tooLongText.rejectedCount, 2);
   assert.strictEqual(tooLongText.fallbackFillCount, 2);
 
+  const overlongRu = 'ы'.repeat(contentTest.LOCK_SCREEN_TEXT_MAX_LENGTH + 20);
   const allInvalid = contentTest.assembleBatchFromGeneratedPhrases(
-    Array.from({ length: BATCH_SIZE }, (_, i) => phrase(`Это вопрос ${i}?`)),
+    Array.from({ length: BATCH_SIZE }, () => phrase(overlongRu)),
     'ru'
   );
   assertFinalBatch(allInvalid.phrases);
@@ -225,113 +214,36 @@ async function main() {
   assert.strictEqual(invalidStyles.generatedCount, BATCH_SIZE);
   assert(invalidStyles.phrases.some((p) => p.text === 'Конкретная строка 1'), 'good text with invalid style_id must be preserved');
 
-  // --- Regression tests for a real production batch (2026-09-19) where the
-  // model wrote "Завтра пятница" on an actual Saturday (real tomorrow:
-  // Sunday), echoed exact battery/unlock snapshots, invented "в пробке" with
-  // no traffic signal, and used directive/coaching phrasing despite the
-  // prompt already forbidding it. See task history for the full production
-  // AI_BATCH_RESULT and example phrases this exercises.
-
-  const saturdayDateContext = {
-    date: '2026-09-19',
-    weekday: 'Saturday',
-    time: '15:30',
-    tomorrow_date: '2026-09-20',
-    tomorrow_weekday: 'Sunday',
-  };
-
-  // DATE / WEEKDAY
-  const wrongTomorrowWeekday = contentTest.assembleBatchFromGeneratedPhrases(
-    [...validTwelve.slice(0, 11), phrase('Завтра пятница, выходные уже рядом.')],
-    'ru',
-    { dateContext: saturdayDateContext }
-  );
-  assertFinalBatch(wrongTomorrowWeekday.phrases);
-  assert.strictEqual(wrongTomorrowWeekday.rejectedCount, 1);
-  assert.strictEqual(wrongTomorrowWeekday.rejectionReasons.date_claim, 1, 'wrong tomorrow weekday must be rejected as date_claim');
-
-  const correctTomorrowWeekday = contentTest.assembleBatchFromGeneratedPhrases(
-    [...validTwelve.slice(0, 11), phrase('Завтра воскресенье, можно не спешить с утра.')],
-    'ru',
-    { dateContext: saturdayDateContext }
-  );
-  assertFinalBatch(correctTomorrowWeekday.phrases);
-  assert.strictEqual(correctTomorrowWeekday.rejectedCount, 0, 'correct tomorrow weekday claim must be allowed');
-  // Explicitly confirm NO guard fired for this phrase, not just that the
-  // date guard let it through -- "не спешить" isn't a match for any
-  // COACHING_PATTERNS.ru entry (не забудь/тебе стоит/пора X/попробуй(-ть)/
-  // сделай/дай себе/запланируй/экспериментируй), but this asserts it rather
-  // than assuming it, so this stays a pure date-correctness check and isn't
-  // accidentally piggybacking on coaching semantics.
-  assert.deepStrictEqual(correctTomorrowWeekday.rejectionReasons, {}, 'correct weekday claim must not trigger the coaching guard or any other guard');
-  assert(correctTomorrowWeekday.phrases.some((p) => p.text.includes('воскресенье')), 'correct weekday claim must survive into the final batch');
-
-  const noDateContextWeekdayClaim = contentTest.assembleBatchFromGeneratedPhrases(
-    [...validTwelve.slice(0, 11), phrase('Завтра пятница, выходные уже рядом.')],
-    'ru',
-    { dateContext: null }
-  );
-  assertFinalBatch(noDateContextWeekdayClaim.phrases);
-  assert.strictEqual(noDateContextWeekdayClaim.rejectionReasons.date_claim, 1, 'relative weekday claim without authoritative date context must be rejected');
-
-  // DATE / WEEKDAY -- all 10 SUPPORTED_LANGUAGES, not just ru. Each phrase is
-  // deliberately short/neutral (no imperative verbs) so a false reject here
-  // can only be the date guard, not coaching/traffic/telemetry leaking in
-  // through DEFAULT_LANGUAGE_CODE's EN fallback patterns.
-  const weekdayGuardLanguageCases = {
-    ru: { wrong: 'Завтра пятница.', correct: 'Завтра воскресенье.' },
-    en: { wrong: 'Tomorrow is Friday.', correct: 'Tomorrow is Sunday.' },
-    fr: { wrong: "Demain c'est vendredi.", correct: "Demain c'est dimanche." },
-    es: { wrong: 'Mañana es viernes.', correct: 'Mañana es domingo.' },
-    pt: { wrong: 'Amanhã é sexta-feira.', correct: 'Amanhã é domingo.' },
-    de: { wrong: 'Morgen ist Freitag.', correct: 'Morgen ist Sonntag.' },
-    zh: { wrong: '明天是星期五。', correct: '明天是星期日。' },
-    ja: { wrong: '明日は金曜日。', correct: '明日は日曜日。' },
-    ko: { wrong: '내일은 금요일이다.', correct: '내일은 일요일이다.' },
-    it: { wrong: 'Domani è venerdì.', correct: 'Domani è domenica.' },
-  };
-  assert.deepStrictEqual(
-    Object.keys(weekdayGuardLanguageCases).sort(),
-    Object.keys(contentTest.SUPPORTED_LANGUAGES).sort(),
-    'weekday guard language test coverage must match SUPPORTED_LANGUAGES exactly'
-  );
-  for (const [langCode, cases] of Object.entries(weekdayGuardLanguageCases)) {
-    const filler = validGeneratedPhrasesForLanguage(langCode, 11);
-
-    const wrongResult = contentTest.assembleBatchFromGeneratedPhrases(
-      [...filler, phrase(cases.wrong)],
-      langCode,
-      { dateContext: saturdayDateContext }
+  // Content-quality rebuild (requirement A): the date-claim, telemetry-echo,
+  // unsupported-context and coaching guards that used to police these exact
+  // production-incident phrases were all removed -- the server no longer
+  // does any stylistic/semantic policing, only schema/empty/too_long/
+  // language/duplicate checks (see textFilter.js). Every one of these
+  // production-incident phrases must now survive untouched.
+  const formerlyBadPhrases = [
+    'Завтра пятница, выходные уже рядом.',
+    '75% заряда осталось в батарее.',
+    'Сегодня получилось 65 разблокировок подряд.',
+    'В пробке подкаст звучит полезнее радио.',
+    'Не забудь дать себе немного времени на паузу.',
+    'Пора завершать дела.',
+    'Попробуй что-то новое.',
+    'Экспериментируй на кухне.',
+  ];
+  for (const nowFine of formerlyBadPhrases) {
+    const result = contentTest.assembleBatchFromGeneratedPhrases(
+      [...validTwelve.slice(0, 11), phrase(nowFine)],
+      'ru',
+      { dateContext: { date: '2026-09-19', weekday: 'Saturday', time: '15:30', tomorrow_date: '2026-09-20', tomorrow_weekday: 'Sunday' }, signals: { battery_level: 75, unlocks_since_last_batch: 65 } }
     );
-    assertFinalBatch(wrongResult.phrases);
-    assert.strictEqual(wrongResult.rejectionReasons.date_claim, 1, `[${langCode}] wrong tomorrow weekday must be rejected as date_claim`);
-
-    const correctResult = contentTest.assembleBatchFromGeneratedPhrases(
-      [...filler, phrase(cases.correct)],
-      langCode,
-      { dateContext: saturdayDateContext }
-    );
-    assertFinalBatch(correctResult.phrases);
-    assert.deepStrictEqual(correctResult.rejectionReasons, {}, `[${langCode}] correct tomorrow weekday claim must not be rejected by any guard`);
-    assert(correctResult.phrases.some((p) => p.text === cases.correct), `[${langCode}] correct weekday claim must survive into the final batch`);
+    assertFinalBatch(result.phrases);
+    assert.strictEqual(result.rejectedCount, 0, `former stylistic-guard target must no longer be rejected: ${nowFine}`);
   }
 
-  // WINDOW / TIME OF DAY
+  // WINDOW / TIME OF DAY -- still real, unrelated to the removed filters.
   const eveningWindow = contentTest.windowContextFor('evening');
   assert.strictEqual(eveningWindow.id, 'evening');
   assert.strictEqual(eveningWindow.range, '15:00-20:00', 'evening window must expose its actual clock range, not just the id');
-  const systemPromptText = contentTest.buildSystemPrompt('ru');
-  assert(/slot_id/.test(systemPromptText), 'prompt must keep OpenAI in slot-writing mode');
-  assert(!/profile\.tone/.test(systemPromptText), 'prompt must not depend on the old tone setting');
-
-  // Content-improvement follow-up: all four windows must have distinct,
-  // non-empty `focus` text (drives non-fixed-type tone/topic differentiation
-  // -- see WINDOW_CONTEXT/buildSystemPrompt's now.window.focus instruction),
-  // and buildSystemPrompt stays a pure function of languageCode only (no
-  // window param) so the OpenAI-side prompt cache rationale documented on
-  // buildSystemPrompt is preserved -- window-specific behavior travels only
-  // through the per-request context payload (now.window.focus), never
-  // through the static system prompt text itself.
   for (const w of ['morning', 'day', 'evening', 'night']) {
     const focus = contentTest.windowContextFor(w).focus;
     assert(typeof focus === 'string' && focus.length > 0, `window ${w} must have a non-empty focus`);
@@ -341,127 +253,16 @@ async function main() {
     4,
     'all four windows must have genuinely distinct focus text'
   );
-  assert(/now\.window\.focus/.test(systemPromptText), 'system prompt must instruct the model to read now.window.focus');
-  assert.strictEqual(
-    contentTest.buildSystemPrompt('ru'),
-    contentTest.buildSystemPrompt('ru'),
-    'buildSystemPrompt must remain a pure function of languageCode alone (no window/other input), preserving the OpenAI prompt-cache rationale'
-  );
 
-  // Req 4: personalization must never be spelled out to the user -- the
-  // system prompt itself must explicitly forbid the exact creepy patterns
-  // named in the product requirement.
-  assert(/ты выбрал/i.test(systemPromptText), 'prompt must forbid literally naming a chosen interest ("ты выбрал ...")');
-  assert(/раз тебе нравится/i.test(systemPromptText), 'prompt must forbid "раз тебе нравится X" phrasing');
-  assert(/поскольку тебе/i.test(systemPromptText), 'prompt must forbid literally stating the user\'s age ("поскольку тебе N лет")');
-  assert(/разблокировал телефон/i.test(systemPromptText), 'prompt must forbid literally citing the unlock count back at the user');
-  assert(/many_unlocks/.test(systemPromptText) && /не упрёк/.test(systemPromptText), 'prompt must explicitly forbid a scolding tone for many_unlocks');
-  assert(/age_bracket/.test(systemPromptText), 'prompt must document the age_bracket (not exact age) mechanism for age_context');
-  assert(/temp_band|condition_lean/.test(systemPromptText), 'prompt must reference the weather temp_band/condition_lean facts for varied advice');
-
-  // BATTERY
-  const batteryEcho = contentTest.assembleBatchFromGeneratedPhrases(
-    [...validTwelve.slice(0, 11), phrase('75% заряда осталось в батарее.')],
-    'ru',
-    { signals: { battery_level: 75 } }
-  );
-  assertFinalBatch(batteryEcho.phrases);
-  assert.strictEqual(batteryEcho.rejectionReasons.telemetry_echo, 1, 'exact battery percentage echo must be rejected');
-
-  const irrelevantNumberNotBattery = contentTest.assembleBatchFromGeneratedPhrases(
-    [...validTwelve.slice(0, 11), phrase('До города 75 километров трассы.')],
-    'ru',
-    { signals: { battery_level: 75 } }
-  );
-  assertFinalBatch(irrelevantNumberNotBattery.phrases);
-  assert.strictEqual(irrelevantNumberNotBattery.rejectedCount, 0, 'an unrelated number must not trip the telemetry guard just because it matches battery_level');
-
-  // UNLOCKS
-  const unlockEcho = contentTest.assembleBatchFromGeneratedPhrases(
-    [...validTwelve.slice(0, 11), phrase('Сегодня получилось 65 разблокировок подряд.')],
-    'ru',
-    { signals: { unlocks_since_last_batch: 65 } }
-  );
-  assertFinalBatch(unlockEcho.phrases);
-  assert.strictEqual(unlockEcho.rejectionReasons.telemetry_echo, 1, 'exact unlock count echo must be rejected');
-
-  // TRAFFIC / UNSUPPORTED SITUATIONAL CONTEXT
-  const trafficClaim = contentTest.assembleBatchFromGeneratedPhrases(
-    [...validTwelve.slice(0, 11), phrase('В пробке подкаст звучит полезнее радио.')],
-    'ru',
-    {}
-  );
-  assertFinalBatch(trafficClaim.phrases);
-  assert.strictEqual(trafficClaim.rejectionReasons.unsupported_context, 1, 'unsupported traffic claim must be rejected without a traffic signal');
-
-  const trafficAllowedWithContext = contentTest.assembleBatchFromGeneratedPhrases(
-    [...validTwelve.slice(0, 11), phrase('В пробке подкаст звучит полезнее радио.')],
-    'ru',
-    { contextFlags: { traffic: true } }
-  );
-  assertFinalBatch(trafficAllowedWithContext.phrases);
-  assert.strictEqual(trafficAllowedWithContext.rejectedCount, 0, 'traffic claim must be allowed once a real traffic signal exists');
-
-  // COACHING / DIRECTIVE PHRASING
-  const coachingProductionFailures = [
-    'Не забудь дать себе немного времени на паузу.',
-    'Пора завершать дела.',
-    'Попробуй что-то новое.',
-    'Экспериментируй на кухне.',
-  ];
-  for (const bad of coachingProductionFailures) {
-    const result = contentTest.assembleBatchFromGeneratedPhrases(
-      [...validTwelve.slice(0, 11), phrase(bad)],
-      'ru',
-      {}
-    );
-    assertFinalBatch(result.phrases);
-    assert.strictEqual(result.rejectionReasons.coaching, 1, `coaching phrase must be rejected: ${bad}`);
-  }
-
-  const neutralObservationsMustSurvive = [
-    'В Алматы сегодня около 12°C.',
-    'После дождя городские огни выглядят резче.',
-  ];
-  for (const good of neutralObservationsMustSurvive) {
-    const result = contentTest.assembleBatchFromGeneratedPhrases(
-      [...validTwelve.slice(0, 11), phrase(good)],
-      'ru',
-      {}
-    );
-    assertFinalBatch(result.phrases);
-    assert.strictEqual(result.rejectedCount, 0, `neutral observation must not be rejected: ${good}`);
-  }
-
-  // ASSEMBLY: several different rejection reasons in one batch must each be
-  // caught independently, with exactly the clean phrases preserved and the
-  // rest fallback-filled to exactly BATCH_SIZE (partial validation, not
-  // all-or-nothing).
-  const mixedBatch = [
-    ...validTwelve.slice(0, 8),
-    phrase('Завтра пятница, выходные уже рядом.'),
-    phrase('75% заряда осталось в батарее.'),
-    phrase('В пробке подкаст звучит полезнее радио.'),
-    phrase('Попробуй что-то новое.'),
-  ];
-  const mixedResult = contentTest.assembleBatchFromGeneratedPhrases(
-    mixedBatch,
-    'ru',
-    { dateContext: saturdayDateContext, signals: { battery_level: 75 } }
-  );
-  assertFinalBatch(mixedResult.phrases);
-  assert.strictEqual(mixedResult.generatedCount, 8, 'only the 8 clean generated phrases should survive');
-  assert.strictEqual(mixedResult.rejectedCount, 4);
-  assert.strictEqual(mixedResult.fallbackFillCount, 4);
-  assert.strictEqual(mixedResult.reason, 'partial_validation_fill');
-  assert.deepStrictEqual(
-    mixedResult.rejectionReasons,
-    { date_claim: 1, telemetry_echo: 1, unsupported_context: 1, coaching: 1 },
-    'each production failure category must be attributed to its own reason, independently'
-  );
-  for (let i = 1; i <= 8; i++) {
-    assert(mixedResult.phrases.some((p) => p.text === `Конкретная строка ${i}`), `valid generated phrase ${i} must be preserved`);
-  }
+  // buildSystemPrompt (requirement D): now a constant, argument-free,
+  // English-only prompt -- see tests/slot-planner.test.js for the full
+  // structural check (exact opening/closing sentences, section order,
+  // interpolated LOCK_SCREEN_TEXT_MAX_LENGTH). Here just confirm it is still
+  // a pure/stable function and no longer depends on any language argument.
+  const systemPromptText = contentTest.buildSystemPrompt();
+  assert.strictEqual(contentTest.buildSystemPrompt('ru'), systemPromptText, 'buildSystemPrompt must be identical regardless of any argument passed to it');
+  assert(/slot_id/.test(systemPromptText), 'prompt must keep OpenAI in slot-writing mode');
+  assert(!/profile\.tone/.test(systemPromptText), 'prompt must not depend on the old tone setting');
 
   // DATE_CONTEXT_UNAVAILABLE: privacy-safe diagnostic (no device id/timezone
   // value in the log line) when the device has no usable timezone yet.
@@ -555,7 +356,10 @@ async function main() {
   assert.strictEqual(context.now.window.id, 'day', 'now.window must still expose its id alongside the new focus field');
   assert(typeof context.now.window.focus === 'string' && context.now.window.focus.length > 0, 'now.window.focus must reach the actual OpenAI payload, not just windowContextFor in isolation');
   assert(Array.isArray(context.slots), 'slot-based context must include selected slots');
-  assert.strictEqual(context.slots.length, BATCH_SIZE, 'slot-based context must include exactly 12 selected slots');
+  // Content-quality rebuild (requirement B): the planner no longer pads to
+  // exactly BATCH_SIZE -- this sparse 'day' fixture (no rich bank items) may
+  // legitimately plan fewer than 12 slots.
+  assert(context.slots.length > 0 && context.slots.length <= BATCH_SIZE, 'slot-based context must include a non-empty, at-most-BATCH_SIZE slot list');
   assert(!('personal_goal' in (context.profile || {})), 'slot payload must not include old personal_goal');
   assert(!('tone' in (context.profile || {})), 'slot payload must not include old tone');
   assert(!('interests' in (context.profile || {})), 'slot payload must not include old interests');
@@ -620,6 +424,8 @@ async function main() {
   process.env.OPENAI_API_KEY = 'test-key-content-memory';
   let memoryOpenAiCallCount = 0;
   let memoryCapturedRequest = null;
+  let memoryPlannedSlotCount = null;
+  const memoryOverlongText = 'ы'.repeat(contentTest.LOCK_SCREEN_TEXT_MAX_LENGTH + 20);
   const originalMemoryLoad = Module._load;
   Module._load = function patchedMemoryLoad(request, parent, isMain) {
     if (request === 'openai') {
@@ -631,14 +437,21 @@ async function main() {
                 memoryOpenAiCallCount += 1;
                 memoryCapturedRequest = requestBody;
                 const payload = JSON.parse(requestBody.messages[1].content);
+                if (memoryOpenAiCallCount === 1) {
+                  memoryPlannedSlotCount = payload.slots.length;
+                }
                 return {
                   choices: [{
                     message: {
                       content: JSON.stringify({
                         phrases: payload.slots.map((slot, index) => ({
                           slot_id: slot.slot_id,
+                          // Stylistic filters (question mark etc) were removed
+                          // (requirement A) -- an overlong text is now the
+                          // reliable way to force this one slot to keep
+                          // failing validation through the repair round too.
                           text: index === payload.slots.length - 1
-                            ? 'Это вопрос?'
+                            ? memoryOverlongText
                             : `Конкретная строка памяти ${index + 1}`,
                           style_id: STYLE_IDS[index],
                         })),
@@ -676,17 +489,20 @@ async function main() {
     assert.strictEqual(memoryOpenAiCallCount, 2, 'one rejected slot should trigger exactly one targeted repair OpenAI call');
     assert.strictEqual(memoryResult.source, 'openai');
     // The mock's repair handler always answers the (single) rejected slot
-    // with the same still-a-question text, so it stays rejected after the
-    // one repair round -- under B5 that slot is now dropped rather than
-    // generic-filled, so the final batch is BATCH_SIZE - 1, not BATCH_SIZE.
-    assertFinalBatch(memoryResult.phrases, BATCH_SIZE - 1);
+    // with the same still-overlong text, so it stays rejected after the one
+    // repair round -- under B5 that slot is dropped rather than generic-
+    // filled, so the final batch is one shorter than however many slots were
+    // actually planned (content-quality rebuild: no longer assumed to be
+    // exactly BATCH_SIZE, see requirement B).
+    assert(memoryPlannedSlotCount > 0, 'the mock must have observed at least one real planned slot count');
+    assertFinalBatch(memoryResult.phrases, memoryPlannedSlotCount - 1);
     const memoryRows = db.prepare(`
       SELECT content_key FROM device_content_memory
       WHERE device_id = ? AND content_key != ?
     `).all('memory-generation-device', 'raw-history-secret-key');
     assert.strictEqual(
       memoryRows.length,
-      BATCH_SIZE - 1,
+      memoryPlannedSlotCount - 1,
       'only slots with actual valid OpenAI text should write content memory'
     );
     const payloadText = memoryCapturedRequest.messages.map((message) => message.content).join('\n');
@@ -701,6 +517,7 @@ async function main() {
   let repairOpenAiCallCount = 0;
   const repairRequestSlotCounts = [];
   const repairRequestSlotIds = [];
+  const repairOverlongText = 'x'.repeat(contentTest.LOCK_SCREEN_TEXT_MAX_LENGTH + 20);
   const originalRepairLoad = Module._load;
   Module._load = function patchedRepairLoad(request, parent, isMain) {
     if (request === 'openai') {
@@ -720,7 +537,7 @@ async function main() {
                         phrases: payload.slots.map((slot, index) => ({
                           slot_id: slot.slot_id,
                           text: repairOpenAiCallCount === 1 && index === 2
-                            ? 'Уют и чай наполняют день теплом.'
+                            ? repairOverlongText
                             : `Concrete repair line ${repairOpenAiCallCount}-${index + 1}`,
                           style_id: STYLE_IDS[index],
                         })),
@@ -749,11 +566,15 @@ async function main() {
       { system_language: 'en' },
       null
     ));
-    assert.strictEqual(repairOpenAiCallCount, 2, 'one blocked phrase must trigger one targeted repair call');
-    assert.deepStrictEqual(repairRequestSlotCounts, [BATCH_SIZE, 1], 'repair call must send only the rejected slot');
+    assert.strictEqual(repairOpenAiCallCount, 2, 'one overlong phrase must trigger one targeted repair call');
+    // Content-quality rebuild (requirement B): the first-pass slot count is
+    // whatever was actually planned for this device/window, no longer
+    // assumed to be exactly BATCH_SIZE.
+    assert(repairRequestSlotCounts[0] > 0 && repairRequestSlotCounts[0] <= BATCH_SIZE, 'first pass must send the real planned slot count');
+    assert.strictEqual(repairRequestSlotCounts[1], 1, 'repair call must send only the rejected slot');
     assert.deepStrictEqual(repairRequestSlotIds[1], [repairRequestSlotIds[0][2]], 'repair call must preserve the rejected slot_id only');
-    assertFinalBatch(repairedLogs.result.phrases);
-    assert(!repairedLogs.result.phrases.some((item) => /уют|чай|теплом/i.test(item.text)), 'blocked filler must not survive after repair');
+    assertFinalBatch(repairedLogs.result.phrases, repairRequestSlotCounts[0]);
+    assert(!repairedLogs.result.phrases.some((item) => item.text === repairOverlongText), 'overlong original text must not survive after repair');
     assert(
       repairedLogs.logs.some((line) => line.includes('reason=success_after_slot_regeneration')),
       'successful repair must be visible in batch logs'

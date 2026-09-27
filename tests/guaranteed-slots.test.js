@@ -49,6 +49,15 @@ function slotTypes(slots) {
   return new Set(slots.map((slot) => slot.type));
 }
 
+// Content-quality rebuild (requirement B): the planner no longer pads a
+// batch up to exactly BATCH_SIZE -- it may legitimately come back shorter.
+// This file's job is the FIXED-POSITION/ordering invariants, which hold
+// regardless of the final count, so every "must be exactly BATCH_SIZE"
+// check below is relaxed to this bound instead.
+function assertBoundedBatch(slots, label) {
+  assert(slots.length > 0 && slots.length <= BATCH_SIZE, `${label}: batch must be non-empty and at most ${BATCH_SIZE} slots, got ${slots.length}`);
+}
+
 function main() {
   // 1. Direct list check requested by the task: the approved fixed sequence.
   assert.deepStrictEqual(
@@ -68,7 +77,7 @@ function main() {
   const RUN_COUNT = 30;
   for (let i = 0; i < RUN_COUNT; i++) {
     const planned = planSlots(baseInput, { seed: `morning-run-${i}` });
-    assert.strictEqual(planned.slots.length, BATCH_SIZE, `run ${i} must still return ${BATCH_SIZE} slots`);
+    assertBoundedBatch(planned.slots, `run ${i}`);
     const fixedPrefix = planned.slots.slice(0, plannerTest.MORNING_FIXED_TYPES.length).map((slot) => slot.type);
     assert.deepStrictEqual(
       fixedPrefix,
@@ -90,7 +99,7 @@ function main() {
   for (const window of ['day', 'evening']) {
     for (let i = 0; i < 10; i++) {
       const planned = planSlots({ ...baseInput, window }, { seed: `${window}-run-${i}` });
-      assert.strictEqual(planned.slots.length, BATCH_SIZE);
+      assertBoundedBatch(planned.slots, `${window} run ${i}`);
       const types = slotTypes(planned.slots);
       for (const restrictedType of WINDOW_RESTRICTED_TYPES) {
         assert(
@@ -112,12 +121,12 @@ function main() {
     };
     for (let i = 0; i < 10; i++) {
       const planned = planSlots(nightInput, { seed: `night-run-${i}` });
-      assert.strictEqual(planned.slots.length, BATCH_SIZE);
+      assertBoundedBatch(planned.slots, `night run ${i}`);
       const types = planned.slots.map((slot) => slot.type);
       for (const restrictedType of WINDOW_RESTRICTED_TYPES) {
         assert(!types.includes(restrictedType), `night run ${i}: "${restrictedType}" must never be a candidate at night`);
       }
-      assert.strictEqual(types[BATCH_SIZE - 1], 'goodnight_care', `night run ${i}: last slot must be goodnight_care`);
+      assert.strictEqual(types[types.length - 1], 'goodnight_care', `night run ${i}: last slot must be goodnight_care`);
     }
 
     // With an actual recall candidate available, it must land exactly
@@ -130,20 +139,20 @@ function main() {
       const planned = planSlots(nightWithRecall, { seed: `night-recall-run-${i}` });
       const types = planned.slots.map((slot) => slot.type);
       assert.strictEqual(
-        types[BATCH_SIZE - 2],
+        types[types.length - 2],
         'learning_recall',
         `night-with-recall run ${i}: second-to-last slot must be learning_recall, got ${JSON.stringify(types)}`
       );
-      assert.strictEqual(types[BATCH_SIZE - 1], 'goodnight_care', `night-with-recall run ${i}: last slot must still be goodnight_care`);
+      assert.strictEqual(types[types.length - 1], 'goodnight_care', `night-with-recall run ${i}: last slot must still be goodnight_care`);
     }
 
     // Without a candidate, the position is simply not reserved -- no broken/
     // empty slot, goodnight_care still lands last, batch still completes.
     for (let i = 0; i < 5; i++) {
       const planned = planSlots(nightInput, { seed: `night-no-recall-run-${i}` });
-      assert.strictEqual(planned.slots.length, BATCH_SIZE);
+      assertBoundedBatch(planned.slots, `night-no-recall run ${i}`);
       assert(!planned.slots.some((slot) => slot.type === 'learning_recall'), `night-no-recall run ${i}: must not invent a learning_recall slot with no candidate`);
-      assert.strictEqual(planned.slots[BATCH_SIZE - 1].type, 'goodnight_care', `night-no-recall run ${i}: goodnight_care must still be last`);
+      assert.strictEqual(planned.slots[planned.slots.length - 1].type, 'goodnight_care', `night-no-recall run ${i}: goodnight_care must still be last`);
     }
   }
 
@@ -153,7 +162,7 @@ function main() {
   const noWeatherInput = { ...baseInput, weather: null };
   for (let i = 0; i < 10; i++) {
     const planned = planSlots(noWeatherInput, { seed: `no-weather-run-${i}` });
-    assert.strictEqual(planned.slots.length, BATCH_SIZE);
+    assertBoundedBatch(planned.slots, `no-weather run ${i}`);
     const firstSix = planned.slots.slice(0, 6).map((slot) => slot.type);
     assert.deepStrictEqual(
       firstSix,

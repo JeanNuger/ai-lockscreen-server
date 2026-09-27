@@ -281,8 +281,11 @@ function testNoActivitySignalsInMorning() {
   }
 
   // Control: the exact same underlying signals DO still produce these
-  // candidates in a non-morning window.
-  for (const window of ['day', 'evening', 'night']) {
+  // candidates in the windows where they are allowed at all. Content-quality
+  // rebuild (requirement B): phone_trend/context_signal are now ALSO capped
+  // to evening/night only (max one per device per day), so 'day' no longer
+  // carries them either -- only evening/night do.
+  for (const window of ['evening', 'night']) {
     const { candidates } = planSlots({ ...baseInput, window }, { seed: `incident19-${window}-seed` });
     assert(
       candidates.some((c) => c.type === 'phone_trend'),
@@ -293,9 +296,26 @@ function testNoActivitySignalsInMorning() {
       `${window}: context_signal/many_unlocks candidate should still be in the pool outside the morning window`
     );
   }
+  // 'day' is morning-adjacent by product decision now (content-quality
+  // rebuild, requirement B) -- these activity-based types are excluded there
+  // too, not just in the morning.
+  {
+    const { candidates } = planSlots({ ...baseInput, window: 'day' }, { seed: 'incident19-day-seed' });
+    assert(
+      !candidates.some((c) => c.type === 'phone_trend'),
+      'day: phone_trend candidate must not be in the pool -- it is evening/night-only now'
+    );
+    assert(
+      !candidates.some((c) => c.type === 'context_signal' && c.facts.signal === 'many_unlocks'),
+      'day: context_signal/many_unlocks candidate must not be in the pool -- it is evening/night-only now'
+    );
+  }
 
-  // A non-activity-based context_signal variant (low_battery) must still be
-  // allowed in the morning.
+  // Content-quality rebuild (requirement B): context_signal as a whole type
+  // (not just the activity-based many_unlocks variant this incident was
+  // about) is now evening/night-only, max one per device per day -- so even
+  // a non-activity-based variant like low_battery is excluded in the
+  // morning now, not just allowed-through as before.
   const lowBatteryInput = {
     ...baseInput,
     window: 'morning',
@@ -304,8 +324,13 @@ function testNoActivitySignalsInMorning() {
   };
   const { candidates: lowBatteryCandidates } = planSlots(lowBatteryInput, { seed: 'incident19-low-battery-seed' });
   assert(
-    lowBatteryCandidates.some((c) => c.type === 'context_signal' && c.facts.signal === 'low_battery'),
-    'morning: a non-activity-based context_signal (low_battery) must still be allowed'
+    !lowBatteryCandidates.some((c) => c.type === 'context_signal' && c.facts.signal === 'low_battery'),
+    'morning: context_signal (including low_battery) must not be in the pool -- it is evening/night-only now'
+  );
+  const { candidates: lowBatteryEveningCandidates } = planSlots({ ...lowBatteryInput, window: 'evening' }, { seed: 'incident19-low-battery-evening-seed' });
+  assert(
+    lowBatteryEveningCandidates.some((c) => c.type === 'context_signal' && c.facts.signal === 'low_battery'),
+    'evening: a non-activity-based context_signal (low_battery) must still be allowed'
   );
 
   // End-to-end through planSlots too, with signals strong enough that the

@@ -19,6 +19,13 @@ const { computeTargetDate, getOrGenerateMorningPack } = require('../src/morningP
 const { getBankDateString } = require('../src/dailyContentBank');
 const { MORNING_PACK_ORDER } = require('../src/slotPlanner');
 
+// Stylistic filters (question mark, blocked phrases, etc) were removed from
+// textFilter.js as part of the content-quality rebuild (requirement A) --
+// only schema/empty/too_long/language/duplicate checks remain. An overlong
+// string is now the reliable, language-independent way to force a rejection.
+const OVERLONG_TEXT = 'x'.repeat(contentTest.LOCK_SCREEN_TEXT_MAX_LENGTH + 20);
+const OVERLONG_TEXT_JA = 'あ'.repeat(contentTest.LOCK_SCREEN_TEXT_MAX_LENGTH + 20);
+
 function insertBankItem(bankDate, category, contentText, tags = ['global']) {
   db.prepare(`
     INSERT INTO daily_content_bank (bank_date, category, content_text, tags)
@@ -146,11 +153,17 @@ async function testPackOrderFactsAndDrop() {
   insertBankItem(targetDate, 'on_this_day', 'In 1990 a landmark bridge opened nearby.');
   insertBankItem(otherDate, 'holiday', 'Today-Only Festival must never leak into the pack.');
   insertBankItem(otherDate, 'on_this_day', 'Today-only history fact must never leak into the pack.');
-  // Deliberately contains a question mark, so this idiom's own text is
-  // unusable as either the OpenAI-generated text OR word_learning's grounded
-  // fallback (see groundedFallbackTextForSlot, which reuses facts.word
-  // verbatim) -- forces a genuine drop rather than a fallback rescue.
-  insertBankItem(bankDate, 'idiom', 'Break the ice -- does it always work?');
+  // Deliberately overlong (content-quality rebuild: too_long is now one of
+  // the very few remaining checks, see textFilter.js), so the OpenAI-
+  // generated text for word_learning fails both the first pass and the
+  // repair pass. Unlike the old question-mark trick, this does NOT defeat
+  // word_learning's grounded fallback (groundedFallbackTextForSlot truncates
+  // facts.word to fit the hard cap -- see truncateFallbackText -- and
+  // truncation always produces a usable, in-length string now that the
+  // stylistic filters that used to also reject the truncated text are gone).
+  // So this now exercises "still rejected after repair -> rescued from the
+  // grounded fact, truncated" rather than a genuine drop.
+  insertBankItem(bankDate, 'idiom', `Break the ice means ${OVERLONG_TEXT}`);
 
   const device = insertDevice('pack-device-order');
   const signals = { system_language: 'en', region: 'US' };
@@ -158,11 +171,12 @@ async function testPackOrderFactsAndDrop() {
   const weatherForecast = { countryCode: 'US', city: 'Metropolis', temperatureC: 2, description: 'light snow' };
 
   const mock = installOpenAiMock((payload) => payload.slots.map((slot, index) => {
-    // word_learning is deliberately always invalid (a bare question with no
-    // real content) on BOTH the first pass and the repair pass, to exercise
-    // "fails validation and still fails after repair -> drop it".
+    // word_learning is deliberately always invalid (overlong, no real
+    // content) on BOTH the first pass and the repair pass, to exercise
+    // "fails validation and still fails after repair -> fall back to the
+    // grounded, truncated fact".
     if (slot.type === 'word_learning') {
-      return mockPhrase(slot, index, 'Is this even a real phrase?');
+      return mockPhrase(slot, index, OVERLONG_TEXT);
     }
     return mockPhrase(slot, index, genericValidPhrase(slot, index));
   }));
@@ -176,10 +190,13 @@ async function testPackOrderFactsAndDrop() {
     const types = phrases.map((p) => p.type);
     assert.deepStrictEqual(
       types,
-      ['greeting_name', 'holiday_today', 'weather_lifehack', 'history_today', 'daily_horoscope', 'daily_numerology'],
-      'kept slots must preserve the required 7-slot relative order with the dropped slot simply omitted'
+      ['greeting_name', 'holiday_today', 'weather_lifehack', 'history_today', 'daily_horoscope', 'daily_numerology', 'word_learning'],
+      'still-rejected-after-repair word_learning must be rescued from its grounded, truncated fact rather than dropped (fallback-filled slots land after the cleanly-generated ones)'
     );
-    assert(!types.includes('word_learning'), 'word_learning must be dropped after failing validation and repair');
+    const wordLearningPhrase = phrases.find((p) => p.type === 'word_learning');
+    assert(wordLearningPhrase, 'word_learning must be present (rescued via the grounded fallback)');
+    assert(wordLearningPhrase.text.length <= contentTest.LOCK_SCREEN_TEXT_MAX_LENGTH, 'the rescued grounded fallback text must respect the hard length cap');
+    assert(wordLearningPhrase.text.startsWith('Break the ice means'), 'the rescued fallback must come from the real grounded fact, truncated -- not an arbitrary generic phrase');
 
     const holidayPhrase = phrases.find((p) => p.type === 'holiday_today');
     assert(holidayPhrase, 'holiday_today must be present');
@@ -261,7 +278,7 @@ async function testZodiacFallbackLanguageMismatchDropped() {
     // so the grounded fallback would only be available in English, and must
     // be dropped rather than shown in the wrong language.
     if (slot.type === 'daily_horoscope') {
-      return mockPhrase(slot, index, 'これは質問ですか?');
+      return mockPhrase(slot, index, OVERLONG_TEXT_JA);
     }
     return mockPhrase(slot, index, `パック更新 ${index} ${slot.type}`);
   }));
@@ -374,7 +391,10 @@ async function testPackFailureNeverBreaksOrdinaryBatch() {
       {},
       { localDate: targetDate }
     );
-    assert.strictEqual(batchResult.phrases.length, 12, 'ordinary batch must still return a full 12-phrase batch');
+    // Content-quality rebuild (requirement B): no more padding to exactly
+    // BATCH_SIZE -- just bounded by it, and non-empty (proving the pack
+    // failure above did not also break the ordinary batch).
+    assert(batchResult.phrases.length > 0 && batchResult.phrases.length <= 12, 'ordinary batch must still return a non-empty, at-most-12-phrase batch');
   } finally {
     mock.restore();
   }
@@ -403,7 +423,9 @@ async function testExcludeMorningPackTypesFromOrdinaryBatch() {
     for (const type of forbidden) {
       assert(!morningTypesInBatch.includes(type), `ordinary batch must never plan a "${type}" slot when excludeMorningPackTypes is set`);
     }
-    assert.strictEqual(result.phrases.length, 12, 'ordinary batch must still be a full 12-phrase batch, filled from other types');
+    // Content-quality rebuild (requirement B): no more padding to exactly
+    // BATCH_SIZE -- just bounded by it and non-empty.
+    assert(result.phrases.length > 0 && result.phrases.length <= 12, 'ordinary batch must still be a non-empty, at-most-12-phrase batch, filled from other types');
   } finally {
     mock.restore();
   }
@@ -426,7 +448,7 @@ async function testOrdinaryBatchUnaffectedWithoutFlag() {
     // still include greeting_name -- confirms the option is a strict no-op
     // when absent.
     assert(morningTypesInBatch.includes('greeting_name'), 'legacy morning batch must still include greeting_name when the pack feature is not requested');
-    assert.strictEqual(result.phrases.length, 12);
+    assert(result.phrases.length > 0 && result.phrases.length <= 12);
     assert.strictEqual(Object.prototype.hasOwnProperty.call(result, 'dateContext'), true, 'dateContext is an internal-only addition, not part of the HTTP response body');
   } finally {
     mock.restore();
@@ -460,7 +482,7 @@ async function testPackRepairReceivesOriginalTextAndReason() {
     // a repair round for that one slot.
     return payload.slots.map((slot, index) => {
       if (slot.type === 'word_learning') {
-        return mockPhrase(slot, index, 'Is this even a real phrase?');
+        return mockPhrase(slot, index, OVERLONG_TEXT);
       }
       return mockPhrase(slot, index, genericValidPhrase(slot, index));
     });
@@ -474,7 +496,7 @@ async function testPackRepairReceivesOriginalTextAndReason() {
     assert(repairedSlot, 'word_learning must be among the repair slots');
     assert.strictEqual(
       repairedSlot.original_text,
-      'Is this even a real phrase?',
+      OVERLONG_TEXT,
       'repair payload must carry the exact rejected original_text'
     );
     assert(

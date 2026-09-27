@@ -39,7 +39,8 @@ function main() {
   {
     assert.strictEqual(lengthHintForType('weather_lifehack'), 'medium');
     assert.strictEqual(lengthHintForType('holiday_today'), 'medium');
-    assert.strictEqual(lengthHintForType('free_ai_thought'), 'medium');
+    assert.strictEqual(lengthHintForType('warm_wish'), 'medium');
+    assert.strictEqual(lengthHintForType('poetic_thought'), 'medium');
     // an unrecognized/future type must default to medium, not crash or become undefined
     assert.strictEqual(lengthHintForType('some_future_type_not_yet_mapped'), 'medium');
   }
@@ -124,7 +125,9 @@ function main() {
     };
 
     const planned = planSlots(baseInput, { seed: 'length-hint-variety-seed' });
-    assert.strictEqual(planned.slots.length, BATCH_SIZE);
+    // Content-quality rebuild (requirement B): no more padding to exactly
+    // BATCH_SIZE -- just bounded by it.
+    assert(planned.slots.length > 0 && planned.slots.length <= BATCH_SIZE);
 
     const hintsSeen = new Set(planned.slots.map((slot) => slot.length_hint));
     assert(hintsSeen.size > 1, `a rich batch must contain more than one length_hint, saw: ${[...hintsSeen]}`);

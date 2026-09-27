@@ -16,7 +16,6 @@ const {
 } = require('./learningMemory');
 const { planSlots, planMorningPack, MORNING_FIXED_TYPES } = require('./slotPlanner');
 const {
-  hasQuestionMark,
   validateLockScreenText,
 } = require('./textFilter');
 
@@ -31,8 +30,8 @@ const LOCK_SCREEN_TEXT_MAX_LENGTH = 70;
 
 // `focus` (content-improvement follow-up, req 3 "усилить различие между
 // morning/day/evening/night") is a short, data-only mood/topic steer for the
-// currently-selected, non-fixed-type slots (free_ai_thought/everyday_lifehack/
-// smart_humor_observation/city_afisha/context_signal/seasonal and friends --
+// currently-selected, non-fixed-type slots (everyday_lifehack/
+// smart_humor_observation/city_afisha/context_signal/warm_wish and friends --
 // greeting_name/goodnight_care/weather_lifehack/holiday_today/history_today/
 // word_learning already have their own explicit per-type instructions in
 // buildSystemPrompt and are unaffected). Travels inside now.window (see
@@ -48,202 +47,6 @@ const WINDOW_CONTEXT = {
   night: { id: 'night', range: '20:00-05:00', focus: 'спокойные мягкие мысли, минимум активного тона и советов' },
 };
 
-// One entry per SUPPORTED_LANGUAGES code -- covers every language the app
-// actually generates in, not just ru/en, so the date/weekday guard applies
-// uniformly regardless of resolveTargetLanguageCode's result. Aliases are
-// deliberately minimal: just the forms needed to catch "Tomorrow is Friday"/
-// "Today is Saturday" and their natural equivalents (a couple of inflected
-// forms where a language needs them, e.g. Russian accusative "пятницу",
-// Portuguese's short "segunda" alongside "segunda-feira") -- not a full
-// grammatical case/conjugation table.
-const WEEKDAY_ALIASES = {
-  ru: {
-    Monday: ['понедельник'],
-    Tuesday: ['вторник'],
-    Wednesday: ['среда', 'среду'],
-    Thursday: ['четверг'],
-    Friday: ['пятница', 'пятницу'],
-    Saturday: ['суббота', 'субботу'],
-    Sunday: ['воскресенье'],
-  },
-  en: {
-    Monday: ['monday'],
-    Tuesday: ['tuesday'],
-    Wednesday: ['wednesday'],
-    Thursday: ['thursday'],
-    Friday: ['friday'],
-    Saturday: ['saturday'],
-    Sunday: ['sunday'],
-  },
-  fr: {
-    Monday: ['lundi'],
-    Tuesday: ['mardi'],
-    Wednesday: ['mercredi'],
-    Thursday: ['jeudi'],
-    Friday: ['vendredi'],
-    Saturday: ['samedi'],
-    Sunday: ['dimanche'],
-  },
-  es: {
-    Monday: ['lunes'],
-    Tuesday: ['martes'],
-    Wednesday: ['miércoles', 'miercoles'],
-    Thursday: ['jueves'],
-    Friday: ['viernes'],
-    Saturday: ['sábado', 'sabado'],
-    Sunday: ['domingo'],
-  },
-  pt: {
-    Monday: ['segunda-feira', 'segunda'],
-    Tuesday: ['terça-feira', 'terça', 'terca-feira', 'terca'],
-    Wednesday: ['quarta-feira', 'quarta'],
-    Thursday: ['quinta-feira', 'quinta'],
-    Friday: ['sexta-feira', 'sexta'],
-    Saturday: ['sábado', 'sabado'],
-    Sunday: ['domingo'],
-  },
-  de: {
-    Monday: ['montag'],
-    Tuesday: ['dienstag'],
-    Wednesday: ['mittwoch'],
-    Thursday: ['donnerstag'],
-    Friday: ['freitag'],
-    Saturday: ['samstag'],
-    Sunday: ['sonntag'],
-  },
-  zh: {
-    Monday: ['星期一', '周一'],
-    Tuesday: ['星期二', '周二'],
-    Wednesday: ['星期三', '周三'],
-    Thursday: ['星期四', '周四'],
-    Friday: ['星期五', '周五'],
-    Saturday: ['星期六', '周六'],
-    Sunday: ['星期日', '星期天', '周日'],
-  },
-  ja: {
-    Monday: ['月曜日', '月曜'],
-    Tuesday: ['火曜日', '火曜'],
-    Wednesday: ['水曜日', '水曜'],
-    Thursday: ['木曜日', '木曜'],
-    Friday: ['金曜日', '金曜'],
-    Saturday: ['土曜日', '土曜'],
-    Sunday: ['日曜日', '日曜'],
-  },
-  ko: {
-    Monday: ['월요일'],
-    Tuesday: ['화요일'],
-    Wednesday: ['수요일'],
-    Thursday: ['목요일'],
-    Friday: ['금요일'],
-    Saturday: ['토요일'],
-    Sunday: ['일요일'],
-  },
-  it: {
-    Monday: ['lunedì', 'lunedi'],
-    Tuesday: ['martedì', 'martedi'],
-    Wednesday: ['mercoledì', 'mercoledi'],
-    Thursday: ['giovedì', 'giovedi'],
-    Friday: ['venerdì', 'venerdi'],
-    Saturday: ['sabato'],
-    Sunday: ['domenica'],
-  },
-};
-
-const RELATIVE_DAY_MARKERS = {
-  ru: {
-    today: ['сегодня'],
-    tomorrow: ['завтра'],
-  },
-  en: {
-    today: ['today'],
-    tomorrow: ['tomorrow'],
-  },
-  fr: {
-    today: ["aujourd'hui", 'aujourdhui'],
-    tomorrow: ['demain'],
-  },
-  es: {
-    today: ['hoy'],
-    tomorrow: ['mañana', 'manana'],
-  },
-  pt: {
-    today: ['hoje'],
-    tomorrow: ['amanhã', 'amanha'],
-  },
-  de: {
-    today: ['heute'],
-    tomorrow: ['morgen'],
-  },
-  zh: {
-    today: ['今天'],
-    tomorrow: ['明天'],
-  },
-  ja: {
-    today: ['今日'],
-    tomorrow: ['明日'],
-  },
-  ko: {
-    today: ['오늘'],
-    tomorrow: ['내일'],
-  },
-  it: {
-    today: ['oggi'],
-    tomorrow: ['domani'],
-  },
-};
-
-const BATTERY_TERMS = {
-  ru: ['заряд', 'заряда', 'заряж', 'батаре', 'аккумулятор'],
-  en: ['battery', 'charge'],
-};
-
-const UNLOCK_TERMS = {
-  ru: ['разблокиров'],
-  en: ['unlock', 'unlocks'],
-};
-
-// JS's \b is defined in terms of \w, which is ASCII-only (`[A-Za-z0-9_]`) --
-// Cyrillic letters are never "word characters" to it, so a Cyrillic-only
-// pattern like /\bпора\b/ never matches anything at all (found while adding
-// tests for the patterns below: every RU pattern silently no-op'd). This
-// builds an equivalent boundary using a lookaround against an explicit
-// Latin+Cyrillic+digit+underscore class instead, so RU patterns actually
-// fire. EN patterns don't need this (plain ASCII \b already works for them).
-const WORD_CHARS = 'A-Za-zА-Яа-яЁё0-9_';
-function ruWordBoundaryPattern(source) {
-  return new RegExp(`(?<![${WORD_CHARS}])(?:${source})(?![${WORD_CHARS}])`, 'i');
-}
-
-const UNSUPPORTED_CONTEXT_PATTERNS = {
-  traffic: {
-    ru: ['в\\s+пробк[аеуы]', 'пробк[аеуы]'].map(ruWordBoundaryPattern),
-    en: [/\btraffic\s+jam\b/i, /\bstuck\s+in\s+traffic\b/i, /\bin\s+traffic\b/i],
-  },
-};
-
-const COACHING_PATTERNS = {
-  ru: [
-    'не\\s+забудь',
-    'тебе\\s+стоит',
-    'пора\\s+[а-яё]+',
-    'попробуй',
-    'попробовать',
-    'сделай',
-    'дай\\s+себе',
-    'запланируй',
-    'экспериментируй',
-  ].map(ruWordBoundaryPattern),
-  en: [
-    /\bdon't\s+forget\b/i,
-    /\byou\s+should\b/i,
-    /\bit'?s\s+time\s+to\b/i,
-    /\btry\s+(?:to\s+)?[a-z]/i,
-    /\bremember\s+to\b/i,
-    /\bstart\s+with\b/i,
-    /\bfocus\s+on\b/i,
-  ],
-};
-
 // FALLBACK_PHRASES: the offline/failure path (no OPENAI_API_KEY configured,
 // the OpenAI call itself fails, the whole batch comes back unusable, or an
 // individual phrase fails its language check below). Translated into all 10
@@ -253,11 +56,8 @@ const COACHING_PATTERNS = {
 // the phone", not a neutral technical assistant, and the fallback path (the one
 // moment the AI genuinely has nothing to say) must not sound colder than the
 // AI-generated content around it (task history, 2026-09-21: replaced an earlier
-// neutral/practical-tip set that read as flat and emotionless). Still one-way,
-// question-free, non-factual, no imperative openers, and free of every banned
-// postcard/poetry word (see textFilter.js STOP_PHRASES) -- warmth without
-// slipping back into the "believe in yourself" cliche the system prompt itself
-// bans, and without inventing facts about the specific user.
+// neutral/practical-tip set that read as flat and emotionless). Still
+// one-way and non-factual, without inventing facts about the specific user.
 //
 // Rotation: FALLBACK_PHRASES[lang] is 5 sets of 12 phrases each (not a flat
 // list of 12) -- see currentFallbackSetIndex()/activeFallbackPhrases() below.
@@ -1250,135 +1050,21 @@ function normalizeTextForDedupe(text) {
   return text.trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
-function hasQuestionShapeWithoutMark(text) {
-  const normalized = normalizeTextForDedupe(text).replace(/[.!…,:;]+$/g, '');
-  return /^(знаешь ли|а ты|ты замечал|ты когда-нибудь|хочешь|почему бы не|как насч[её]т)(?:\s|$|[,.!…:;])/i.test(normalized);
-}
-
-function isGenericBadLockScreenPhrase(text) {
-  const normalized = normalizeTextForDedupe(text).replace(/[.!…,:;]+$/g, '');
-  return [
-    'скорее всего, есть одна вещь, с которой стоит начать',
-    'маленькие улучшения тоже меняют форму',
-    'маленькое улучшение тоже меняет форму',
-    'на дне есть место для более точного угла',
-    'в дне есть место для более точного угла',
-    'следующему действию не нужна церемония',
-    'чистый старт подходит любому дню',
-    'заметь ту часть, которая уже работает',
-  ].includes(normalized);
-}
-
 function isUnusableLockScreenText(text, slotType = null) {
   const filterResult = validateLockScreenText(text, { maxLength: LOCK_SCREEN_TEXT_MAX_LENGTH, slotType });
-  return (
-    !filterResult.ok ||
-    hasQuestionShapeWithoutMark(text) ||
-    isGenericBadLockScreenPhrase(text)
-  );
-}
-
-function getLanguageMap(map, languageCode) {
-  return map[languageCode] || map[DEFAULT_LANGUAGE_CODE] || {};
-}
-
-function containsAnyMarker(normalized, markers) {
-  return markers.some((marker) => normalized.includes(marker));
-}
-
-function detectRelativeWeekdayClaim(text, languageCode) {
-  const normalized = normalizeTextForDedupe(text);
-  const relativeMarkers = getLanguageMap(RELATIVE_DAY_MARKERS, languageCode);
-  const weekdayAliases = getLanguageMap(WEEKDAY_ALIASES, languageCode);
-  const relative = Object.keys(relativeMarkers).find((key) => containsAnyMarker(normalized, relativeMarkers[key]));
-  if (!relative) {
-    return null;
-  }
-  for (const [weekday, aliases] of Object.entries(weekdayAliases)) {
-    if (containsAnyMarker(normalized, aliases)) {
-      return { relative, weekday };
-    }
-  }
-  return null;
-}
-
-function hasInvalidRelativeDateClaim(text, languageCode, validationContext = {}) {
-  const claim = detectRelativeWeekdayClaim(text, languageCode);
-  if (!claim) {
-    return false;
-  }
-  const dateContext = validationContext.dateContext;
-  if (!dateContext) {
-    return true;
-  }
-  const expected = claim.relative === 'tomorrow'
-    ? dateContext.tomorrow_weekday
-    : dateContext.weekday;
-  return expected !== claim.weekday;
-}
-
-function numberNearTerms(normalized, value, terms) {
-  if (value === undefined || value === null || value < 0) {
-    return false;
-  }
-  const escapedValue = String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const termPattern = terms.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-  if (!termPattern) {
-    return false;
-  }
-  return new RegExp(`(?:${escapedValue}\\s*(?:%|[^\\n]{0,24}(?:${termPattern}))|(?:${termPattern})[^\\n]{0,24}${escapedValue})`, 'i')
-    .test(normalized);
-}
-
-function hasExactTelemetryEcho(text, languageCode, validationContext = {}) {
-  const normalized = normalizeTextForDedupe(text);
-  const signals = validationContext.signals || {};
-  if (signals.battery_level !== undefined) {
-    const batteryTerms = getLanguageMap(BATTERY_TERMS, languageCode);
-    if (normalized.includes(`${signals.battery_level}%`) || numberNearTerms(normalized, signals.battery_level, batteryTerms)) {
-      return true;
-    }
-  }
-  if (signals.unlocks_since_last_batch !== undefined) {
-    const unlockTerms = getLanguageMap(UNLOCK_TERMS, languageCode);
-    if (numberNearTerms(normalized, signals.unlocks_since_last_batch, unlockTerms)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function hasUnsupportedContextClaim(text, languageCode, validationContext = {}) {
-  const hasTrafficContext = validationContext.contextFlags && validationContext.contextFlags.traffic === true;
-  if (hasTrafficContext) {
-    return false;
-  }
-  const trafficPatterns = (UNSUPPORTED_CONTEXT_PATTERNS.traffic[languageCode] || [])
-    .concat(UNSUPPORTED_CONTEXT_PATTERNS.traffic[DEFAULT_LANGUAGE_CODE] || []);
-  return trafficPatterns.some((pattern) => pattern.test(text));
-}
-
-function hasCoachingOrDirectiveShape(text, languageCode) {
-  const patterns = (COACHING_PATTERNS[languageCode] || []).concat(COACHING_PATTERNS[DEFAULT_LANGUAGE_CODE] || []);
-  return patterns.some((pattern) => pattern.test(text));
+  return !filterResult.ok;
 }
 
 // Returns { reason, detail } (both null if the text passes), never a bare
 // string -- `reason` is the coarse bucket used for aggregate counts
 // (rejectionReasons in collectUsablePhrases, unchanged from before), `detail`
 // is the exact sub-reason with numbers where the check computed one (e.g.
-// "too_long:93>70", "blocked_phrase:пусть") so the batch trace doesn't
+// "too_long:93>70") so the batch trace doesn't
 // collapse every basic_quality rejection into the same opaque label. See
 // textFilter.js's validateLockScreenText for where `detail` is computed.
 function rejectionReasonForText(text, languageCode, validationContext = {}, slotType = null) {
   const filterResult = validateLockScreenText(text, { maxLength: LOCK_SCREEN_TEXT_MAX_LENGTH, slotType });
   if (!filterResult.ok) return { reason: filterResult.reason, detail: filterResult.detail || filterResult.reason };
-  if (hasQuestionShapeWithoutMark(text)) return { reason: 'question', detail: 'question_shape_without_mark' };
-  if (isGenericBadLockScreenPhrase(text)) return { reason: 'generic', detail: 'generic' };
-  if (hasInvalidRelativeDateClaim(text, languageCode, validationContext)) return { reason: 'date_claim', detail: 'date_claim' };
-  if (hasExactTelemetryEcho(text, languageCode, validationContext)) return { reason: 'telemetry_echo', detail: 'telemetry_echo' };
-  if (hasUnsupportedContextClaim(text, languageCode, validationContext)) return { reason: 'unsupported_context', detail: 'unsupported_context' };
-  if (hasCoachingOrDirectiveShape(text, languageCode)) return { reason: 'coaching', detail: 'coaching' };
   return { reason: null, detail: null };
 }
 
@@ -1405,8 +1091,7 @@ const MORNING_ANCHOR_TYPES = new Set([
 // unchanged, while callers that pass the real slot objects (both production
 // call sites now do, see assembleBatchFromGeneratedPhrases/
 // regenerateRejectedSlots) additionally get per-slot `type` threaded down to
-// rejectionReasonForText -- needed for the goodnight_care blocked-phrase
-// exemption (see textFilter.js's GOODNIGHT_CARE_EXEMPT_STOP_PHRASES).
+// rejectionReasonForText.
 function collectUsablePhrases(phrases, languageCode, validationContext = {}, expectedSlots = null) {
   if (!Array.isArray(phrases)) {
     return null;
@@ -2174,7 +1859,7 @@ function summarizeTrace(trace, slots, rejectionReasons = {}) {
       const source = item.final_source || 'unknown';
       finalSourceCounts[source] = (finalSourceCounts[source] || 0) + 1;
     }
-    const genericTypes = new Set(['free_ai_thought', 'everyday_lifehack', 'smart_humor_observation', 'city_afisha']);
+    const genericTypes = new Set(['everyday_lifehack', 'smart_humor_observation', 'city_afisha', 'warm_wish', 'poetic_thought']);
     const plannedGenericCount = Array.isArray(slots)
       ? slots.filter((slot) => genericTypes.has(slot.type)).length
       : 0;
@@ -2263,23 +1948,7 @@ function buildLoggedOpenAiResult(assembly, context, trace = null, slots = [], re
   summarizeTrace(trace, slots, assembly.rejectionReasons);
   recordGenerationMs(trace, generationStartMs);
   const phrases = assembly.phrases.map((item) => ({ text: item.text, style_id: item.style_id }));
-  return { phrases, source: assembly.generatedCount > 0 ? 'openai' : 'fallback', context, trace, dateContext };
-}
-
-function buildLoggedFinalAssemblyFallback(languageCode, context, assembly, trace = null, slots = [], dateContext = null, generationStartMs = null) {
-  logBatchResult({
-    generatedCount: assembly ? assembly.generatedCount : 0,
-    rejectedCount: assembly ? assembly.rejectedCount : 0,
-    fallbackFillCount: BATCH_SIZE,
-    reason: 'final_assembly_fallback',
-    rejectionReasons: assembly ? assembly.rejectionReasons : undefined,
-  });
-  const phrases = buildFallbackBatch(languageCode);
-  buildTraceForFullFallback(trace, languageCode, slots, phrases);
-  markWholeBatchFallback(trace, 'final_assembly_fallback');
-  summarizeTrace(trace, slots, assembly ? assembly.rejectionReasons : {});
-  recordGenerationMs(trace, generationStartMs);
-  return { phrases, source: 'fallback', context, trace, dateContext };
+  return { phrases, source: 'openai', context, trace, dateContext };
 }
 
 function parseOpenAiBatchResponse(response) {
@@ -2797,32 +2466,78 @@ function buildContextPrompt(device, window, signals, weather, languageCode, slot
 // Shape of the output (exactly BATCH_SIZE {slot_id, text, style_id} objects)
 // is enforced via the Structured Outputs json_schema passed to the API call
 // in generateBatch, not described in this text -- see the call site for why.
-function buildSystemPrompt(languageCode) {
-  const languageName = SUPPORTED_LANGUAGES[languageCode].name;
-  // Russian-only naturalness instruction (production incident: a generated
-  // Russian phrase read like a rough literal translation, e.g. a dangling
-  // "его" with no antecedent in the sentence itself). Scoped to
-  // languageCode === 'ru' only -- the base prompt template below is always
-  // authored in Russian regardless of the requested OUTPUT language, so this
-  // extra sentence must not leak into English/French/etc. generation runs
-  // where it would be meaningless.
-  const ruNaturalnessInstruction = languageCode === 'ru'
-    ? ' Пиши естественным современным русским языком, а не буквальным переводом английских конструкций и без калек; следи за согласованием рода, числа и падежа (например «городские парки», не «городское парки»); каждая фраза должна быть самостоятельной, полностью завершённой мыслью — никогда не обрывай предложение и не обрывай слово посередине ради лимита длины, лучше закончить короче, чем оборвать; не повторяй одно и то же существительное дважды в одной короткой фразе, если это не добавляет смысла.'
-    : '';
-  return `Ты — добрый, умный и внимательный AI-компаньон на экране блокировки, не quote/trivia/coach-приложение. Давай короткие мысли монологом: 1 предложение, емко, полезно, разнообразно, с теплом и вниманием к дню человека.${ruNaturalnessInstruction}
-Язык: ${languageName}. На каждый slot_id верни ровно одну строку и уникальный style_id.
-Запрет: ?, «пусть», открытки, уют/чай/тихий свет/мысли/мечты/магия/чудеса/счастье/фея/чайник, ночная поэзия про ночь/луну/звезды/тишину/покой/шорох/фонари/небо/свечи/гирлянды, «верь в себя», «ты справишься», вода, коучинг, выдуманные факты, выдуманные названия мероприятий/фильмов/выставок.
-ЗАПРЕЩЕНО использовать повелительное наклонение и команды (используй, выбери, держи, создай, читай, проверяй). Пиши в формате короткого факта или наблюдения.
-Экономь слова, но не сокращай мысль искусственно — длина зависит от slot.length_hint, см. ниже.
-По типу slot: greeting_name — тёплое личное приветствие по имени (если оно есть в profile) и лёгкое светлое напутствие на день, каждый день другими словами; goodnight_care — мягкое пожелание доброго отдыха по имени (если есть), без потока «тишина/звёзды/фонари»; weather_lifehack — только простая бытовая фраза про одежду, зонт, обувь или солнце, без температуры и любых цифр; context_signal — тёплая, заботливая реакция на facts.signal (низкий заряд/много разблокировок/поздний час), без чисел и без тревожности; holiday_today/history_today — по делу, не энциклопедия; daily_horoscope — развлекательная символическая карточка по уже рассчитанному facts.zodiac_sign, не вычисляй знак, если называешь знак вслух, переведи его на язык ответа, не обещай события, без медицинских/финансовых/юридических предсказаний и без страха; daily_numerology — мягкая символическая карточка по уже рассчитанным числам, главный акцент на facts.personal_day_number, не вычисляй числа и не выдавай нумерологию за науку; smart_humor_observation — тонкое ироничное наблюдение об обыденной жизни, не анекдот и не насмешка; city_afisha — только общее наблюдение о городской жизни/сезоне (парки, вечерние прогулки, привычки города), НИКОГДА не выдумывай конкретное название события/фильма/выставки или дату; free_ai_thought — одна короткая, по-настоящему интересная мысль о людях или цифровом мире.
-Только факты из slot/profile/now; погода только бытовыми словами без температуры и цифр, но опирайся на facts.temp_band/facts.condition_lean, если они есть — разная погода должна звучать по-разному, а не одним и тем же «оденься теплее» каждый раз; утром можно имя 1 раз; gender/age дают только аккуратный практичный оттенок, без стереотипов и обращений вроде «для настоящих мужчин» или «для девочек»; facts.age_bracket (teen/young_adult/adult/mature/senior) можно использовать только как мягкий ориентир уместности темы и сложности тона, никогда не называя сам возраст или диапазон вслух; interest_hint и gender_lean_hint используй незаметно, без «since you like».
-Персонализация всегда должна выглядеть естественной, а не как отчёт о данных пользователя: никогда не пиши прямо «ты выбрал спорт», «раз тебе нравится X», «поскольку тебе N лет», «мы видим, что ты разблокировал телефон N раз» — только едва заметный сдвиг темы или тона, без ссылки на источник.
-context_signal: many_unlocks — тёплое, ненавязчивое наблюдение, никогда не упрёк и не «ты слишком много сидишь в телефоне»; low_battery — короткий практичный контекст без нравоучений; late_hour — спокойный, некатегоричный тон, без предположений о том, что человек уже спит.
-phone_trend (facts.unlocks_vs_yesterday/facts.steps_vs_yesterday: higher/lower) — построй на этом естественное наблюдение о дне, а не сухую констатацию тренда, и никогда не называй точные числа.
-now.window.focus задаёт общее настроение НЕ закреплённых по типу слотов (free_ai_thought/everyday_lifehack/smart_humor_observation/city_afisha/context_signal/seasonal и похожих) для текущего времени суток: утром — старт дня и лёгкое планирование, днём — рабочий темп и бытовые наблюдения, вечером — переключение и итоги дня, ночью — спокойные мысли и минимум активного тона; не называй это поле и не объясняй эту логику вслух.
-Каждый slot несёт свой length_hint — это ОРИЕНТИР по диапазону, не цель, к которой надо тянуться: "short" — примерно 10-20 символов, мысль в одно мгновение; "medium" — примерно 21-40 символов, обычная фраза; "long" — РАЗРЕШЕНИЕ (не обязанность) раскрыть мысль подробнее, примерно 41-60 символов, но только если дополнительное содержание реально делает фразу интереснее — иначе короткая точная фраза всегда лучше растянутой. Никогда не растягивай уже законченную мысль ради попадания в диапазон и не пиши "впритык" к границе: если мысль естественно закончилась на 27 символах — оставь 27, а не дописывай слова до 40. В батче длины должны заметно отличаться друг от друга: большинство фраз — short/medium, long — меньшинство (ощутимо меньше половины батча), не подряд одна за другой и не через одинаковый интервал, а естественно, где материал того стоит.
-Жёсткий лимит: НИ ОДНА фраза не должна превышать ${LOCK_SCREEN_TEXT_MAX_LENGTH} символов, включая пробелы и знаки препинания, — это абсолютный потолок, не цель ни для одного length_hint, и его нельзя превышать ни при каких обстоятельствах, даже если тема кажется недосказанной: заверши мысль короче, но никогда не выходи за ${LOCK_SCREEN_TEXT_MAX_LENGTH} символов. Каждый ответ, который длиннее ${LOCK_SCREEN_TEXT_MAX_LENGTH} символов, будет отклонён целиком и не попадёт пользователю.
-Если payload содержит "repair": "rewrite_only_these_rejected_slots" — это режим точечного исправления, а не обычная генерация: для каждого slot в payload уже есть original_text (что было отклонено), rejection_reason (почему именно, например too_long:93>70 означает "93 символа при лимите 70", blocked_phrase:пусть означает "содержит запрещённое слово/оборот пусть") и max_length_chars (тот же ${LOCK_SCREEN_TEXT_MAX_LENGTH}). Перепиши именно то, что нарушено, сохранив исходный смысл/факт original_text насколько возможно, а не сочиняй заново с нуля; если причина too_long/too_many_words — сократи до предела, не обрывая мысль; если blocked_phrase — просто убери/замени конкретное запрещённое слово или оборот, остальное можно сохранить. Только JSON по схеме.`;
+function buildSystemPrompt() {
+  return `You are the voice of a kind, clever AI that lives on the user's phone lock screen. Every time they glance at their phone, you show one short line. Your goal: make them curious about what you will say next. You entertain, inform, support, teach, and notice things for them — like a smart, warm friend, never like a motivational poster or a textbook.
+
+LANGUAGE
+- Write every phrase in the language given in "lang", natively. Never translate word for word.
+- Facts may arrive in English. Retell them naturally in the target language.
+- Never translate jokes, idioms or quotes literally. For a joke, write your own light joke on the same theme. For word_learning, if the idiom is foreign, use a real common expression of the target language with a similar meaning.
+
+HARD LIMIT
+- Each phrase is at most ${LOCK_SCREEN_TEXT_MAX_LENGTH} characters, counting spaces. Longer phrases are discarded. Aim for 25–60.
+- If a fact is too long, keep only its most striking part.
+
+VOICE
+- Address the user informally (ты / du / tu / tú).
+- Use the name only in greeting_name and at most one other phrase per batch.
+- Never talk about yourself: no "I", no gendered self-reference, never mention being an AI.
+- Do not lecture, command or moralize — except weather advice.
+- No empty truisms. Test: after reading, the user learned something new, smiled, got a concrete useful tip, or felt a sincere warm word. If none — rewrite.
+- No numbers from phone signals. No exact temperatures.
+
+FACTS
+- Use only facts given in the slot. Never invent names, dates, numbers or events.
+- Dry numbers only if the number itself is surprising.
+
+SLOT TYPES
+- greeting_name: warm morning greeting with the name; may include a light wish.
+- weather_lifehack: practical advice from the facts (umbrella, layers, sunglasses, hat). No numbers.
+- daily_horoscope: light, kind, symbolic note; name the sign. No health, money or fate predictions.
+- holiday_today: name the holiday, local one of the user's country first; friendly touch.
+- history_today: the year and what happened, vividly.
+- daily_numerology: the personal day number and its light meaning today; name the number.
+- word_learning: a real expression in the target language and its meaning.
+- learning_recall: remind an expression from recent days and its meaning.
+- science_tech, good_news, unusual_fact, country_fact: the most surprising part, simply.
+- culture: a short famous quote with the author, or a cultural fact.
+- smart_humor_observation: your own light, clever everyday joke. Never a translated anecdote.
+- everyday_lifehack: one concrete, slightly surprising, doable trick. Not obvious advice.
+- warm_wish: one sincere, specific, kind wish. Not a greeting-card cliché.
+- poetic_thought: a short evening image — stars, autumn, city lights. Gentle, not pompous.
+- goodnight_care: a calm, warm goodnight line.
+- phone_trend, context_signal: a gentle observation about the user's day. No numbers, no advice.
+
+GOOD EXAMPLES
+- "Rain after lunch — today your umbrella earns its keep."
+- "An octopus tastes its food with its arms."
+- "Your cat knows it's Sunday and wakes you at six, just in case."
+- "Доброе утро, Баур! Пусть сегодня всё сложится."
+- "К обеду польёт — зонт сегодня не лишний."
+- "Сегодня День машиностроителя в Казахстане — привет инженерам!"
+- "Осьминог пробует еду на вкус прямо щупальцами."
+- "Кот знает, что у тебя выходной, и будит в шесть на всякий случай."
+- "Шапочное знакомство — когда вы только здороваетесь."
+- "Мокрые кроссовки высохнут быстрее, если набить их газетой."
+- "Пусть сегодня кто-то искренне скажет тебе спасибо."
+- "Осенние звёзды горят ярче летних — посмотри вечером вверх."
+
+BAD EXAMPLES — never
+- "Every day brings new opportunities." — empty truism.
+- "With experience, failures are easier to accept." — cliché.
+- "Outdoor workouts improve endurance." — obvious.
+- "Наденьте что-то тёплое." — formal and a command.
+- "I'd tell you a chemistry joke, but..." — self-reference, translated joke.
+- "Мировой рост ожидается на уровне 2.9% в 2026 году." — dry number.
+
+WINDOW
+now.window sets the mood: morning — start of the day; day — light, curious; evening — calmer, cultural; night — quiet and warm.
+
+REPAIR MODE
+If the payload has "repair": "rewrite_only_these_rejected_slots", each slot has original_text, rejection_reason and max_length_chars. Fix exactly that problem, keep the meaning. For too_long, shorten without cutting the thought.
+
+OUTPUT
+Only JSON matching the schema: one phrase per slot, in slot order, with its slot_id.`;
 }
 
 /**
@@ -3250,7 +2965,8 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
   }
 
   if (!assembly.phrases) {
-    return buildLoggedFinalAssemblyFallback(languageCode, context, assembly, trace, slots, dateContext, generationStartMs);
+    assembly.phrases = [];
+    assembly.reason = assembly.reason || 'all_slots_dropped';
   }
 
   // Record planned daily-bank categories for this batch. With slot-based
@@ -3273,9 +2989,6 @@ module.exports = {
   addDaysToDateString,
   _test: {
     cleanUsablePhrases,
-    hasQuestionMark,
-    hasQuestionShapeWithoutMark,
-    isGenericBadLockScreenPhrase,
     assembleBatchFromGeneratedPhrases,
     validateFinalBatch,
     resolveTargetLanguageCode,

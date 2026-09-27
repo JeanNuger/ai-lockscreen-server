@@ -222,12 +222,10 @@ async function main() {
   // recall slot) -> OpenAI receives the recall slot with only grounded
   // facts.word -> recordRecalledWords -> the exact row gets recalled_at ->
   // no longer returned by getRecallCandidate. Must run before the next block
-  // inserts any daily_content_bank rows: with no timezone/weather/age/gender
-  // on this device and zero bank rows yet, collectCandidates offers only the
-  // 13 fixed synthetic candidates plus this one real recall candidate --
-  // TYPE_CAPS.learning_recall (1) makes its selection a guaranteed count
-  // (exactly 12 candidates survive per-type caps for exactly BATCH_SIZE=12
-  // slots), not a lucky seed or a hand-built slot.
+  // inserts any daily_content_bank rows. Content-quality rebuild
+  // (requirement B): the planner no longer pads to exactly BATCH_SIZE, so
+  // this only asserts the recall slot itself is genuinely selected, not a
+  // specific total slot count.
   {
     const deviceId = 'learning-recall-e2e-device';
     const targetWord = 'EXACT_TARGET_RECALL_WORD';
@@ -285,7 +283,9 @@ async function main() {
 
       assert.strictEqual(openAiCallCount, 1, 'generating one batch must make exactly one OpenAI call');
       assert.strictEqual(result.source, 'openai');
-      assert.strictEqual(result.phrases.length, BATCH_SIZE);
+      // Content-quality rebuild (requirement B): no more padding to exactly
+      // BATCH_SIZE -- just bounded by it.
+      assert(result.phrases.length > 0 && result.phrases.length <= BATCH_SIZE);
 
       const payload = JSON.parse(capturedRequest.messages[1].content);
       const recallSlotSent = payload.slots.find((slot) => slot.type === 'learning_recall');
@@ -380,7 +380,9 @@ async function main() {
 
       assert.strictEqual(openAiCallCount, 1, 'generating one batch must make exactly one OpenAI call');
       assert.strictEqual(result.source, 'openai');
-      assert.strictEqual(result.phrases.length, BATCH_SIZE);
+      // Content-quality rebuild (requirement B): no more padding to exactly
+      // BATCH_SIZE -- just bounded by it.
+      assert(result.phrases.length > 0 && result.phrases.length <= BATCH_SIZE);
 
       const payload = JSON.parse(capturedRequest.messages[1].content);
       const payloadText = JSON.stringify(payload);

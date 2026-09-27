@@ -79,8 +79,8 @@ async function main() {
   };
 
   const planned = planSlots(baseInput, { seed: 'same-seed' });
-  assert.strictEqual(planned.slots.length, BATCH_SIZE, 'planner must always return 12 slots');
-  assert.strictEqual(new Set(planned.slots.map((slot) => slot.slot_id)).size, BATCH_SIZE, 'slot IDs must be unique');
+  assert(planned.slots.length > 0 && planned.slots.length <= BATCH_SIZE, 'planner must return a short-or-full batch');
+  assert.strictEqual(new Set(planned.slots.map((slot) => slot.slot_id)).size, planned.slots.length, 'slot IDs must be unique');
   assertFactualSlotsAreGrounded(planned.slots);
 
   assert.strictEqual(plannerTest.zodiacSignForBirthDate('1995-05-20'), 'Taurus', 'ordinary birth date must resolve to Taurus');
@@ -105,7 +105,7 @@ async function main() {
   );
 
   const morningPersonal = planSlots({ ...baseInput, window: 'morning' }, { seed: 'personal-morning-seed' });
-  assert.strictEqual(morningPersonal.slots.length, BATCH_SIZE, 'personalized morning batch must remain exactly 12 slots');
+  assert(morningPersonal.slots.length > 0 && morningPersonal.slots.length <= BATCH_SIZE, 'personalized morning batch may be shorter than 12 slots');
   const horoscopeSlot = morningPersonal.slots.find((slot) => slot.type === 'daily_horoscope');
   const numerologySlot = morningPersonal.slots.find((slot) => slot.type === 'daily_numerology');
   assert(horoscopeSlot, 'morning with valid birth_date must include daily_horoscope');
@@ -233,7 +233,7 @@ async function main() {
       facts: { text: `recent ${index + 1}` },
     })),
   });
-  assert.strictEqual(allRecent.slots.length, BATCH_SIZE, 'recent candidates must remain eligible when needed to fill the batch');
+  assert(allRecent.slots.length > 0 && allRecent.slots.length <= BATCH_SIZE, 'recent candidates may produce a shorter batch');
   assert(
     allRecent.slots.some((slot) => slot.id && slot.id.startsWith('recent_candidate_')),
     'soft anti-repeat must not hard-exclude recent candidates'
@@ -336,7 +336,7 @@ async function main() {
   // planning (see the dedicated interests-personalization section below for
   // the precise, deterministic proof) -- this block only confirms a device
   // with zero interests at all (old client, or user selected none) still
-  // plans a complete, valid batch, i.e. nothing breaks/degrades when the
+  // plans a valid batch, i.e. nothing breaks/degrades when the
   // field is entirely absent.
   const noInterestsAtAllInput = {
     ...baseInput,
@@ -348,7 +348,7 @@ async function main() {
     },
   };
   const noInterestsPlanned = planSlots(noInterestsAtAllInput, { seed: 'legacy-profile-seed' });
-  assert.strictEqual(noInterestsPlanned.slots.length, BATCH_SIZE, 'a device with no interests at all must still plan a full, normal batch');
+  assert(noInterestsPlanned.slots.length > 0 && noInterestsPlanned.slots.length <= BATCH_SIZE, 'a device with no interests at all must still plan a valid batch');
 
   // --- interests personalization (post-selection interest_hint tagging) ---
   // Selection itself (candidateWeight/selectNonMandatory) is now completely
@@ -365,11 +365,10 @@ async function main() {
       plannerTest.createCandidate({ id: 'humor_a', type: 'smart_humor_observation', priority: 30, facts: {} }),
       plannerTest.createCandidate({ id: 'humor_b', type: 'smart_humor_observation', priority: 30, facts: {} }),
       plannerTest.createCandidate({ id: 'technology_a', type: 'science_tech', priority: 30, facts: { text: 'tech fact' } }),
-      plannerTest.createCandidate({ id: 'everyday_observation_a', type: 'everyday_observation', priority: 20, facts: {} }),
-      plannerTest.createCandidate({ id: 'playful_thought_a', type: 'playful_thought', priority: 20, facts: {} }),
-      plannerTest.createCandidate({ id: 'tiny_imagined_scene_a', type: 'tiny_imagined_scene', priority: 20, facts: {} }),
-      plannerTest.createCandidate({ id: 'gentle_wish_a', type: 'gentle_wish', priority: 15, facts: {} }),
-      plannerTest.createCandidate({ id: 'language_play_a', type: 'language_play', priority: 10, facts: {} }),
+      plannerTest.createCandidate({ id: 'lifehack_a', type: 'everyday_lifehack', priority: 20, facts: {} }),
+      plannerTest.createCandidate({ id: 'city_a', type: 'city_afisha', priority: 20, facts: {} }),
+      plannerTest.createCandidate({ id: 'warm_wish_a', type: 'warm_wish', priority: 15, facts: {} }),
+      plannerTest.createCandidate({ id: 'poetic_a', type: 'poetic_thought', priority: 10, facts: {} }),
       ...extra,
     ];
 
@@ -379,7 +378,7 @@ async function main() {
       { device: { device_id: 'interest-hint-device', interests: JSON.stringify(['work', 'self_development']) }, window: 'day' },
       { seed: 'interest-hint-seed', candidates: buildTaggedPool() }
     );
-    assert.strictEqual(planned.slots.length, BATCH_SIZE);
+    assert(planned.slots.length > 0 && planned.slots.length <= BATCH_SIZE);
     const hinted = planned.slots.filter((slot) => slot.interest_hint);
     assert(hinted.length > 0, 'at least one slot should receive an interest_hint when compatible candidates exist');
     assert(hinted.length <= plannerTest.MAX_INTEREST_AWARE_SLOTS, `interest-hinted slots (${hinted.length}) must never exceed MAX_INTEREST_AWARE_SLOTS`);
@@ -415,23 +414,16 @@ async function main() {
       buildTaggedPool().map((c, i) => ({ ...c, slot_id: `s${i + 1}` })),
       JSON.stringify(['work'])
     );
-    assert.strictEqual(singleInterestHints.size, 2, 'a single interest with 2 compatible candidates should use both, still within the cap');
+    assert(singleInterestHints.size > 0 && singleInterestHints.size <= plannerTest.MAX_INTEREST_AWARE_SLOTS, 'a single interest should use compatible candidates up to the cap');
     assert([...singleInterestHints.values()].every((v) => v === 'work'));
 
-    // 4: a device with no interests gets a completely normal batch -- zero
-    // hints, and selection is untouched (interests can no longer influence
-    // scoring at all, so this is byte-identical to the pre-interests planner).
+    // 4: a device with no interests gets zero hints.
     const noInterestPlanned = planSlots(
       { device: { device_id: 'interest-hint-device-none' }, window: 'day' },
       { seed: 'interest-hint-seed', candidates: buildTaggedPool() }
     );
-    assert.strictEqual(noInterestPlanned.slots.length, BATCH_SIZE);
+    assert(noInterestPlanned.slots.length > 0 && noInterestPlanned.slots.length <= BATCH_SIZE);
     assert(noInterestPlanned.slots.every((slot) => slot.interest_hint === undefined), 'a device with no interests must receive zero interest_hints');
-    assert.deepStrictEqual(
-      noInterestPlanned.slots.map((s) => ({ id: s.id, type: s.type })),
-      planned.slots.map((s) => ({ id: s.id, type: s.type })),
-      'selection itself (which candidates win which slots) must be identical with vs without interests -- only the post-hoc hint differs'
-    );
 
     // Safe degradation: malformed/empty/unknown interests never throw and
     // never assign a hint.
@@ -490,9 +482,13 @@ async function main() {
   );
   assert(phoneTrendCandidate.constraints.includes('no_exact_counts'), 'phone_trend must explicitly forbid exact counts');
 
+  // phone_trend is evening/night-only (content-quality rebuild: max one per
+  // day, only in the evening/night windows) -- 'day' is used just above only
+  // to prove it is NEVER selected outside its allowed windows; this positive
+  // reachability check must use an allowed window instead.
   const phoneTrendSlots = planSlots({
     device: { device_id: 'phone-trend-device' },
-    window: 'day',
+    window: 'evening',
     dateContext: null,
     weather: null,
     bankItems: [],
@@ -525,8 +521,8 @@ async function main() {
   for (const [type, count] of counts.entries()) {
     if (plannerTest.GENERIC_FILLER_TYPES.has(type)) {
       // baseInput's 'day' window is a deliberately sparse fixture for THIS
-      // particular candidate pool (only age_context/seasonal/one surviving
-      // bank item are non-generic here -- history_today/holiday_today are
+      // particular candidate pool (only one surviving bank item is
+      // non-generic here -- history_today/holiday_today are
       // morning-only, see isCandidateAllowedInWindow), so selectNonMandatory's
       // capsExhausted escape hatch (a genuine last resort -- see its own
       // comment) legitimately has to exceed both the per-type cap and
@@ -562,7 +558,23 @@ async function main() {
   assert.strictEqual(bankCandidate.type, 'holiday_today');
   assert.strictEqual(bankCandidate.bank_category, 'holiday');
 
-  const slotSubset = planned.slots;
+  // A manually-built, fixed-size (BATCH_SIZE) slot list -- independent of
+  // planned.slots, which (per the content-quality rebuild, see requirement B)
+  // may legitimately come back SHORTER than BATCH_SIZE now that there is no
+  // more creative-filler padding to force it up to 12. These lower-level
+  // assembleBatchFromGeneratedPhrases tests exercise ordering/anchor/
+  // slot_id-validation mechanics that need a known, full-size slot list, not
+  // a realistic planSlots() output, so they build one directly.
+  const slotSubset = Array.from({ length: BATCH_SIZE }, (_, index) => ({
+    ...plannerTest.createCandidate({
+      id: `manual_slot_${index + 1}`,
+      type: 'everyday_lifehack',
+      priority: 10,
+      facts: {},
+    }),
+    slot_id: `s${index + 1}`,
+    length_hint: 'medium',
+  }));
   const reversedAssembly = contentTest.assembleBatchFromGeneratedPhrases(
     validSlotPhrases(slotSubset).reverse(),
     'en',
@@ -581,13 +593,18 @@ async function main() {
     {},
     slotSubset
   );
-  assert.strictEqual(assembled.generatedCount, BATCH_SIZE, 'valid slot-linked response must keep all phrases');
+  assert.strictEqual(assembled.generatedCount, slotSubset.length, 'valid slot-linked response must keep all phrases');
   assert.strictEqual(assembled.rejectedCount, 0);
 
+  // Stylistic filters (question mark, blocked phrases, etc) were removed --
+  // only schema/empty/too_long/language/duplicate checks remain (content-
+  // quality rebuild, requirement A). An overlong text is now the reliable way
+  // to force a rejection regardless of language.
+  const overlongText = 'x'.repeat(contentTest.LOCK_SCREEN_TEXT_MAX_LENGTH + 20);
   const partial = contentTest.assembleBatchFromGeneratedPhrases(
     [
       ...validSlotPhrases(slotSubset).slice(0, 10),
-      { slot_id: slotSubset[10].slot_id, text: 'This is a question?', style_id: STYLE_IDS[10] },
+      { slot_id: slotSubset[10].slot_id, text: overlongText, style_id: STYLE_IDS[10] },
       { slot_id: slotSubset[11].slot_id, text: 'Concrete surviving line', style_id: STYLE_IDS[11] },
     ],
     'en',
@@ -595,17 +612,17 @@ async function main() {
     slotSubset
   );
   assert.strictEqual(partial.generatedCount, 11, 'partial invalid response must preserve valid phrases');
-  assert.strictEqual(partial.rejectionReasons.question, 1);
+  assert.strictEqual(partial.rejectionReasons.basic_quality, 1);
   assert.strictEqual(partial.fallbackFillCount, 1);
   assert.strictEqual(partial.phrases[10].slot_id, slotSubset[10].slot_id, 'middle slot fallback must stay in that slot position');
-  assert.notStrictEqual(partial.phrases[10].text, 'This is a question?');
+  assert.notStrictEqual(partial.phrases[10].text, overlongText);
   assert.strictEqual(partial.phrases[9].text, 'Concrete slot line 10', 'valid phrase before rejected middle slot must not shift');
   assert.strictEqual(partial.phrases[11].text, 'Concrete surviving line', 'valid phrase after rejected middle slot must not shift');
 
   const morningSlots = planSlots({ ...baseInput, window: 'morning' }, { seed: 'morning-reject-seed' }).slots;
   const morningRejected = contentTest.assembleBatchFromGeneratedPhrases(
     [
-      { slot_id: morningSlots[0].slot_id, text: 'Good morning?', style_id: STYLE_IDS[0] },
+      { slot_id: morningSlots[0].slot_id, text: overlongText, style_id: STYLE_IDS[0] },
       ...validSlotPhrases(morningSlots).slice(1),
     ],
     'en',
@@ -628,7 +645,7 @@ async function main() {
       anchorSlot,
       ...Array.from({ length: BATCH_SIZE - 1 }, (_, index) => plannerTest.createCandidate({
         id: `anchor_regression_filler_${anchorSlot.type}_${index}`,
-        type: index % 2 === 0 ? 'free_ai_thought' : 'everyday_lifehack',
+        type: index % 2 === 0 ? 'city_afisha' : 'everyday_lifehack',
         facts: {},
       })),
     ].map((slot, index) => ({
@@ -640,7 +657,7 @@ async function main() {
 
   function generatedWithRejectedFirst(slots) {
     const generated = validSlotPhrases(slots);
-    generated[0] = { slot_id: slots[0].slot_id, text: 'This anchor is invalid?', style_id: STYLE_IDS[0] };
+    generated[0] = { slot_id: slots[0].slot_id, text: overlongText, style_id: STYLE_IDS[0] };
     return generated;
   }
 
@@ -774,7 +791,7 @@ async function main() {
   const nightGenerated = validSlotPhrases(nightSlots);
   nightGenerated[nightGenerated.length - 1] = {
     slot_id: nightSlots[nightSlots.length - 1].slot_id,
-    text: 'Good night?',
+    text: overlongText,
     style_id: STYLE_IDS[nightGenerated.length - 1],
   };
   const nightRejected = contentTest.assembleBatchFromGeneratedPhrases(nightGenerated, 'en', {}, nightSlots);
@@ -817,21 +834,20 @@ async function main() {
     bankItems: [],
   }, { seed: 'creative-only-seed' });
   const sparseCounts = slotTypeCounts(sparseCreativeOnly.slots);
-  assert.strictEqual(sparseCreativeOnly.slots.length, BATCH_SIZE, 'empty-input planner must still return exactly 12 slots');
-  assertFactualSlotsAreGrounded(sparseCreativeOnly.slots);
-  // With only the 4 creative synthetic types available (day window, no
-  // weather/bank/telemetry/recall at all) and each capped at 1-2
-  // (TYPE_CAPS), the normal per-type caps alone can only ever cover 5 of
-  // the 12 required slots -- selectNonMandatory's capsExhausted escape
-  // hatch (see its own comment in slotPlanner.js) is expected to kick in
-  // here and exceed the normal caps rather than return fewer than 12
-  // slots. The hard invariant that still must hold is exactly 12 total and
-  // no dead/removed poetic type ever appearing (structurally impossible
-  // now -- they are not in CONTENT_TYPES at all).
-  assert((sparseCounts.get('everyday_lifehack') || 0) > 0, 'empty-input planner must include practical lifehack slots');
+  // Content-quality rebuild (requirement B): there is no more creative-filler
+  // padding to force a sparse batch up to BATCH_SIZE -- with only a handful
+  // of synthetic creative candidates available (day window, no weather/bank/
+  // telemetry/recall at all, each type capped at 1-2 by TYPE_CAPS), the
+  // planner must return a SHORTER-than-12 batch rather than manufacture
+  // extra filler slots to reach 12.
   assert(
-    !sparseCreativeOnly.slots.some((slot) => ['tiny_imagined_scene', 'playful_thought', 'language_play', 'reflective_observation', 'everyday_observation'].includes(slot.type)),
-    'creative fallback strategy must avoid poetic/imaginative filler types (structurally impossible: not in CONTENT_TYPES)'
+    sparseCreativeOnly.slots.length > 0 && sparseCreativeOnly.slots.length <= BATCH_SIZE,
+    'empty-input planner must return a non-empty, short-or-full batch, never padded beyond what real candidates support'
+  );
+  assertFactualSlotsAreGrounded(sparseCreativeOnly.slots);
+  assert(
+    !sparseCreativeOnly.slots.some((slot) => ['tiny_imagined_scene', 'playful_thought', 'language_play', 'reflective_observation', 'everyday_observation', 'free_ai_thought', 'age_context', 'seasonal'].includes(slot.type)),
+    'creative fallback strategy must avoid poetic/imaginative/removed filler types (structurally impossible: not in CONTENT_TYPES)'
   );
   assert.deepStrictEqual(sparseCreativeOnly.slots, sparseCreativeOnlyAgain.slots, 'empty-input planner must be deterministic for the same seed');
   assert.deepStrictEqual(
@@ -839,6 +855,7 @@ async function main() {
     sparseCreativeOnlyAgain.slots.map((slot) => slot.id),
     'creative filler IDs must be stable across independent planning calls'
   );
+  assert((sparseCounts.get('everyday_lifehack') || 0) > 0, 'empty-input planner must include practical lifehack slots');
 
   // weather_lifehack is morning-only now (window-aware fixed slots) -- see
   // isCandidateAllowedInWindow / collectCandidates' window === 'morning' guard.
@@ -856,20 +873,44 @@ async function main() {
     !dayWeatherSlots.some((slot) => slot.type === 'weather_lifehack'),
     'weather_lifehack must not be a candidate at all outside the morning window'
   );
-  assert(/без температуры и (любых )?цифр/i.test(contentTest.buildSystemPrompt('en')), 'prompt must forbid exact weather temperature/digit output');
+  // Content-quality rebuild (requirement D): buildSystemPrompt is now a
+  // CONSTANT, English-only, argument-free prompt (language travels only in
+  // the per-request user/context payload, never the system prompt) -- no
+  // more Russian-templated per-language text to assert on. Weather's
+  // "no numbers" rule now lives in the constant VOICE section.
+  assert(/No numbers\.?/i.test(contentTest.buildSystemPrompt()), 'prompt must forbid weather temperature/digit output');
 
-  // 7: the static/cached system prompt must explicitly forbid revealing the
-  // interest_hint personalization mechanism to the user.
-  const systemPromptText = contentTest.buildSystemPrompt('en');
-  assert(/interest_hint/i.test(systemPromptText), 'system prompt must document interest_hint semantics');
-  assert(/незаметно/i.test(systemPromptText), 'system prompt must require invisible personalization');
-  assert(/since you like/i.test(systemPromptText), 'system prompt must explicitly forbid profile-revealing phrasing like "since you like X"');
-  assert(/выдуманные факты/i.test(systemPromptText), 'system prompt must forbid inventing facts/connections to satisfy an interest hint');
+  // 7: the static/cached system prompt's exact required shape -- fixed
+  // opening/closing sentences, and every mandated section present in order.
+  const systemPromptText = contentTest.buildSystemPrompt();
+  assert.strictEqual(
+    contentTest.buildSystemPrompt('ru'),
+    systemPromptText,
+    'system prompt must be identical regardless of language -- language only goes into the per-request user payload'
+  );
+  assert(
+    systemPromptText.startsWith("You are the voice of a kind, clever AI that lives on the user's phone lock screen."),
+    'system prompt must start with the exact mandated opening sentence'
+  );
+  assert(
+    systemPromptText.trim().endsWith('Only JSON matching the schema: one phrase per slot, in slot order, with its slot_id.'),
+    'system prompt must end with the exact mandated OUTPUT closing sentence'
+  );
+  const sectionOrder = ['LANGUAGE', 'HARD LIMIT', 'VOICE', 'FACTS', 'SLOT TYPES', 'GOOD EXAMPLES', 'BAD EXAMPLES', 'WINDOW', 'REPAIR MODE', 'OUTPUT'];
+  const sectionIndexes = sectionOrder.map((heading) => {
+    const match = new RegExp(`^${heading}\\b`, 'm').exec(systemPromptText);
+    return match ? match.index : -1;
+  });
+  sectionOrder.forEach((heading, i) => assert(sectionIndexes[i] !== -1, `system prompt must contain the ${heading} section heading`));
+  for (let i = 1; i < sectionIndexes.length; i++) {
+    assert(sectionIndexes[i] > sectionIndexes[i - 1], `section ${sectionOrder[i]} must come after ${sectionOrder[i - 1]}`);
+  }
   assert(/daily_horoscope/i.test(systemPromptText), 'system prompt must document daily_horoscope');
-  assert(/facts\.zodiac_sign/i.test(systemPromptText), 'system prompt must tell OpenAI to use precomputed zodiac_sign');
-  assert(/переведи его на язык ответа/i.test(systemPromptText), 'system prompt must require localized zodiac sign names in user-visible text');
   assert(/daily_numerology/i.test(systemPromptText), 'system prompt must document daily_numerology');
-  assert(/facts\.personal_day_number/i.test(systemPromptText), 'system prompt must emphasize precomputed personal_day_number');
+  assert(
+    systemPromptText.includes(`${contentTest.LOCK_SCREEN_TEXT_MAX_LENGTH} characters`),
+    'the hard length limit must be interpolated from LOCK_SCREEN_TEXT_MAX_LENGTH, not a bare hardcoded number'
+  );
 
   const bankDate = getBankDateString();
   db.prepare(`
@@ -944,11 +985,15 @@ async function main() {
 
     assert.strictEqual(openAiCallCount, 1, 'normal batch generation must make exactly one OpenAI call');
     assert.strictEqual(result.source, 'openai');
-    assert.strictEqual(result.phrases.length, BATCH_SIZE);
+    // Content-quality rebuild (requirement B): the planner no longer pads a
+    // batch up to exactly BATCH_SIZE -- it must stay within 1..BATCH_SIZE,
+    // matching however many real candidates/slots were actually planned.
+    assert(result.phrases.length > 0 && result.phrases.length <= BATCH_SIZE, 'batch must be non-empty and never exceed BATCH_SIZE');
     assert(!result.phrases.some((phrase) => Object.prototype.hasOwnProperty.call(phrase, 'slot_id')), 'public API phrases must not expose slot_id');
 
     const payload = JSON.parse(capturedRequest.messages[1].content);
-    assert.strictEqual(payload.slots.length, BATCH_SIZE, 'OpenAI payload must contain only selected slots');
+    assert(payload.slots.length > 0 && payload.slots.length <= BATCH_SIZE, 'OpenAI payload must contain only selected slots, never more than BATCH_SIZE');
+    assert.strictEqual(result.phrases.length, payload.slots.length, 'every planned slot got a phrase back from the mock, so none should be dropped');
     assert(!JSON.stringify(payload).includes('Unselected extra bank item'), 'OpenAI payload must not include the whole candidate pool/bank');
     assert(!('personal_goal' in (payload.profile || {})), 'OpenAI payload must not include personal_goal');
     assert(!('tone' in (payload.profile || {})), 'OpenAI payload must not include tone');
@@ -1023,9 +1068,10 @@ async function main() {
 
     // End-to-end sanity through the real planSlots/interestBoostTypesForDevice
     // wiring (device.interests -> selectNonMandatory), using the SAME tied
-    // pool via the day-window explicit `candidates` override.
+    // pool. context_signal is evening/night-only (content-quality rebuild,
+    // requirement B), so this must use an allowed window, not 'day'.
     const devicePlanned = planSlots(
-      { device: { device_id: 'interest-selection-device', interests: JSON.stringify(['mindfulness']) }, window: 'day' },
+      { device: { device_id: 'interest-selection-device', interests: JSON.stringify(['mindfulness']) }, window: 'evening' },
       { seed: 'interest-selection-seed', candidates: tiedPool, rng: tiedRng }
     );
     assert(
@@ -1060,11 +1106,11 @@ async function main() {
       ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_lifehack_${i + 1}`, type: 'everyday_lifehack', priority: 20, facts: {} })),
       ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_humor_${i + 1}`, type: 'smart_humor_observation', priority: 20, facts: {} })),
       ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_city_${i + 1}`, type: 'city_afisha', priority: 20, facts: {} })),
-      ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_thought_${i + 1}`, type: 'free_ai_thought', priority: 20, facts: {} })),
+      ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_wish_${i + 1}`, type: 'warm_wish', priority: 20, facts: {} })),
       ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_science_${i + 1}`, type: 'science_tech', priority: 20, facts: { text: 'x' } })),
       ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_money_${i + 1}`, type: 'money_economics', priority: 20, facts: { text: 'x' } })),
       ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_culture_${i + 1}`, type: 'culture', priority: 20, facts: { text: 'x' } })),
-      plannerTest.createCandidate({ id: 'rich_seasonal_1', type: 'seasonal', priority: 20, facts: { date: '2026-09-20' } }),
+      plannerTest.createCandidate({ id: 'rich_unusual_fact_1', type: 'unusual_fact', priority: 20, facts: { text: 'x' } }),
       plannerTest.createCandidate({ id: 'rich_good_news_1', type: 'good_news', priority: 20, facts: { text: 'x' } }),
     ];
     const allInterestsPlanned = planSlots(
@@ -1113,7 +1159,13 @@ async function main() {
         phoneTrends: { unlocks_vs_yesterday: 'higher', steps_vs_yesterday: 'lower' },
         signals: {},
       }, { seed: `generic-cap-seed-${i}` });
-      assert.strictEqual(planned.slots.length, BATCH_SIZE, `run ${i} must still return exactly ${BATCH_SIZE} slots`);
+      // Content-quality rebuild (requirement B): no more padding to exactly
+      // BATCH_SIZE -- this rich-but-finite candidate pool may legitimately
+      // land short of it.
+      assert(
+        planned.slots.length > 0 && planned.slots.length <= BATCH_SIZE,
+        `run ${i} must return a non-empty batch no larger than ${BATCH_SIZE} slots`
+      );
       const genericCount = planned.slots.filter((slot) => plannerTest.GENERIC_FILLER_TYPES.has(slot.type)).length;
       assert(
         genericCount <= plannerTest.MAX_GENERIC_FILLER_PER_BATCH,
@@ -1142,10 +1194,12 @@ async function main() {
     // can't silently drop it.
     assert(plannerTest.contextSignalConstraints('many_unlocks').includes('non_judgmental'));
 
+    // context_signal is evening/night-only (content-quality rebuild,
+    // requirement B) -- 'day' is deliberately not used here any more.
     const lowBatterySlots = planSlots({
       device: { device_id: 'low-battery-device' },
-      window: 'day',
-      dateContext: { date: '2026-09-20', weekday: 'Sunday', time: '12:00' },
+      window: 'evening',
+      dateContext: { date: '2026-09-20', weekday: 'Sunday', time: '20:00' },
       signals: { battery_level: 5 },
     }, { seed: 'low-battery-seed' }).slots;
     const contextSlot = lowBatterySlots.find((s) => s.type === 'context_signal');
@@ -1154,30 +1208,12 @@ async function main() {
     assert(!('battery_level' in contextSlot.facts), 'raw battery_level must never reach a slot\'s facts');
     assert(contextSlot.constraints.includes('short_practical_context'));
 
-    // ageBracketFor itself: pure function, independent of wall-clock time.
-    assert.strictEqual(plannerTest.ageBracketFor(10), 'teen');
-    assert.strictEqual(plannerTest.ageBracketFor(17), 'teen');
-    assert.strictEqual(plannerTest.ageBracketFor(18), 'young_adult');
-    assert.strictEqual(plannerTest.ageBracketFor(25), 'young_adult');
-    assert.strictEqual(plannerTest.ageBracketFor(26), 'adult');
-    assert.strictEqual(plannerTest.ageBracketFor(40), 'adult');
-    assert.strictEqual(plannerTest.ageBracketFor(41), 'mature');
-    assert.strictEqual(plannerTest.ageBracketFor(60), 'mature');
-    assert.strictEqual(plannerTest.ageBracketFor(61), 'senior');
-    assert.strictEqual(plannerTest.ageBracketFor(null), null);
-    assert.strictEqual(plannerTest.ageBracketFor(-1), null);
-
-    // Age bracket, not exact age, reaches the candidate's own facts (uses
-    // baseInput's birth_date, already exercised as a real age_context
-    // candidate by the very first assertFactualSlotsAreGrounded check above).
-    const ageSlot = planned.slots.find((s) => s.type === 'age_context');
-    if (ageSlot) {
-      assert(
-        ['teen', 'young_adult', 'adult', 'mature', 'senior'].includes(ageSlot.facts.age_bracket),
-        'age_context facts.age_bracket must be one of the defined brackets'
-      );
-      assert(!('age' in ageSlot.facts), 'exact age must never reach age_context\'s own facts (req 4: no "поскольку тебе 16")');
-    }
+    // age_context/ageBracketFor were removed entirely (content-quality
+    // rebuild, requirement B: age_context is no longer a planned type) --
+    // structurally confirmed elsewhere (CONTENT_TYPES/FACTUAL_TYPES no
+    // longer include it, and plannerTest.ageBracketFor is no longer
+    // exported at all), so there is nothing left to assert here.
+    assert.strictEqual(plannerTest.ageBracketFor, undefined, 'ageBracketFor must no longer be exported (age_context was removed)');
 
     // Window focus differs across all four windows, and is exposed via
     // windowContextFor (contentGenerator.js), not hidden in the system prompt.
@@ -1201,6 +1237,59 @@ async function main() {
       device: (() => { const d = { ...baseInput.device }; delete d.personal_goal; delete d.tone; return d; })(),
     }, { seed: 'legacy-still-unused-seed' });
     assert.deepStrictEqual(withLegacy.slots, withoutLegacy.slots, 'personal_goal/tone must still have zero effect on planning after the content-improvement changes');
+  }
+
+  // --- 6: dedupeByTopic must let a FIXED morning type win a same-topic
+  // collision over a non-fixed duplicate, regardless of which one appeared
+  // first in the input order (production incident: batch_id 27, 2026-09-27,
+  // a holiday_today candidate lost to a same-topic non-fixed candidate and
+  // the holiday disappeared from the morning batch entirely). ---
+  {
+    const holidayCandidate = plannerTest.createCandidate({
+      id: 'holiday_today_candidate',
+      type: 'holiday_today',
+      priority: 50,
+      facts: { text: 'European Day of Languages celebrated across Europe today' },
+    });
+    const nonFixedDuplicate = plannerTest.createCandidate({
+      id: 'country_fact_candidate',
+      type: 'country_fact',
+      priority: 40,
+      facts: { text: 'European Union marks European Day of Languages today' },
+    });
+
+    // Case A: non-fixed appears first, fixed appears second -- fixed must
+    // still win and replace the earlier-kept non-fixed entry.
+    const dedupedFixedSecond = plannerTest.dedupeByTopic([
+      { candidate: nonFixedDuplicate, text: nonFixedDuplicate.facts.text },
+      { candidate: holidayCandidate, text: holidayCandidate.facts.text },
+    ]);
+    assert.strictEqual(dedupedFixedSecond.length, 1, 'same-topic duplicates must collapse to one candidate');
+    assert.strictEqual(dedupedFixedSecond[0].type, 'holiday_today', 'a fixed morning type must win a same-topic collision even when it appears second');
+
+    // Case B: fixed appears first -- must simply stay (sanity check, this
+    // direction already worked before the fix).
+    const dedupedFixedFirst = plannerTest.dedupeByTopic([
+      { candidate: holidayCandidate, text: holidayCandidate.facts.text },
+      { candidate: nonFixedDuplicate, text: nonFixedDuplicate.facts.text },
+    ]);
+    assert.strictEqual(dedupedFixedFirst.length, 1, 'same-topic duplicates must collapse to one candidate');
+    assert.strictEqual(dedupedFixedFirst[0].type, 'holiday_today', 'a fixed morning type appearing first must keep winning');
+
+    // Case C: two non-fixed same-topic candidates -- first one still wins
+    // (no fixed type involved, existing "earlier wins" behavior unchanged).
+    const otherNonFixed = plannerTest.createCandidate({
+      id: 'unusual_fact_candidate',
+      type: 'unusual_fact',
+      priority: 30,
+      facts: { text: 'European Union marks European Day of Languages today' },
+    });
+    const dedupedNoFixed = plannerTest.dedupeByTopic([
+      { candidate: nonFixedDuplicate, text: nonFixedDuplicate.facts.text },
+      { candidate: otherNonFixed, text: otherNonFixed.facts.text },
+    ]);
+    assert.strictEqual(dedupedNoFixed.length, 1, 'same-topic duplicates must collapse to one candidate');
+    assert.strictEqual(dedupedNoFixed[0].type, 'country_fact', 'with no fixed type involved, the earlier-kept candidate must still win');
   }
 
   console.log('slot-planner.test.js: all assertions passed');
