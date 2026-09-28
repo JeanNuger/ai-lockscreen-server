@@ -12,7 +12,6 @@ const db = require('../src/db');
 const { BATCH_SIZE, STYLE_IDS } = require('../src/constants');
 const {
   BANK_CATEGORIES,
-  EVERGREEN_COMPATIBLE_CATEGORIES,
   selectBankItemsForDevice,
   generateDailyBank,
   getBankDateString,
@@ -94,32 +93,23 @@ async function main() {
     assert(!bankTest.isBankItemAllowedForCountry(kzFact, 'FR'), 'a KZ-tagged country_fact must be rejected for a device in a different country');
   }
 
-  // --- good_news must be excluded from evergreen compatibility, and
-  // evergreen backfill must never fabricate a good_news item ---
-  {
-    assert(!EVERGREEN_COMPATIBLE_CATEGORIES.has('good_news'), 'good_news must not be evergreen-compatible (it is a claim about recency)');
-    const backfill = bankTest.getEvergreenBackfillRows(new Set(), null);
-    assert(!backfill.some((row) => row.category === 'good_news'), 'evergreen backfill must never fabricate a good_news item, even when every category is missing');
-  }
-
-  // --- good_news can come from today's live Daily Bank (fresh-only, never evergreen) ---
+  // --- good_news can come from today's live Daily Bank only ---
   {
     const bankDate = getBankDateString();
     insertBankRow(bankDate, 'good_news', 'LIVE_GOOD_NEWS_UNIQUE_TEXT');
     const selected = selectBankItemsForDevice('device-good-news-live', bankDate, '2026-09-21', null, null, 20);
     const goodNewsItems = selected.filter((item) => item.category === 'good_news');
     assert.strictEqual(goodNewsItems.length, 1, 'exactly one good_news item must be selectable when live has one today');
-    assert.strictEqual(goodNewsItems[0].content_text, 'LIVE_GOOD_NEWS_UNIQUE_TEXT', 'good_news must come from the live row, not an evergreen substitute');
+    assert.strictEqual(goodNewsItems[0].content_text, 'LIVE_GOOD_NEWS_UNIQUE_TEXT', 'good_news must come from the live row');
   }
 
-  // --- when live has NO good_news today, it must simply be omitted, never
-  // backfilled from evergreen ---
+  // --- when live has NO good_news today, it must simply be omitted ---
   {
     const failedBankDate = 'no-bank-rows-for-good-news-test';
     const selected = selectBankItemsForDevice('device-good-news-missing', failedBankDate, '2026-09-21', null, null, 20);
     assert(
       !selected.some((item) => item.category === 'good_news'),
-      'good_news must be omitted (not evergreen-backfilled) when today\'s live bank has none'
+      'good_news must be omitted when today\'s live bank has none'
     );
   }
 
@@ -148,116 +138,30 @@ async function main() {
     }
   }
 
-  // --- D/F: live category content is preferred over evergreen; evergreen
-  // only fills categories with zero live rows today ---
+  // --- live category content is selected as-is; missing categories are not fabricated ---
   {
     const bankDate = getBankDateString();
     insertBankRow(bankDate, 'science', 'LIVE_SCIENCE_ITEM_UNIQUE_TEXT');
-    // count=20 exceeds the max possible distinct categories (10), so the
-    // selection loop exhausts every available category exactly once --
-    // deterministic regardless of the non-seeded category shuffle.
     const selected = selectBankItemsForDevice('device-live-preference', bankDate, '2026-09-19', null, null, 20);
     const scienceItems = selected.filter((item) => item.category === 'science');
     assert.strictEqual(scienceItems.length, 1, 'exactly one science item must be selected');
     assert.strictEqual(
       scienceItems[0].content_text,
       'LIVE_SCIENCE_ITEM_UNIQUE_TEXT',
-      'live science content must be preferred over the evergreen science fallback'
+      'live science content must be selected without fallback substitution'
     );
-    // Every other evergreen-compatible category had zero live rows today, so
-    // they must all have been evergreen-backfilled and selectable -- except
-    // country_fact, which is architecturally evergreen-compatible but has no
-    // seed catalog entries in this task by explicit product decision (no
-    // invented country facts were added just to fill it), so it is expected
-    // to be legitimately absent here, not a bug.
-    const nonScienceCategories = new Set(selected.map((item) => item.category));
-    for (const category of EVERGREEN_COMPATIBLE_CATEGORIES) {
-      if (category === 'science' || category === 'country_fact') continue;
-      assert(nonScienceCategories.has(category), `evergreen must backfill missing category "${category}" when live has none today`);
-    }
-    assert(!nonScienceCategories.has('country_fact'), 'country_fact must not appear when the seed catalog has no entries for it (no fabricated country facts)');
-  }
-
-  // --- evergreen backfill occurs ONLY for missing evergreen-compatible categories ---
-  {
-    const backfill = bankTest.getEvergreenBackfillRows(new Set(['humor', 'science']), null);
-    assert(!backfill.some((row) => row.category === 'humor'), 'evergreen must not backfill a category that already has live rows (humor)');
-    assert(!backfill.some((row) => row.category === 'science'), 'evergreen must not backfill a category that already has live rows (science)');
-    assert(backfill.some((row) => row.category === 'idiom'), 'evergreen must backfill a genuinely missing category (idiom)');
-    assert(backfill.some((row) => row.category === 'technology'), 'evergreen must backfill a genuinely missing category (technology)');
-  }
-
-  // --- evergreen must NEVER backfill holiday or on_this_day ---
-  {
-    const fullyMissing = bankTest.getEvergreenBackfillRows(new Set(), null);
-    assert(!fullyMissing.some((row) => row.category === 'holiday'), 'evergreen must never backfill holiday');
-    assert(!fullyMissing.some((row) => row.category === 'on_this_day'), 'evergreen must never backfill on_this_day');
-    assert(
-      fullyMissing.every((row) => EVERGREEN_COMPATIBLE_CATEGORIES.has(row.category)),
-      'every evergreen backfill row must belong to an evergreen-compatible category'
+    assert.deepStrictEqual(
+      new Set(selected.map((item) => item.category)),
+      new Set(['good_news', 'science']),
+      'selection must contain only live categories present in the DB for that day'
     );
   }
 
-  // --- a total live-bank failure (zero rows for today) still supplies
-  // evergreen-compatible content, with holiday/on_this_day simply absent ---
+  // --- a total live-bank failure (zero rows for today) supplies no bank facts ---
   {
     const failedBankDate = 'no-bank-rows-exist-for-this-date';
     const selected = selectBankItemsForDevice('device-total-failure', failedBankDate, '2026-09-19', null, null, 20);
-    assert(selected.length > 0, 'a total Daily Bank generation failure must still yield evergreen-compatible content');
-    assert(
-      selected.every((item) => item.category !== 'holiday' && item.category !== 'on_this_day'),
-      'a failed bank day must never fabricate holiday/on_this_day content via evergreen'
-    );
-    const categoriesSeen = new Set(selected.map((item) => item.category));
-    // country_fact is architecturally evergreen-compatible but intentionally
-    // has zero seed catalog entries in this task (no invented country facts),
-    // so it is correctly absent here even on a fully failed bank day.
-    assert(
-      categoriesSeen.size >= EVERGREEN_COMPATIBLE_CATEGORIES.size - 1,
-      'a failed bank day should surface every evergreen-compatible category that actually has seed content'
-    );
-    assert(!categoriesSeen.has('country_fact'), 'country_fact must not appear on a failed bank day when the seed catalog has no entries for it');
-    assert(!categoriesSeen.has('good_news'), 'good_news must never appear via evergreen, even on a fully failed bank day');
-  }
-
-  // --- evergreen IDs/content keys are deterministic across days/runs ---
-  {
-    // bankItemToCandidate's content_key is derived only from item.id (see
-    // slotPlanner.js) -- an evergreen catalog entry's id is a fixed,
-    // hand-authored string, never a freshly-generated per-day row id, so its
-    // content_key is bankDate-independent by construction. Proven two ways,
-    // neither dependent on selectBankItemsForDevice's non-seeded random
-    // in-category pick (which would make a "same day" comparison flaky):
-    // (1) the same fixed catalog entry yields the same content_key on
-    // repeated direct calls, and (2) getEvergreenBackfillRows -- a pure,
-    // non-random filter -- surfaces the exact same object/id when invoked
-    // twice, simulating two independent "runs".
-    const fixedEvergreenItem = bankTest.EVERGREEN_CONTENT_BANK.find((item) => item.id === 'evergreen-humor-1');
-    assert(fixedEvergreenItem, 'fixture assumption: evergreen-humor-1 must exist in the seed catalog');
-    const candidateA = plannerTest.bankItemToCandidate(fixedEvergreenItem);
-    const candidateB = plannerTest.bankItemToCandidate(fixedEvergreenItem);
-    assert.strictEqual(candidateA.content_key, candidateB.content_key, 'the same evergreen catalog entry must always produce the same content_key');
-    assert.strictEqual(candidateA.content_key, 'bank_evergreen-humor-1', 'evergreen content_key must be derived from its fixed catalog id, not a fresh row id');
-
-    const runOne = bankTest.getEvergreenBackfillRows(new Set(), null).find((item) => item.id === 'evergreen-humor-1');
-    const runTwo = bankTest.getEvergreenBackfillRows(new Set(), null).find((item) => item.id === 'evergreen-humor-1');
-    assert(runOne && runTwo, 'evergreen-humor-1 must be present across independent backfill runs');
-    assert.strictEqual(
-      plannerTest.bankItemToCandidate(runOne).content_key,
-      plannerTest.bankItemToCandidate(runTwo).content_key,
-      'the same evergreen item must produce the same content_key across independent backfill runs'
-    );
-  }
-
-  // --- evergreen content still passes through Content Memory anti-repeat ---
-  {
-    const evergreenItem = bankTest.EVERGREEN_CONTENT_BANK.find((item) => item.category === 'quote');
-    const candidate = plannerTest.bankItemToCandidate(evergreenItem);
-    const penalty = plannerTest.antiRepeatPenalty(candidate, {
-      contentKeys: new Set([candidate.content_key]),
-      topicKeys: new Set(),
-    });
-    assert.strictEqual(penalty, 45, 'a previously-shown evergreen content_key must receive the same anti-repeat penalty as any other bank item');
+    assert.deepStrictEqual(selected, [], 'a failed/empty live bank day must not yield static fallback facts');
   }
 
   // --- no extra Daily Bank OpenAI call ---
@@ -298,14 +202,14 @@ async function main() {
     }
   }
 
-  // --- one per-user OpenAI call remains unchanged; per-user prompt stays
-  // bounded and never receives the full evergreen catalog ---
+  // --- one per-user OpenAI call remains unchanged; empty live bank yields generic slots only ---
   {
     db.prepare('INSERT OR IGNORE INTO devices (device_id, timezone, created_at) VALUES (?, ?, ?)')
       .run('bank-sources-e2e-device', 'Asia/Almaty', '2026-09-01 00:00:00');
     // Deliberately no daily_content_bank rows for today's real bankDate --
-    // simulates a fully empty/failed live bank so evergreen backfill is
-    // exercised through the real generateBatch path.
+    // simulates a fully empty/failed live bank. The batch should still be
+    // generated from non-bank planner slots, but factual bank-derived slots
+    // must be absent.
 
     let openAiCallCount = 0;
     let capturedRequest = null;
@@ -352,21 +256,16 @@ async function main() {
         {}
       );
 
-      assert.strictEqual(openAiCallCount, 1, 'per-user batch generation must still make exactly one OpenAI call with evergreen active');
+      assert.strictEqual(openAiCallCount, 1, 'per-user batch generation must still make exactly one OpenAI call with an empty live bank');
       // Content-quality rebuild (requirement B): no more padding to exactly
       // BATCH_SIZE -- just bounded by it.
       assert(result.phrases.length > 0 && result.phrases.length <= BATCH_SIZE);
 
       const payload = JSON.parse(capturedRequest.messages[1].content);
-      assert(payload.slots.length > 0 && payload.slots.length <= BATCH_SIZE, 'the per-user prompt must stay bounded at BATCH_SIZE slots regardless of evergreen catalog size');
+      assert(payload.slots.length > 0 && payload.slots.length <= BATCH_SIZE, 'the per-user prompt must stay bounded at BATCH_SIZE slots with an empty live bank');
       assert.strictEqual(result.phrases.length, payload.slots.length, 'every planned slot got a phrase back from the mock, so none should be dropped');
-
-      const payloadText = JSON.stringify(payload);
-      const catalogTextsPresent = bankTest.EVERGREEN_CONTENT_BANK.filter((item) => payloadText.includes(item.content_text)).length;
-      assert(
-        catalogTextsPresent < bankTest.EVERGREEN_CONTENT_BANK.length,
-        'the per-user prompt must never contain the full evergreen catalog, only the selected shortlist'
-      );
+      assert(!payload.slots.some((slot) => slot.source === 'daily_bank'), 'empty live bank must not produce bank-derived slots');
+      assert(!payload.slots.some((slot) => slot.bank_category), 'empty live bank must not attach bank categories to slots');
     } finally {
       Module._load = originalLoad;
       delete process.env.OPENAI_API_KEY;

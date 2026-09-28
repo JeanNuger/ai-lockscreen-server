@@ -1,5 +1,4 @@
 const db = require('./db');
-const EVERGREEN_CONTENT_BANK = require('./evergreenContentBank');
 
 // Fixed category set for daily_content_bank rows. Step 2 (personalization,
 // not this task) will filter/select by these when building a device's batch,
@@ -21,33 +20,6 @@ const BANK_CATEGORIES = [
   'country_fact',
   'good_news',
 ];
-
-// Bank categories that are NOT tied to a specific calendar date, so a static
-// evergreen catalog item is an acceptable substitute when today's live bank
-// has none. holiday/on_this_day are deliberately excluded -- they require
-// date-verified web-search accuracy (see buildBankPrompt) that no static
-// catalog entry could honestly claim; if today's bank lacks them, the
-// product prefers omitting them over risking a stale/wrong date claim.
-// good_news is excluded for the same reason: it is a claim about a recent,
-// current development, and a static catalog entry could only ever present
-// old news as if it were new -- omitting it on a day the live bank has none
-// is correct, not a gap to paper over. country_fact IS included: it is not
-// date-sensitive, only country-sensitive, so a static entry is honest as
-// long as it is genuinely tagged with a real country -- no fabricated
-// country_fact entries are added to the seed catalog just to fill this
-// category (see evergreenContentBank.js); if none exist for a given
-// country, selectBankItemsForDevice simply has nothing to offer there.
-const EVERGREEN_COMPATIBLE_CATEGORIES = new Set([
-  'humor',
-  'idiom',
-  'statistic',
-  'quote',
-  'science',
-  'technology',
-  'economics',
-  'fact',
-  'country_fact',
-]);
 
 // How many bank items to ask the model for. Not a hard contract with the
 // model -- generateDailyBank() below accepts whatever valid array it gets
@@ -220,11 +192,9 @@ function parseBankItems(rawText, defaultBankDate, preparedDates = [defaultBankDa
 // each prepared date (see buildBankPrompt's own request for exactly this),
 // and at least one idiom for the main generation day (word_learning's only
 // live source -- see mapBankItemType in slotPlanner.js). Purely diagnostic:
-// generateDailyBank() still saves whatever valid items it has either way:
+// generateDailyBank() still saves whatever valid items it has either way;
 // selectBankItemsForDevice/slotPlanner already handle a missing category by
-// omitting that slot (holiday/on_this_day) or falling back to the evergreen
-// catalog (idiom) -- this just makes the gap visible in logs instead of only
-// showing up later as "why didn't holiday_today appear today".
+// omitting that slot.
 function logMissingRequiredCategories(items, bankDate, preparedDates) {
   for (const date of preparedDates) {
     for (const category of DATE_SENSITIVE_CATEGORIES) {
@@ -319,8 +289,7 @@ async function generateDailyBank() {
 }
 
 // Accepts both a JSON-encoded tags string (live daily_content_bank rows, as
-// stored in SQLite) and a plain array (the static evergreen catalog, which
-// is authored as ordinary JS, not round-tripped through SQLite/JSON).
+// stored in SQLite) and a plain array (handy for direct unit-test objects).
 function parseTags(rawTags) {
   if (!rawTags) {
     return [];
@@ -387,21 +356,6 @@ function resolveDateSensitiveBankDate(deviceLocalDate) {
     .sort((a, b) => dateDistanceDays(a, deviceLocalDate) - dateDistanceDays(b, deviceLocalDate))[0];
 }
 
-// Static fallback for evergreen-compatible categories that have zero live
-// rows in today's bank -- covers both a genuinely missing category and a
-// total generateDailyBank() failure (every category ends up "missing" that
-// day) without any additional OpenAI call. Never touches holiday/on_this_day
-// (excluded from EVERGREEN_COMPATIBLE_CATEGORIES) and never returns an item
-// for a category that already has live content today, so live rows always
-// take priority. Shares isBankItemAllowedForCountry with live rows so the
-// same country-tag rules apply to evergreen items.
-function getEvergreenBackfillRows(liveCategoriesToday, countryCode) {
-  return EVERGREEN_CONTENT_BANK
-    .filter((item) => EVERGREEN_COMPATIBLE_CATEGORIES.has(item.category))
-    .filter((item) => !liveCategoriesToday.has(item.category))
-    .filter((item) => isBankItemAllowedForCountry(item, countryCode));
-}
-
 // Random-but-varied-by-category selection for one device's batch context.
 // bankDate is the shared Asia/Almaty product-day date the bank was generated under
 // (see getBankDateString above); deviceLocalDate is that same device's own
@@ -423,14 +377,6 @@ function getEvergreenBackfillRows(liveCategoriesToday, countryCode) {
 // remaining batch that day once categories cycle out, which is worse than
 // occasionally repeating a category within the same day.
 //
-// Live rows always take priority: the evergreen catalog only ever backfills
-// an evergreen-compatible category (see EVERGREEN_COMPATIBLE_CATEGORIES)
-// that has ZERO live rows for bankDate -- it never supplements or replaces a
-// category that already has live content, and it never applies to
-// holiday/on_this_day. This is also what makes a total generateDailyBank()
-// failure degrade gracefully: every evergreen-compatible category is
-// "missing" that day, so evergreen naturally backstops all of them, while
-// holiday/on_this_day are simply omitted rather than guessed at.
 function selectBankItemsForDevice(
   deviceId,
   bankDate,
@@ -457,9 +403,7 @@ function selectBankItemsForDevice(
   const liveBankRows = sharedRows
     .concat(dateSensitiveRows)
     .filter((row) => isBankItemAllowedForCountry(row, countryCode));
-  const liveCategoriesToday = new Set(liveBankRows.map((row) => row.category));
-  const backfillRows = getEvergreenBackfillRows(liveCategoriesToday, countryCode);
-  const bankRows = liveBankRows.concat(backfillRows);
+  const bankRows = liveBankRows;
   if (bankRows.length === 0) {
     return [];
   }
@@ -497,16 +441,9 @@ function selectBankItemsForDevice(
     selectedCategories.add(category);
   }
 
-  const liveCategorySet = new Set(liveBankRows.map((row) => row.category));
-  const liveCategories = [...byCategory.keys()]
+  const shuffledCategories = [...byCategory.keys()]
     .filter((category) => !selectedCategories.has(category))
-    .filter((category) => liveCategorySet.has(category))
     .sort(() => Math.random() - 0.5);
-  const backfillCategories = [...byCategory.keys()]
-    .filter((category) => !selectedCategories.has(category))
-    .filter((category) => !liveCategorySet.has(category))
-    .sort(() => Math.random() - 0.5);
-  const shuffledCategories = liveCategories.concat(backfillCategories);
   for (const category of shuffledCategories) {
     if (selected.length >= count + selectedCategories.size) {
       break;
@@ -557,13 +494,10 @@ module.exports = {
   getBankDateString,
   getPreparedBankDates,
   BANK_CATEGORIES,
-  EVERGREEN_COMPATIBLE_CATEGORIES,
   _test: {
     countryTagsFromBankItem,
     isBankItemAllowedForCountry,
     normalizeCountryCode,
-    getEvergreenBackfillRows,
-    EVERGREEN_CONTENT_BANK,
     replaceBankItemsForDate,
     replaceBankItemsForDates,
     parseBankItems,

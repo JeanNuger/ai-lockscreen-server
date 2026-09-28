@@ -41,6 +41,19 @@ async function testRejectRepairFallback() {
     INSERT INTO daily_content_bank (bank_date, category, content_text, tags)
     VALUES (?, ?, ?, ?)
   `).run(bankDate, 'idiom', 'Silver lining means a hopeful part of a hard situation.', JSON.stringify(['global']));
+  for (const [category, contentText] of [
+    ['humor', 'The average person walks past a lost remote three times.'],
+    ['quote', '"Simplicity is the ultimate sophistication." -- Leonardo da Vinci'],
+    ['science', 'Octopuses have three hearts.'],
+    ['technology', 'The first computer mouse was carved out of wood.'],
+    ['economics', 'Salary comes from the Latin word for salt.'],
+    ['fact', 'Bananas are botanically classified as berries.'],
+  ]) {
+    db.prepare(`
+      INSERT INTO daily_content_bank (bank_date, category, content_text, tags)
+      VALUES (?, ?, ?, ?)
+    `).run(bankDate, category, contentText, JSON.stringify(['global']));
+  }
   db.prepare(`
     INSERT INTO devices (device_id, name, gender, birth_date, timezone, created_at)
     VALUES (?, ?, ?, ?, ?, ?)
