@@ -221,20 +221,19 @@ function isReusableNormalBatch(row) {
   return Boolean(row && row.source === 'openai' && !isWholeBatchFallback(row));
 }
 
+// A whole-batch fallback (empty phrases -- see contentGenerator.js's
+// buildLoggedFallbackResult) is NEVER reused, no matter how many of them
+// pile up for this key: the server has no ready-made phrases to hand back a
+// second time, so every request after a fallback must try OpenAI again,
+// instead of quietly serving an empty batch from cache. Rows are ordered
+// DESC by id, so this returns the most recent real ('openai', non-fallback)
+// batch, or null if there isn't one yet.
 function selectReusableBatch(deviceId, window, localDate, supportsMorningPack) {
   if (!deviceId || !window || !localDate) {
     return null;
   }
   const rows = selectReusableBatchStatement.all(deviceId, window, localDate, supportsMorningPack ? 1 : 0);
-  if (rows.length === 0) {
-    return null;
-  }
-  const latestNormal = rows.find((row) => isReusableNormalBatch(row));
-  if (latestNormal) {
-    return latestNormal;
-  }
-  const fallbackRows = rows.filter((row) => isWholeBatchFallback(row));
-  return fallbackRows.length >= 2 ? fallbackRows[0] : null;
+  return rows.find((row) => isReusableNormalBatch(row)) || null;
 }
 
 // The 'night' window spans midnight: a request at 19:30 on day D (the night

@@ -12,7 +12,6 @@ const db = require('../src/db');
 const { BATCH_SIZE, STYLE_IDS } = require('../src/constants');
 const {
   generateBatch,
-  buildFallbackBatch,
   _test: contentTest,
 } = require('../src/contentGenerator');
 const {
@@ -62,13 +61,12 @@ function normalizedTexts(items) {
   return items.map((item) => item.text.trim().replace(/\s+/g, ' ').toLowerCase());
 }
 
-// expectedLength defaults to BATCH_SIZE (the normal case: every direct
-// assembleBatchFromGeneratedPhrases call in this file uses the old
-// fallback-fill path, always exactly 12) -- but a real generateBatch() run
-// through the repair flow can now legitimately come back shorter than 12: a
-// slot still rejected after the one repair round is dropped, not
-// generic-filled (see contentGenerator.js's dropMissing/B5). Callers that
-// exercise that exact scenario pass the real expected count explicitly.
+// expectedLength defaults to BATCH_SIZE, the common case when nothing was
+// rejected -- but the server no longer has any ready-made phrase pool to pad
+// a short batch with (see contentGenerator.js's fillWithFallbackPhrases), so
+// any call here with at least one rejected/missing phrase legitimately comes
+// back shorter than 12. Callers that exercise that pass the real expected
+// count explicitly.
 function assertFinalBatch(items, expectedLength = BATCH_SIZE) {
   assert.strictEqual(items.length, expectedLength, `final batch must be exactly ${expectedLength}`);
   assert.strictEqual(new Set(normalizedTexts(items)).size, expectedLength, 'final texts must be unique');
@@ -106,24 +104,6 @@ function captureConsole(callback) {
 }
 
 async function main() {
-  const fallback = buildFallbackBatch('ru');
-  assert.strictEqual(fallback.length, BATCH_SIZE, 'fallback batch must stay exactly 12');
-  assert.strictEqual(new Set(fallback.map((p) => p.style_id)).size, BATCH_SIZE, 'fallback styles must be unique');
-
-  const badFallbackText = fallback.map((p) => p.text).join('\n');
-  for (const bad of [
-    'Скорее всего, есть одна вещь, с которой стоит начать',
-    'Маленькие улучшения тоже меняют форму',
-    'В дне есть место для более точного угла',
-    'Следующему действию не нужна церемония',
-    'Чистый старт подходит любому дню',
-    'Экран блокировки',
-    'Обои',
-    'приложения',
-  ]) {
-    assert(!badFallbackText.includes(bad), `fallback must not include generic bad phrase: ${bad}`);
-  }
-
   // Content-quality rebuild (requirement A): every stylistic filter (stop
   // phrases/postcard-cliche guard, question mark, question-shape, generic-bad
   // phrase list, imperative openers, incomplete-sentence guard, coaching,
@@ -177,11 +157,14 @@ async function main() {
     'a question-shaped phrase without "?" must no longer cause a rejection'
   );
 
+  // No ready-made phrase pool exists any more to pad a short batch with --
+  // a rejected/duplicate phrase's slot is simply left out, so the batch
+  // comes back shorter than BATCH_SIZE instead of being padded back up to it.
   const duplicateText = contentTest.assembleBatchFromGeneratedPhrases(
     [...validTwelve.slice(0, 11), phrase('Конкретная строка 1', 'O9')],
     'ru'
   );
-  assertFinalBatch(duplicateText.phrases);
+  assertFinalBatch(duplicateText.phrases, 11);
   assert.strictEqual(duplicateText.generatedCount, 11);
   assert.strictEqual(duplicateText.rejectedCount, 1);
   assert.strictEqual(duplicateText.fallbackFillCount, 1);
@@ -190,21 +173,24 @@ async function main() {
     [...validTwelve.slice(0, 10), phrase('Очень длинная строка '.repeat(20)), phrase('Ещё одна очень длинная строка '.repeat(20))],
     'ru'
   );
-  assertFinalBatch(tooLongText.phrases);
+  assertFinalBatch(tooLongText.phrases, 10);
   assert.strictEqual(tooLongText.generatedCount, 10);
   assert.strictEqual(tooLongText.rejectedCount, 2);
   assert.strictEqual(tooLongText.fallbackFillCount, 2);
 
+  // Every phrase invalid means zero usable text at all -- the batch comes
+  // back empty (phrases: null, from validateFinalBatch's length>=1 check),
+  // never filled with generic fallback phrases.
   const overlongRu = 'ы'.repeat(contentTest.LOCK_SCREEN_TEXT_MAX_LENGTH + 20);
   const allInvalid = contentTest.assembleBatchFromGeneratedPhrases(
     Array.from({ length: BATCH_SIZE }, () => phrase(overlongRu)),
     'ru'
   );
-  assertFinalBatch(allInvalid.phrases);
+  assert.strictEqual(allInvalid.phrases, null, 'a batch with zero usable phrases must come back empty, not fallback-filled');
   assert.strictEqual(allInvalid.generatedCount, 0);
   assert.strictEqual(allInvalid.rejectedCount, BATCH_SIZE);
   assert.strictEqual(allInvalid.fallbackFillCount, BATCH_SIZE);
-  assert.strictEqual(allInvalid.reason, 'all_invalid_fallback');
+  assert.strictEqual(allInvalid.reason, 'final_assembly_fallback');
 
   const invalidStyles = contentTest.assembleBatchFromGeneratedPhrases(
     validTwelve.map((p, i) => ({ ...p, style_id: i < 3 ? 'BROKEN_STYLE' : 'A1' })),
@@ -279,7 +265,7 @@ async function main() {
     { system_language: 'ru' },
     null
   ));
-  assertFinalBatch(noTimezoneLogs.result.phrases);
+  assert.deepStrictEqual(noTimezoneLogs.result.phrases, [], 'no OpenAI key must return an empty batch, not fallback phrases');
   assert(
     noTimezoneLogs.warnings.some((line) => line === 'DATE_CONTEXT_UNAVAILABLE reason=missing_timezone'),
     'missing timezone must log a privacy-safe diagnostic reason'
@@ -347,7 +333,7 @@ async function main() {
     { countryCode: 'KZ', city: 'Almaty' }
   ));
   const generated = generatedLogs.result;
-  assert.strictEqual(generated.phrases.length, BATCH_SIZE, 'fallback generateBatch must still return 12');
+  assert.deepStrictEqual(generated.phrases, [], 'no OpenAI key must return an empty batch, not fallback phrases');
   const context = JSON.parse(generated.context);
   assert.strictEqual(context.now.language, 'Russian', 'Russian language should remain output language');
   assert.strictEqual(context.now.country, 'KZ', 'IP country must win over Android locale region');
@@ -376,7 +362,7 @@ async function main() {
     { system_language: 'ru' },
     null
   ));
-  assertFinalBatch(noKeyLogs.result.phrases);
+  assert.deepStrictEqual(noKeyLogs.result.phrases, [], 'no OpenAI key must return an empty batch, not fallback phrases');
   assert.strictEqual(noKeyLogs.result.source, 'fallback');
   assert(noKeyLogs.logs.some((line) => line.includes('reason=no_api_key_fallback')), 'no API key path should log reason');
   assert.strictEqual(
@@ -613,7 +599,7 @@ async function main() {
       { system_language: 'ru' },
       null
     ));
-    assertFinalBatch(openAiErrorLogs.result.phrases);
+    assert.deepStrictEqual(openAiErrorLogs.result.phrases, [], 'OpenAI outage must return an empty batch, not fallback phrases');
     assert.strictEqual(openAiErrorLogs.result.source, 'fallback');
     assert(openAiErrorLogs.logs.some((line) => line.includes('reason=openai_error')), 'OpenAI error path should log fallback reason');
     assert(openAiErrorLogs.errors.some((line) => line.includes('reason=openai_error')), 'OpenAI error path should log one error line');

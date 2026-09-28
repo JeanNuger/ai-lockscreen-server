@@ -171,7 +171,7 @@ async function testDifferentWindowOrDateGeneratesNormally() {
   });
 }
 
-async function testWholeBatchFallbackAllowsOneRetry() {
+async function testWholeBatchFallbackIsNeverReusedButSuccessIs() {
   const deviceId = 'fallback-retry-device';
   insertFullDevice(deviceId);
   let calls = 0;
@@ -179,7 +179,7 @@ async function testWholeBatchFallbackAllowsOneRetry() {
     calls += 1;
     if (calls === 1) {
       return {
-        phrases: [makePhrase('fallback one')],
+        phrases: [],
         source: 'fallback',
         context: '{}',
         trace: { meta: {}, whole_batch_fallback: { flag: true, reason: 'openai_error' } },
@@ -196,9 +196,41 @@ async function testWholeBatchFallbackAllowsOneRetry() {
     const first = await requestJson(server, pathName);
     const second = await requestJson(server, pathName);
     const third = await requestJson(server, pathName);
-    assert.strictEqual(calls, 2, 'one retry after whole-batch fallback is allowed, third request reuses');
+    assert.deepStrictEqual(first.json.phrases, [], 'a whole-batch fallback response must be empty, not filled with fallback phrases');
+    assert.strictEqual(calls, 2, 'every request after a fallback must retry OpenAI, and a real success must then be cached');
     assert.notDeepStrictEqual(second.json.phrases, first.json.phrases, 'second request after fallback must regenerate');
-    assert.deepStrictEqual(third.json.phrases, second.json.phrases, 'third request must reuse the retry result');
+    assert.deepStrictEqual(third.json.phrases, second.json.phrases, 'third request must reuse the successful retry, not regenerate again');
+  });
+}
+
+// Regression coverage for the reuse rule fix: previously, once 2 whole-batch
+// fallback rows piled up for the same key, selectReusableBatch would start
+// serving the latest one back from cache instead of retrying OpenAI. Now
+// that a fallback batch is empty (no more FALLBACK_PHRASES to fill it with),
+// that old behavior would mean silently serving an empty batch forever once
+// a device hit 2 failures -- so a fallback must never be reused, no matter
+// how many pile up.
+async function testRepeatedFallbacksAlwaysRetry() {
+  const deviceId = 'repeated-fallback-device';
+  insertFullDevice(deviceId);
+  let calls = 0;
+  await withMockedBatchRoute(async () => {
+    calls += 1;
+    return {
+      phrases: [],
+      source: 'fallback',
+      context: '{}',
+      trace: { meta: {}, whole_batch_fallback: { flag: true, reason: 'openai_error' } },
+    };
+  }, async (server) => {
+    const pathName = `/api/v1/batch?device_id=${deviceId}&window=day&timezone=Asia%2FAlmaty&local_date=2026-09-26`;
+    const first = await requestJson(server, pathName);
+    const second = await requestJson(server, pathName);
+    const third = await requestJson(server, pathName);
+    assert.strictEqual(calls, 3, 'a device stuck failing must retry OpenAI on every single request, never reuse a cached empty batch');
+    assert.deepStrictEqual(first.json.phrases, []);
+    assert.deepStrictEqual(second.json.phrases, []);
+    assert.deepStrictEqual(third.json.phrases, []);
   });
 }
 
@@ -362,7 +394,8 @@ async function testNightWindowReuseKeyCrossesMidnight() {
 async function main() {
   await testSecondRequestReusesBatchAndTrace();
   await testDifferentWindowOrDateGeneratesNormally();
-  await testWholeBatchFallbackAllowsOneRetry();
+  await testWholeBatchFallbackIsNeverReusedButSuccessIs();
+  await testRepeatedFallbacksAlwaysRetry();
   await testConcurrentRequestsShareOneGeneration();
   await testProfileRequiredFlag();
   await testNightWindowReuseKeyCrossesMidnight();

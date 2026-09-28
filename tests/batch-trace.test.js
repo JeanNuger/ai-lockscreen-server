@@ -169,8 +169,9 @@ async function testWholeBatchFallback() {
           this.chat = {
             completions: {
               // Simulate a hard OpenAI outage -- this is the path that should
-              // trigger buildLoggedFallbackResult('openai_error') and replace
-              // the ENTIRE batch with buildFallbackBatch() output.
+              // trigger buildLoggedFallbackResult('openai_error') and return
+              // an empty batch (no more ready-made fallback phrases to fill
+              // it with).
               create: async () => {
                 throw new Error('simulated OpenAI outage');
               },
@@ -199,8 +200,8 @@ async function testWholeBatchFallback() {
       { localDate: getBankDateString() }
     );
 
-    assert.strictEqual(result.source, 'fallback', 'openai outage must fall back to the static batch');
-    assert.strictEqual(result.phrases.length, 12);
+    assert.strictEqual(result.source, 'fallback', 'openai outage must fall back to an empty batch');
+    assert.strictEqual(result.phrases.length, 0, 'openai outage must return an empty batch, not filled with fallback phrases');
     assert(result.trace, 'trace must be returned even on whole-batch fallback');
     assert.strictEqual(result.trace.whole_batch_fallback.flag, true, 'outage must be flagged as a whole-batch fallback');
     assert.strictEqual(result.trace.whole_batch_fallback.reason, 'openai_error');
@@ -209,8 +210,7 @@ async function testWholeBatchFallback() {
       { name: true, birth_date: true, gender: true },
       'whole-batch fallback trace must keep boolean profile field presence'
     );
-    assert.strictEqual(result.trace.final.length, 12, 'whole-batch fallback trace still records 12 final entries');
-    assert(result.trace.final.every((item) => item.final_source === 'fallback_generic'), 'every final entry must be labeled fallback_generic');
+    assert.strictEqual(result.trace.final.length, 0, 'whole-batch fallback trace records no final entries when the batch is empty');
 
     console.log('[test-trace-whole-batch-fallback]', JSON.stringify(result.trace));
     return result.trace;

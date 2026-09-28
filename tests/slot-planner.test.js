@@ -601,6 +601,12 @@ async function main() {
   // quality rebuild, requirement A). An overlong text is now the reliable way
   // to force a rejection regardless of language.
   const overlongText = 'x'.repeat(contentTest.LOCK_SCREEN_TEXT_MAX_LENGTH + 20);
+  // slotSubset is all 'everyday_lifehack' -- a non-anchor type with no
+  // grounded/ANCHOR_FALLBACK_TEXT fallback of its own, and the server no
+  // longer has a generic FALLBACK_PHRASES pool to draw from either. A
+  // rejected slot like this is simply dropped (dropMissing=true, matching
+  // generateBatch's real production call sites) rather than filled with
+  // any fallback text.
   const partial = contentTest.assembleBatchFromGeneratedPhrases(
     [
       ...validSlotPhrases(slotSubset).slice(0, 10),
@@ -609,15 +615,20 @@ async function main() {
     ],
     'en',
     {},
-    slotSubset
+    slotSubset,
+    null,
+    true
   );
   assert.strictEqual(partial.generatedCount, 11, 'partial invalid response must preserve valid phrases');
   assert.strictEqual(partial.rejectionReasons.basic_quality, 1);
   assert.strictEqual(partial.fallbackFillCount, 1);
-  assert.strictEqual(partial.phrases[10].slot_id, slotSubset[10].slot_id, 'middle slot fallback must stay in that slot position');
-  assert.notStrictEqual(partial.phrases[10].text, overlongText);
-  assert.strictEqual(partial.phrases[9].text, 'Concrete slot line 10', 'valid phrase before rejected middle slot must not shift');
-  assert.strictEqual(partial.phrases[11].text, 'Concrete surviving line', 'valid phrase after rejected middle slot must not shift');
+  assert.strictEqual(partial.phrases.length, 11, 'a rejected non-anchor slot with no fallback text must simply be dropped');
+  assert(
+    !partial.phrases.some((item) => item.slot_id === slotSubset[10].slot_id),
+    'the rejected slot must be absent from the final batch entirely, not filled with generic fallback text'
+  );
+  assert.strictEqual(partial.phrases[9].text, 'Concrete slot line 10', 'valid phrase before the dropped slot must not shift');
+  assert.strictEqual(partial.phrases[10].text, 'Concrete surviving line', 'valid phrase after the dropped slot must shift down to fill the gap');
 
   const morningSlots = planSlots({ ...baseInput, window: 'morning' }, { seed: 'morning-reject-seed' }).slots;
   const morningRejected = contentTest.assembleBatchFromGeneratedPhrases(
@@ -657,6 +668,22 @@ async function main() {
 
   function generatedWithRejectedFirst(slots) {
     const generated = validSlotPhrases(slots);
+    generated[0] = { slot_id: slots[0].slot_id, text: overlongText, style_id: STYLE_IDS[0] };
+    return generated;
+  }
+
+  // Same as generatedWithRejectedFirst, but with Cyrillic filler text for the
+  // 11 non-anchor slots -- without a Russian generic fallback pool to paper
+  // over it any more, the plain-English "Concrete slot line N" filler from
+  // validSlotPhrases would fail isValidLanguageText's ru script check on
+  // every one of those slots, not just the deliberately-overlong anchor slot
+  // this test targets.
+  function generatedWithRejectedFirstRu(slots) {
+    const generated = slots.map((slot, index) => ({
+      slot_id: slot.slot_id,
+      text: `Конкретная строка ${index + 1}`,
+      style_id: STYLE_IDS[index],
+    }));
     generated[0] = { slot_id: slots[0].slot_id, text: overlongText, style_id: STYLE_IDS[0] };
     return generated;
   }
@@ -721,7 +748,7 @@ async function main() {
   );
   assert.strictEqual(horoscopeAnchorRejected.phrases[0].text, 'Virgo energy today favors calm order');
   const ruHoroscopeAnchorRejected = contentTest.assembleBatchFromGeneratedPhrases(
-    generatedWithRejectedFirst(horoscopeAnchorSlots),
+    generatedWithRejectedFirstRu(horoscopeAnchorSlots),
     'ru',
     {},
     horoscopeAnchorSlots
@@ -747,7 +774,7 @@ async function main() {
   );
   assert.strictEqual(numerologyAnchorRejected.phrases[0].text, 'Personal day 3 symbolically favors ideas and contact');
   const ruNumerologyAnchorRejected = contentTest.assembleBatchFromGeneratedPhrases(
-    generatedWithRejectedFirst(numerologyAnchorSlots),
+    generatedWithRejectedFirstRu(numerologyAnchorSlots),
     'ru',
     {},
     numerologyAnchorSlots
