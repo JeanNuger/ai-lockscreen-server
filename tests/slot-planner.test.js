@@ -896,7 +896,7 @@ async function main() {
     systemPromptText.trim().endsWith('Only JSON matching the schema: one phrase per slot, in slot order, with its slot_id.'),
     'system prompt must end with the exact mandated OUTPUT closing sentence'
   );
-  const sectionOrder = ['LANGUAGE', 'HARD LIMIT', 'VOICE', 'FACTS', 'SLOT TYPES', 'GOOD EXAMPLES', 'BAD EXAMPLES', 'WINDOW', 'REPAIR MODE', 'OUTPUT'];
+  const sectionOrder = ['LANGUAGE', 'HARD LIMIT', 'VOICE', 'FACTS', 'SLOT TYPES', 'WRITING STYLE', 'WINDOW', 'REPAIR MODE', 'OUTPUT'];
   const sectionIndexes = sectionOrder.map((heading) => {
     const match = new RegExp(`^${heading}\\b`, 'm').exec(systemPromptText);
     return match ? match.index : -1;

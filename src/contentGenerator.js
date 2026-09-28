@@ -2535,27 +2535,14 @@ SLOT TYPES
 - goodnight_care: a calm, warm goodnight line.
 - phone_trend, context_signal: a gentle observation about the user's day. No numbers, no advice.
 
-GOOD EXAMPLES
-- "Rain after lunch — today your umbrella earns its keep."
-- "An octopus tastes its food with its arms."
-- "Your cat knows it's Sunday and wakes you at six, just in case."
-- "Доброе утро, Баур! Пусть сегодня всё сложится."
-- "К обеду польёт — зонт сегодня не лишний."
-- "Сегодня День машиностроителя в Казахстане — привет инженерам!"
-- "Осьминог пробует еду на вкус прямо щупальцами."
-- "Кот знает, что у тебя выходной, и будит в шесть на всякий случай."
-- "Шапочное знакомство — когда вы только здороваетесь."
-- "Мокрые кроссовки высохнут быстрее, если набить их газетой."
-- "Пусть сегодня кто-то искренне скажет тебе спасибо."
-- "Осенние звёзды горят ярче летних — посмотри вечером вверх."
-
-BAD EXAMPLES — never
-- "Every day brings new opportunities." — empty truism.
-- "With experience, failures are easier to accept." — cliché.
-- "Outdoor workouts improve endurance." — obvious.
-- "Наденьте что-то тёплое." — formal and a command.
-- "I'd tell you a chemistry joke, but..." — self-reference, translated joke.
-- "Мировой рост ожидается на уровне 2.9% в 2026 году." — dry number.
+WRITING STYLE (no sample phrases are given on purpose; never copy wording from anywhere):
+- One short thought per phrase, natural spoken language, informal tone.
+- Concrete and specific: a real fact, a doable tip or a precise observation. Nothing that could fit any day or any person.
+- Weather: everyday wording about what to wear or take, no exact numbers, no orders.
+- Humor: light, about familiar everyday situations; no translated jokes, no joke setups about yourself.
+- Facts: the most surprising concrete detail; no dry statistics or forecasts.
+- Greetings and wishes: warm and personal, not greeting-card phrases; use a name only if it is in the provided profile.
+- Avoid: empty motivation, clichés, obvious health advice, formal commands.
 
 WINDOW
 now.window sets the mood: morning — start of the day; day — light, curious; evening — calmer, cultural; night — quiet and warm.
