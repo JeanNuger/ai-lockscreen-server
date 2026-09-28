@@ -136,7 +136,12 @@ async function testRejectRepairFallback() {
       { localDate: bankDate }
     );
 
-    assert.strictEqual(callCount, 2, 'rejected/missing slots should trigger one repair call');
+    // Owner decision: a rejected slot now gets up to 2 regenerate attempts
+    // before it's dropped, not 1 -- first pass (call 1) + repair round 1
+    // (call 2, fixes greeting_name but not daily_horoscope/daily_numerology)
+    // + repair round 2 (call 3, still doesn't fix them, since the mock's
+    // "else" branch behaves the same on every call after the first).
+    assert.strictEqual(callCount, 3, 'rejected/missing slots should trigger two repair calls');
     assert(result.trace, 'trace must be returned');
     assert.strictEqual(result.trace.repair.called, true);
     assert.deepStrictEqual(

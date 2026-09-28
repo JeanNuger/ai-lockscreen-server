@@ -554,6 +554,35 @@ function logMissingSlotPhrase(slot, validationContext) {
   }
 }
 
+// One line per slot dropped for good after both regenerate attempts (owner
+// decision: 2 attempts, not 1) -- type + the best-known rejection reason, so
+// a real content-quality problem shows up in the logs instead of just
+// silently shrinking the batch/pack. rejectionDetail is the matching entry
+// from collectUsablePhrases' rejectedDetails ({reason, detail, text}, see its
+// own comment), or undefined for a slot OpenAI never even produced text for
+// across either attempt.
+function logSlotDroppedAfterRepair(slot, rejectionDetail) {
+  console.warn(
+    `SLOT_DROPPED_AFTER_REPAIR type=${slot && slot.type ? slot.type : 'unknown'} slot_id=${slot && slot.slot_id ? slot.slot_id : 'unknown'} reason=${rejectionDetail ? (rejectionDetail.detail || rejectionDetail.reason) : 'unknown'}`
+  );
+}
+
+// Walks every planned slot and logs the ones absent from assembly.phrases
+// (the final, post-repair accepted list) -- see logSlotDroppedAfterRepair.
+// rejectionDetailBySlotId: the caller's persisted map across all rounds (see
+// generateBatch/generateMorningPack's own recordRejectionDetails), not just
+// the final assembly's own rejectedDetails -- a slot's real reason often
+// lives in an earlier round (see that comment for why).
+function logSlotsDroppedAfterRepair(slots, assembly, rejectionDetailBySlotId) {
+  const acceptedSlotIds = new Set((assembly.phrases || []).map((item) => item.slot_id));
+  for (const slot of slots) {
+    if (acceptedSlotIds.has(slot.slot_id)) {
+      continue;
+    }
+    logSlotDroppedAfterRepair(slot, rejectionDetailBySlotId.get(slot.slot_id));
+  }
+}
+
 // dropMissing: see assembleBatchFromGeneratedPhrases's own comment on the
 // param -- when true, a slot with no accepted generated text is simply
 // omitted from the result. The result can then be anywhere from 0 to
@@ -1520,9 +1549,35 @@ async function generateMorningPack(device, targetDate, signals, weather, weather
   });
 
   const repairedSlotIds = new Set();
-  if (assembly.rejectedSlotIds.length > 0) {
+  // Persists the most recent real rejection detail per slot_id across first
+  // pass + both repair rounds -- see generateBatch's identical comment for
+  // why (the merge into the next round only carries ACCEPTED text forward).
+  const rejectionDetailBySlotId = new Map();
+  const recordRejectionDetails = () => {
+    for (const detail of assembly.rejectedDetails || []) {
+      if (detail && typeof detail.slot_id === 'string') {
+        rejectionDetailBySlotId.set(detail.slot_id, detail);
+      }
+    }
+  };
+  recordRejectionDetails();
+
+  // runPackRepairRound: same "up to 2 attempts" rule as the ordinary batch
+  // (see generateBatch's runRepairRound) -- reads/writes `assembly` off the
+  // enclosing closure so the second call only targets whatever is still in
+  // assembly.rejectedSlotIds after the first. Uses the persistent
+  // `rejectionDetailBySlotId` map (see generateBatch's identical comment) to
+  // build original_text/rejection_reason, not `assembly.rejectedDetails`
+  // directly.
+  const runPackRepairRound = async () => {
+    if (!assembly.rejectedSlotIds || assembly.rejectedSlotIds.length === 0) {
+      return;
+    }
     try {
       const basePayload = JSON.parse(context);
+      const rejectedDetailsForRepair = assembly.rejectedSlotIds
+        .map((slotId) => rejectionDetailBySlotId.get(slotId))
+        .filter(Boolean);
       const repaired = await regenerateRejectedSlots(
         client,
         basePayload,
@@ -1531,7 +1586,7 @@ async function generateMorningPack(device, targetDate, signals, weather, weather
         languageCode,
         validationContext,
         trace,
-        assembly.rejectedDetails
+        rejectedDetailsForRepair
       );
       if (repaired && repaired.length > 0) {
         for (const item of repaired) {
@@ -1543,12 +1598,22 @@ async function generateMorningPack(device, targetDate, signals, weather, weather
     } catch (err) {
       console.error(`PACK_ERROR reason=slot_regeneration_error error=${err.name || 'Error'}`);
     }
+  };
+
+  if (assembly.rejectedSlotIds.length > 0) {
+    await runPackRepairRound();
+    recordRejectionDetails();
+    // Owner decision: 2 regenerate attempts before a slot is dropped, not 1
+    // -- no-op (no second OpenAI call) if the first round already fixed
+    // everything.
+    await runPackRepairRound();
+    recordRejectionDetails();
   }
 
-  // Rule: a slot still missing after repair is dropped -- never filled with
-  // server-authored text or raw grounded facts. Slot order here is restored
-  // by walking packSlots itself, so a dropped slot never disturbs the
-  // relative order of the ones that remain.
+  // Rule: a slot still missing after both repair attempts is dropped --
+  // never filled with server-authored text or raw grounded facts. Slot order
+  // here is restored by walking packSlots itself, so a dropped slot never
+  // disturbs the relative order of the ones that remain.
   const acceptedBySlot = new Map(assembly.phrases.map((item) => [item.slot_id, item]));
   const finalUnstyled = [];
   for (const slot of packSlots) {
@@ -1563,6 +1628,7 @@ async function generateMorningPack(device, targetDate, signals, weather, weather
       continue;
     }
     logMissingSlotPhrase(slot, validationContext);
+    logSlotDroppedAfterRepair(slot, rejectionDetailBySlotId.get(slot.slot_id));
     // dropped -- no entry pushed, pack simply gets shorter.
   }
   trace.fallback = [];
@@ -1753,15 +1819,54 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
   }
 
   const repairedSlotIds = new Set();
+  // Persists the most recent real rejection detail seen for each slot_id
+  // across first pass + both repair rounds, so the final drop-logging below
+  // still has a real reason for a slot that WAS attempted and rejected in an
+  // earlier round even though the merge into the next round's assembly (see
+  // runRepairRound) only carries forward ACCEPTED text, not rejected text --
+  // without this, a slot rejected in round 1 then simply absent from round
+  // 2's input would otherwise look identical to one OpenAI never produced
+  // any text for at all. Entries are only ever added/overwritten, never
+  // deleted, so a later round that has nothing new to say about a slot
+  // doesn't erase what an earlier round already learned.
+  const rejectionDetailBySlotId = new Map();
+  const recordRejectionDetails = () => {
+    for (const detail of assembly.rejectedDetails || []) {
+      if (detail && typeof detail.slot_id === 'string') {
+        rejectionDetailBySlotId.set(detail.slot_id, detail);
+      }
+    }
+  };
+  recordRejectionDetails();
+
   // B3 fix: previously gated on `assembly.generatedCount > 0` too, so a
   // batch where EVERY slot was rejected on first pass (generatedCount === 0
   // -- exactly the production incident this task investigates: 12/12
   // rejected, repair.called stayed false) never got a repair attempt at
   // all. Repair only needs at least one rejected slot to make sense; it
   // does not need any already-accepted slot to build on.
-  if (assembly.rejectedSlotIds && assembly.rejectedSlotIds.length > 0) {
+  //
+  // runRepairRound: one regenerate-and-reassemble attempt, targeting exactly
+  // whatever `assembly.rejectedSlotIds` is at call time. Reads `assembly` off
+  // the enclosing closure (not a parameter) so the second call below sees the
+  // updated set left by the first, rather than the original list. Uses
+  // `assembly.phrases` (not `parsed.phrases`) as the "already accepted" half
+  // of the merge -- `assembly.phrases` already reflects any previous repair
+  // round's fixes, where the raw first-pass `parsed.phrases` would not. Uses
+  // the persistent `rejectionDetailBySlotId` map (not `assembly.rejectedDetails`
+  // directly) to build the original_text/rejection_reason sent to the model --
+  // a slot rejected in round 1 is absent (not re-rejected) from round 2's own
+  // merge/reassembly, so `assembly.rejectedDetails` alone would otherwise lose
+  // its real detail by round 2, sending the model an undefined original_text.
+  const runRepairRound = async () => {
+    if (!assembly.rejectedSlotIds || assembly.rejectedSlotIds.length === 0) {
+      return;
+    }
     try {
       const basePayload = JSON.parse(context);
+      const rejectedDetailsForRepair = assembly.rejectedSlotIds
+        .map((slotId) => rejectionDetailBySlotId.get(slotId))
+        .filter(Boolean);
       const repaired = await regenerateRejectedSlots(
         client,
         basePayload,
@@ -1770,18 +1875,15 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
         languageCode,
         validationContext,
         trace,
-        assembly.rejectedDetails
+        rejectedDetailsForRepair
       );
       if (repaired && repaired.length > 0) {
         for (const item of repaired) {
           repairedSlotIds.add(item.slot_id);
         }
-        const acceptedSlotIds = new Set(assembly.generatedSlotIds);
-        const merged = parsed.phrases
-          .filter((phrase) => acceptedSlotIds.has(phrase.slot_id))
-          .concat(repaired);
+        const merged = (assembly.phrases || []).concat(repaired);
         const repairTraceParts = { fallback: [], styleDedupe: [], firstPass: [] };
-        // dropMissing=true here too -- a slot still rejected after this one
+        // dropMissing=true here too -- a slot still rejected after this
         // repair round is dropped, not generic-filled (see B5/dropMissing's
         // own comment on assembleBatchFromGeneratedPhrases).
         const repairedAssembly = assembleBatchFromGeneratedPhrases(merged, languageCode, validationContext, slots, repairTraceParts, true);
@@ -1795,7 +1897,25 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
     } catch (err) {
       console.error(`AI_BATCH_ERROR reason=slot_regeneration_error error=${err.name || 'Error'}`);
     }
+  };
+
+  if (assembly.rejectedSlotIds && assembly.rejectedSlotIds.length > 0) {
+    await runRepairRound();
+    recordRejectionDetails();
+    // Owner decision: a rejected slot gets up to 2 regenerate attempts before
+    // it is dropped, not 1 -- this second call targets only whatever is
+    // still in assembly.rejectedSlotIds after the first round above. If the
+    // first round already fixed everything, rejectedSlotIds is empty here
+    // and runRepairRound() is a no-op (no second OpenAI call).
+    await runRepairRound();
+    recordRejectionDetails();
   }
+
+  // Whatever is still missing from assembly.phrases after both repair
+  // attempts is dropped for good -- log it once per slot (type + best-known
+  // rejection reason) so a real content-quality problem is visible in the
+  // logs instead of just silently shrinking the batch.
+  logSlotsDroppedAfterRepair(slots, assembly, rejectionDetailBySlotId);
 
   if (!assembly.phrases) {
     assembly.phrases = [];

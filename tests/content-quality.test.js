@@ -468,14 +468,16 @@ async function main() {
       null
     );
 
-    assert.strictEqual(memoryOpenAiCallCount, 2, 'one rejected slot should trigger exactly one targeted repair OpenAI call');
+    // Owner decision: a rejected slot now gets up to 2 regenerate attempts
+    // before it's dropped, not 1 -- the mock's repair handler always answers
+    // the (single) rejected slot with the same still-overlong text on every
+    // call, so both repair rounds fire (first pass + repair round 1 + repair
+    // round 2 = 3 calls) and it stays rejected after both -- under B5 that
+    // slot is dropped rather than generic-filled, so the final batch is one
+    // shorter than however many slots were actually planned (content-quality
+    // rebuild: no longer assumed to be exactly BATCH_SIZE, see requirement B).
+    assert.strictEqual(memoryOpenAiCallCount, 3, 'one persistently-rejected slot should trigger two targeted repair OpenAI calls');
     assert.strictEqual(memoryResult.source, 'openai');
-    // The mock's repair handler always answers the (single) rejected slot
-    // with the same still-overlong text, so it stays rejected after the one
-    // repair round -- under B5 that slot is dropped rather than generic-
-    // filled, so the final batch is one shorter than however many slots were
-    // actually planned (content-quality rebuild: no longer assumed to be
-    // exactly BATCH_SIZE, see requirement B).
     assert(memoryPlannedSlotCount > 0, 'the mock must have observed at least one real planned slot count');
     assertFinalBatch(memoryResult.phrases, memoryPlannedSlotCount - 1);
     const memoryRows = db.prepare(`

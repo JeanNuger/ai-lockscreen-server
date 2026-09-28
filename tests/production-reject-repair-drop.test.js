@@ -105,7 +105,16 @@ async function testRepairAlwaysCalledAndDropsStillRejectedSlots() {
 
   let callCount = 0;
   let firstRequestSlotIds = [];
-  let repairRequestPayload = null;
+  const repairRequestPayloads = [];
+  // Decided once, from the FIRST pass's non-goodnight slots (odd position ->
+  // never fixed) -- a stable per-slot_id decision, not a per-call index%2,
+  // because the repair payload shrinks to just the still-rejected slots on
+  // the second attempt, so "index 0 of this call" no longer means the same
+  // slot as "index 0" meant last call. Without this, a slot alone at index 0
+  // in the second (smaller) repair request would flip to "fixed" purely
+  // because the batch around it shrank, defeating the point of this test
+  // (something must still be rejected after both repair attempts).
+  const neverFixSlotIds = new Set();
   const originalLoad = Module._load;
   Module._load = function patchedLoad(request, parent, isMain) {
     if (request === 'openai') {
@@ -122,6 +131,13 @@ async function testRepairAlwaysCalledAndDropsStillRejectedSlots() {
                   // slot is goodnight_care gets the exact blocked "пусть"
                   // text from the trace.
                   firstRequestSlotIds = payload.slots.map((slot) => slot.slot_id);
+                  payload.slots
+                    .filter((slot) => slot.type !== 'goodnight_care')
+                    .forEach((slot, index) => {
+                      if (index % 2 !== 0) {
+                        neverFixSlotIds.add(slot.slot_id);
+                      }
+                    });
                   return {
                     choices: [{
                       message: {
@@ -138,21 +154,26 @@ async function testRepairAlwaysCalledAndDropsStillRejectedSlots() {
                     }],
                   };
                 }
-                // Repair pass: payload.slots here are the repair-slot
+                // Repair pass (may fire twice -- up to 2 regenerate attempts
+                // per slot): payload.slots here are the repair-slot
                 // descriptors (goodnight_care is never among them -- it was
                 // already accepted on first pass) -- assert they carry the
                 // B3 fields (original text/exact reason/limit), then fix
-                // every even-indexed slot, leaving odd-indexed slots still
-                // too long (still rejected after repair -> must be dropped,
-                // not fallback-filled).
-                repairRequestPayload = payload;
+                // every slot NOT in neverFixSlotIds, leaving the rest still
+                // too long on every attempt (still rejected after both
+                // repair rounds -> must be dropped, not fallback-filled).
+                repairRequestPayloads.push(payload);
                 return {
                   choices: [{
                     message: {
                       content: JSON.stringify({
                         phrases: payload.slots.map((slot, index) => {
-                          if (index % 2 === 0) {
-                            return { slot_id: slot.slot_id, text: `Короткий факт номер ${index + 1}.`, style_id: STYLE_IDS[index % STYLE_IDS.length] };
+                          if (!neverFixSlotIds.has(slot.slot_id)) {
+                            // Keyed by slot_id, not by this call's positional
+                            // index, so a fixed slot's text never collides
+                            // with another fixed slot's text from an earlier
+                            // repair round.
+                            return { slot_id: slot.slot_id, text: `Короткий факт по слоту ${slot.slot_id}.`, style_id: STYLE_IDS[index % STYLE_IDS.length] };
                           }
                           // Still violates the same limit -- repair must not
                           // magically fix what the model refuses to shorten.
@@ -188,19 +209,28 @@ async function testRepairAlwaysCalledAndDropsStillRejectedSlots() {
       { localDate: '2026-09-25' }
     );
 
-    assert.strictEqual(callCount, 2, 'a batch with at least one rejection must still trigger exactly one repair call (B3)');
+    // Owner decision: up to 2 regenerate attempts per rejected slot, not 1 --
+    // first pass (call 1) + repair round 1 (call 2, fixes the even-indexed
+    // slots) + repair round 2 (call 3, retries only the slot(s) still
+    // rejected after round 1; neverFixSlotIds guarantees at least one stays
+    // rejected on both attempts, so round 2 always fires here).
+    assert.strictEqual(callCount, 3, 'a batch with at least one persistently-rejected slot must trigger both repair attempts (B3)');
+    assert.strictEqual(repairRequestPayloads.length, 2, 'exactly 2 repair rounds must have been sent to OpenAI');
     assert(result.trace, 'trace must be returned');
 
     // B3: repair must be called even though generatedCount was 0 on the
     // FIRST pass (every non-goodnight slot rejected for length) -- this is
     // the exact production gate bug. The one goodnight_care slot is NOT
     // among the rejected ones anymore (see below) thanks to the follow-up
-    // blocked-phrase fix, so repair.sent_slot_ids is 11, not all 12 --
-    // still proves B3, since generatedCount was 0 going into the gate check
-    // (nothing was accepted from openai_first at that point) and repair
-    // still fired.
+    // blocked-phrase fix, so the first repair round's sent count is
+    // firstRequestSlotIds.length - 1, not all of them -- still proves B3,
+    // since generatedCount was 0 going into the gate check (nothing was
+    // accepted from openai_first at that point) and repair still fired.
     assert.strictEqual(result.trace.repair.called, true, 'repair must be called when at least one slot was rejected on first pass');
-    assert.strictEqual(result.trace.repair.sent_slot_ids.length, firstRequestSlotIds.length - 1, 'every slot except the accepted goodnight_care one must be sent to repair');
+    assert.strictEqual(repairRequestPayloads[0].slots.length, firstRequestSlotIds.length - 1, 'every slot except the accepted goodnight_care one must be sent to the first repair round');
+    // trace.repair.sent_slot_ids reflects only the MOST RECENT repair round
+    // (the second one here) -- whatever is still rejected after round 1.
+    assert.strictEqual(result.trace.repair.sent_slot_ids.length, repairRequestPayloads[1].slots.length, 'trace.repair.sent_slot_ids must match the final (second) repair round');
 
     // Follow-up fix: with the "спокойной ночи"/"покой" collision fixed, the
     // exact production goodnight_care text is now ACCEPTED on first pass --
@@ -221,18 +251,20 @@ async function testRepairAlwaysCalledAndDropsStillRejectedSlots() {
     assert(someTooLong, 'at least one too-long rejection must be in the trace');
     assert(/^too_long:\d+>70$/.test(someTooLong.reason), `expected an exact too_long:N>70 reason, got "${someTooLong.reason}"`);
 
-    // B3: the repair payload must carry original_text/rejection_reason/
-    // max_length_chars per slot -- and must NOT include the already-accepted
-    // goodnight_care slot.
-    assert(repairRequestPayload, 'repair request must have been captured');
-    assert(!repairRequestPayload.slots.some((slot) => slot.type === 'goodnight_care'), 'the already-accepted goodnight_care slot must not be sent to repair');
-    for (const slot of repairRequestPayload.slots) {
-      assert(typeof slot.original_text === 'string' && slot.original_text.length > 0, `repair slot ${slot.slot_id} must carry original_text`);
-      assert(typeof slot.rejection_reason === 'string' && slot.rejection_reason.length > 0, `repair slot ${slot.slot_id} must carry rejection_reason`);
-      assert.strictEqual(slot.max_length_chars, LOCK_SCREEN_TEXT_MAX_LENGTH, `repair slot ${slot.slot_id} must carry the real max_length_chars`);
+    // B3: every repair round's payload must carry original_text/
+    // rejection_reason/max_length_chars per slot -- and must NOT include the
+    // already-accepted goodnight_care slot.
+    assert.strictEqual(repairRequestPayloads.length, 2, 'both repair rounds must have been captured');
+    for (const payload of repairRequestPayloads) {
+      assert(!payload.slots.some((slot) => slot.type === 'goodnight_care'), 'the already-accepted goodnight_care slot must not be sent to repair');
+      for (const slot of payload.slots) {
+        assert(typeof slot.original_text === 'string' && slot.original_text.length > 0, `repair slot ${slot.slot_id} must carry original_text`);
+        assert(typeof slot.rejection_reason === 'string' && slot.rejection_reason.length > 0, `repair slot ${slot.slot_id} must carry rejection_reason`);
+        assert.strictEqual(slot.max_length_chars, LOCK_SCREEN_TEXT_MAX_LENGTH, `repair slot ${slot.slot_id} must carry the real max_length_chars`);
+      }
     }
 
-    // B5: slots still rejected after the one repair round must be dropped,
+    // B5: a slot still rejected after both repair rounds must be dropped,
     // not filled from FALLBACK_PHRASES -- no fallback_generic/anchor
     // entries, and the batch is shorter than 12.
     assert.strictEqual(result.trace.fallback.length, 0, 'no slot may be filled from a FALLBACK_PHRASES pool after repair -- still-rejected slots must be dropped');
