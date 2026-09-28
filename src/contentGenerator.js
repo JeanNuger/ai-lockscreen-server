@@ -61,19 +61,6 @@ const WINDOW_CONTEXT = {
   night: { id: 'night', range: '20:00-05:00', focus: 'спокойные мягкие мысли, минимум активного тона и советов' },
 };
 
-// Which of ANCHOR_FALLBACK_TEXT's 5 variants is "today's" pick -- calendar
-// day (UTC, not device-local: this is a shared, non-personalized safety net,
-// not user-facing "today" framing the way now.date already is) modulo 5, so
-// the two mandatory anchors (greeting_name/goodnight_care) don't show the
-// exact same line every day this grounded fallback is used. Deterministic,
-// no DB state: every request on the same UTC calendar day gets the same
-// variant, and it changes at UTC midnight.
-const FALLBACK_SET_COUNT = 5;
-function currentFallbackSetIndex(now = new Date()) {
-  const epochDay = Math.floor(now.getTime() / 86400000);
-  return ((epochDay % FALLBACK_SET_COUNT) + FALLBACK_SET_COUNT) % FALLBACK_SET_COUNT;
-}
-
 // The 10 languages product/DoD calls for (locale-driven generation task).
 // Each entry names the language for the SYSTEM_PROMPT and a scriptCheck
 // regex used to catch full-phrase language drift (see isValidLanguageText
@@ -513,184 +500,12 @@ function validateFinalBatch(items, slotTypeById = null) {
   return true;
 }
 
-// Anchor-slot fallback text, warm/kind -- the product is "a living, kind
-// companion inside the phone", not a neutral technical assistant, and this
-// grounded fallback (used when the model's own text for one of these anchor
-// slots is rejected or missing) must not sound colder than the AI-generated
-// content around it. Rotates through 5 variants daily (currentFallbackSetIndex)
-// so the two mandatory anchors (greeting_name/goodnight_care) don't show the
-// exact same line every day this fallback is used. Only
-// ru/en are authored directly (matches the pre-existing scope of this
-// function); every other language still falls through to the English set --
-// a pre-existing gap this task didn't extend to all 10 languages.
-const ANCHOR_FALLBACK_TEXT = {
-  goodnight_care: {
-    ru: [
-      'Телефону тоже нужен отдых',
-      'Хорошего отдыха, экран подождёт',
-      'Сегодняшний день был не зря',
-      'Ты заслуживаешь немного отдыха',
-      'Пора дать себе передышку',
-    ],
-    en: [
-      'Even a phone needs rest',
-      'Rest well, the screen can wait',
-      'Today mattered, even the quiet parts',
-      "You've earned a proper rest tonight",
-      'Time to let yourself pause completely',
-    ],
-  },
-  greeting_name: {
-    ru: [
-      'Доброе утро. Один точный шаг экономит час',
-      'Доброе утро — сегодня уже есть повод улыбнуться',
-      'Доброе утро, день только начинается',
-      'Доброе утро — ты уже на верном пути',
-      'Доброе утро, сегодня точно будет что-то хорошее',
-    ],
-    en: [
-      'Good morning. One precise step saves an hour',
-      'Good morning, today already holds something good',
-      "Good morning, you're off to a fine start",
-      'Good morning, the day is still wide open',
-      'Good morning, small good things are already close',
-    ],
-  },
-};
-
-const ZODIAC_FALLBACK_TEXT = {
-  ru: {
-    Aries: 'Овен сегодня связан с одним ясным шагом',
-    Taurus: 'Телец сегодня связан с устойчивым темпом',
-    Gemini: 'Близнецы сегодня связаны с лёгким разговором',
-    Cancer: 'Рак сегодня связан с бережным ритмом',
-    Leo: 'Лев сегодня связан с тихой уверенностью',
-    Virgo: 'Дева сегодня связана с ровностью и порядком',
-    Libra: 'Весы сегодня связаны с равновесием в решениях',
-    Scorpio: 'Скорпион сегодня связан с собранным вниманием',
-    Sagittarius: 'Стрелец сегодня связан с более широким взглядом',
-    Capricorn: 'Козерог сегодня связан с практичным движением',
-    Aquarius: 'Водолей сегодня связан с новым углом зрения',
-    Pisces: 'Рыбы сегодня связаны с мягким воображением',
-  },
-  en: {
-    Aries: 'Aries energy today favors one clear step',
-    Taurus: 'Taurus energy today favors steady priorities',
-    Gemini: 'Gemini energy today favors simple conversations',
-    Cancer: 'Cancer energy today favors a gentler rhythm',
-    Leo: 'Leo energy today favors quiet confidence',
-    Virgo: 'Virgo energy today favors calm order',
-    Libra: 'Libra energy today favors balanced choices',
-    Scorpio: 'Scorpio energy today favors focused attention',
-    Sagittarius: 'Sagittarius energy today favors a wider view',
-    Capricorn: 'Capricorn energy today favors practical progress',
-    Aquarius: 'Aquarius energy today favors fresh thinking',
-    Pisces: 'Pisces energy today favors calm imagination',
-  },
-};
-
-const NUMEROLOGY_FALLBACK_TEXT = {
-  ru: {
-    1: 'Личный день 1 символически связан с новым началом',
-    2: 'Личный день 2 символически связан с терпением',
-    3: 'Личный день 3 символически связан с общением и идеями',
-    4: 'Личный день 4 символически связан с порядком',
-    5: 'Личный день 5 символически связан с гибкостью',
-    6: 'Личный день 6 символически связан с заботой и балансом',
-    7: 'Личный день 7 символически связан с размышлением',
-    8: 'Личный день 8 символически связан с практичным фокусом',
-    9: 'Личный день 9 символически связан с завершением',
-    11: 'Личный день 11 символически связан с интуицией',
-    22: 'Личный день 22 символически связан с терпеливой сборкой',
-    33: 'Личный день 33 символически связан с щедрым вниманием',
-  },
-  en: {
-    1: 'Personal day 1 symbolically favors a fresh start',
-    2: 'Personal day 2 symbolically favors patience',
-    3: 'Personal day 3 symbolically favors ideas and contact',
-    4: 'Personal day 4 symbolically favors order',
-    5: 'Personal day 5 symbolically favors flexibility',
-    6: 'Personal day 6 symbolically favors care and balance',
-    7: 'Personal day 7 symbolically favors reflection',
-    8: 'Personal day 8 symbolically favors practical focus',
-    9: 'Personal day 9 symbolically favors completion',
-    11: 'Personal day 11 symbolically favors intuition',
-    22: 'Personal day 22 symbolically favors building patiently',
-    33: 'Personal day 33 symbolically favors generous attention',
-  },
-};
-
-function fallbackTextForSlot(slot, languageCode) {
-  const byType = slot && ANCHOR_FALLBACK_TEXT[slot.type];
-  if (!byType) {
-    return null;
-  }
-  const variants = byType[languageCode] || byType.en;
-  return variants[currentFallbackSetIndex()];
-}
-
 function compactFactText(value) {
   if (typeof value !== 'string') {
     return null;
   }
   const text = value.trim().replace(/\s+/g, ' ');
   return text || null;
-}
-
-function truncateFallbackText(text) {
-  const cleaned = compactFactText(text);
-  if (!cleaned || cleaned.length <= LOCK_SCREEN_TEXT_MAX_LENGTH) {
-    return cleaned;
-  }
-  const sliced = cleaned.slice(0, LOCK_SCREEN_TEXT_MAX_LENGTH + 1);
-  const boundary = Math.max(sliced.lastIndexOf('.'), sliced.lastIndexOf(';'), sliced.lastIndexOf(','));
-  if (boundary >= 24) {
-    return sliced.slice(0, boundary).trim();
-  }
-  const space = sliced.lastIndexOf(' ');
-  return sliced.slice(0, space >= 24 ? space : LOCK_SCREEN_TEXT_MAX_LENGTH).trim();
-}
-
-function groundedFallbackTextForSlot(slot, languageCode) {
-  if (!slot || !MORNING_ANCHOR_TYPES.has(slot.type)) {
-    return null;
-  }
-  const facts = slot.facts || {};
-  if (slot.type === 'greeting_name') {
-    return fallbackTextForSlot(slot, languageCode);
-  }
-  if (slot.type === 'holiday_today' || slot.type === 'history_today') {
-    return truncateFallbackText(facts.text);
-  }
-  if (slot.type === 'word_learning') {
-    return truncateFallbackText(facts.word || facts.text);
-  }
-  if (slot.type === 'weather_lifehack') {
-    const bandText = {
-      cold: 'Cold weather today; warm clothes make sense',
-      cool: 'Cool weather today; a light jacket fits',
-      mild: 'Mild weather today; light layers fit',
-      warm: 'Warm weather today; light clothes fit',
-      hot: 'Hot weather today; sun protection helps',
-    };
-    const leanText = {
-      rain: 'Rain is possible today; an umbrella helps',
-      snow: 'Snowy weather today; warm shoes help',
-      wind: 'Windy weather today; a secure jacket helps',
-      sun: 'Sunny weather today; sun protection helps',
-      cloudy: 'Cloudy weather today; light layers fit',
-    };
-    return truncateFallbackText(leanText[facts.condition_lean] || bandText[facts.temp_band]);
-  }
-  if (slot.type === 'daily_horoscope') {
-    const bySign = ZODIAC_FALLBACK_TEXT[languageCode] || ZODIAC_FALLBACK_TEXT.en;
-    return truncateFallbackText(bySign[facts.zodiac_sign]);
-  }
-  if (slot.type === 'daily_numerology') {
-    const byNumber = NUMEROLOGY_FALLBACK_TEXT[languageCode] || NUMEROLOGY_FALLBACK_TEXT.en;
-    return truncateFallbackText(byNumber[facts.personal_day_number]);
-  }
-  return null;
 }
 
 function missingAnchorReason(slot) {
@@ -730,163 +545,36 @@ function logMissingMorningAnchor(slot, validationContext, reason) {
   );
 }
 
-function logMorningAnchorFallback(slot, rejectedDetail, fallbackText) {
-  if (!slot || !MORNING_ANCHOR_TYPES.has(slot.type)) {
-    return;
-  }
-  const safeOriginal = rejectedDetail && rejectedDetail.text
-    ? rejectedDetail.text.replace(/\s+/g, ' ').slice(0, 160)
-    : '';
-  console.warn(
-    `MORNING_ANCHOR_FALLBACK type=${slot.type} rejection_reason=${rejectedDetail && rejectedDetail.reason ? rejectedDetail.reason : 'missing'} original_text=${JSON.stringify(safeOriginal)} fallback_text=${JSON.stringify(fallbackText)}`
-  );
-}
-
-function fallbackLanguageForPool(pool, languageCode) {
-  if (pool === 'fallback_zodiac') {
-    return ZODIAC_FALLBACK_TEXT[languageCode] ? languageCode : DEFAULT_LANGUAGE_CODE;
-  }
-  if (pool === 'fallback_numerology') {
-    return NUMEROLOGY_FALLBACK_TEXT[languageCode] ? languageCode : DEFAULT_LANGUAGE_CODE;
-  }
-  if (pool === 'fallback_anchor') {
-    return languageCode === 'ru' || languageCode === 'en' ? languageCode : DEFAULT_LANGUAGE_CODE;
-  }
-  if (pool === 'fallback_weather') {
-    return DEFAULT_LANGUAGE_CODE;
-  }
-  return null;
-}
-
-function fallbackPoolForSlot(slot, fallbackText, languageCode, fallbackTexts) {
-  if (slot && slot.type === 'daily_horoscope') return 'fallback_zodiac';
-  if (slot && slot.type === 'daily_numerology') return 'fallback_numerology';
-  if (slot && slot.type === 'weather_lifehack') return 'fallback_weather';
-  if (slot && MORNING_ANCHOR_TYPES.has(slot.type)) return 'fallback_anchor';
-  if (slot && (slot.type === 'greeting_name' || slot.type === 'goodnight_care')) return 'fallback_anchor';
-  if (fallbackTexts && fallbackTexts.includes(fallbackText)) return 'fallback_generic';
-  return 'fallback_generic';
-}
-
-function fallbackTraceForText(slot, fallbackText, languageCode, fallbackTexts) {
-  const pool = fallbackPoolForSlot(slot, fallbackText, languageCode, fallbackTexts);
-  const issuedLanguage = fallbackLanguageForPool(pool, languageCode);
-  const trace = {
-    slot_id: slot && slot.slot_id ? slot.slot_id : null,
-    pool,
-    text: fallbackText,
-    language: issuedLanguage,
-    language_matches_user: issuedLanguage ? issuedLanguage === languageCode : null,
-  };
-  return trace;
-}
-
-function pickFallbackTextForSlot(slot, languageCode, seenTexts, fallbackTexts, validationContext = {}, rejectedDetail = null, fallbackTrace = null) {
+function logMissingSlotPhrase(slot, validationContext) {
   if (slot && MORNING_ANCHOR_TYPES.has(slot.type)) {
     const missingReason = missingAnchorReason(slot);
     if (missingReason) {
       logMissingMorningAnchor(slot, validationContext, missingReason);
-      return null;
-    }
-    const groundedFallback = groundedFallbackTextForSlot(slot, languageCode);
-    if (!groundedFallback) {
-      logMissingMorningAnchor(slot, validationContext, 'no_grounded_fallback');
-      return null;
-    }
-    const normalized = normalizeTextForDedupe(groundedFallback);
-    if (!isUnusableLockScreenText(groundedFallback) && !seenTexts.has(normalized)) {
-      logMorningAnchorFallback(slot, rejectedDetail, groundedFallback);
-      if (fallbackTrace) {
-        fallbackTrace.push(fallbackTraceForText(slot, groundedFallback, languageCode, fallbackTexts));
-      }
-      return groundedFallback;
-    }
-    logMissingMorningAnchor(slot, validationContext, seenTexts.has(normalized) ? 'duplicate_grounded_fallback' : 'unusable_grounded_fallback');
-    return null;
-  }
-
-  const slotFallback = fallbackTextForSlot(slot, languageCode);
-  if (slotFallback) {
-    const normalized = normalizeTextForDedupe(slotFallback);
-    if (!isUnusableLockScreenText(slotFallback) && !seenTexts.has(normalized)) {
-      if (fallbackTrace) {
-        fallbackTrace.push(fallbackTraceForText(slot, slotFallback, languageCode, fallbackTexts));
-      }
-      return slotFallback;
     }
   }
-
-  return null;
-}
-
-// Morning-pack-only fallback picker: like pickFallbackTextForSlot (the
-// ordinary batch path), this only ever considers the same per-type grounded/
-// anchor/zodiac/numerology/weather fallback text the ordinary morning
-// anchors already use, and only accepts it if fallbackLanguageForPool says
-// that text is actually in the user's target language. A pack slot whose
-// grounded fallback would be in the wrong language (e.g. an English-only
-// zodiac line for a Japanese pack) is dropped instead of ever being shown.
-function pickPackFallbackTextForSlot(slot, languageCode, seenTexts, fallbackTrace) {
-  if (!slot || !MORNING_ANCHOR_TYPES.has(slot.type)) {
-    return null;
-  }
-  if (missingAnchorReason(slot)) {
-    return null;
-  }
-  const groundedFallback = groundedFallbackTextForSlot(slot, languageCode);
-  if (!groundedFallback) {
-    return null;
-  }
-  const pool = fallbackPoolForSlot(slot, groundedFallback, languageCode, []);
-  const issuedLanguage = fallbackLanguageForPool(pool, languageCode);
-  if (issuedLanguage !== languageCode) {
-    return null;
-  }
-  const normalized = normalizeTextForDedupe(groundedFallback);
-  if (isUnusableLockScreenText(groundedFallback) || seenTexts.has(normalized)) {
-    return null;
-  }
-  fallbackTrace.push(fallbackTraceForText(slot, groundedFallback, languageCode, []));
-  return groundedFallback;
 }
 
 // dropMissing: see assembleBatchFromGeneratedPhrases's own comment on the
 // param -- when true, a slot with no accepted generated text is simply
-// omitted from the result (no generic-fill draw, no fallback trace entry)
-// instead of going through pickFallbackTextForSlot below. The result
-// can then be anywhere from 0 to expectedSlots.length items long; the caller
-// (assembleBatchFromGeneratedPhrases) treats 0 as "nothing usable" (falls
-// through to null, same as any other assembly failure) and anything else as
-// a valid, possibly-shorter-than-BATCH_SIZE batch (see validateFinalBatch's
-// updated 1..BATCH_SIZE range check).
+// omitted from the result. The result can then be anywhere from 0 to
+// expectedSlots.length items long; the caller (assembleBatchFromGeneratedPhrases)
+// treats 0 as "nothing usable" (falls through to null, same as any other
+// assembly failure) and anything else as a valid, possibly-shorter-than-
+// BATCH_SIZE batch (see validateFinalBatch's updated 1..BATCH_SIZE range
+// check).
 function assembleByExpectedSlotOrder(generated, languageCode, expectedSlots, validationContext = {}, rejectedDetails = [], traceParts = null, dropMissing = false) {
   const generatedBySlot = new Map(generated.map((item) => [item.slot_id, item]));
-  const rejectedBySlot = new Map(rejectedDetails.map((item) => [item.slot_id, item]));
-  const seenTexts = new Set(generated.map((item) => normalizeTextForDedupe(item.text)));
-  const fallbackTrace = traceParts ? traceParts.fallback : null;
 
   const result = expectedSlots.map((slot) => {
     const generatedItem = generatedBySlot.get(slot.slot_id);
     if (generatedItem) {
       return generatedItem;
     }
+    logMissingSlotPhrase(slot, validationContext);
     if (dropMissing) {
       return null;
     }
-    const fallbackText = pickFallbackTextForSlot(
-      slot,
-      languageCode,
-      seenTexts,
-      [],
-      validationContext,
-      rejectedBySlot.get(slot.slot_id) || null,
-      fallbackTrace
-    );
-    if (!fallbackText) {
-      return null;
-    }
-    seenTexts.add(normalizeTextForDedupe(fallbackText));
-    return { slot_id: slot.slot_id, text: fallbackText, style_id: null };
+    return null;
   });
 
   if (dropMissing) {
@@ -980,13 +668,10 @@ function assembleBatchFromGeneratedPhrases(phrases, languageCode, validationCont
 }
 
 // Morning-pack-only assembly: reuses collectUsablePhrases (identical
-// validation) but never fills missing/rejected slots with anything -- the
-// caller (generateMorningPack) is responsible for either dropping a still-
-// missing slot or, only for the MORNING_ANCHOR_TYPES the pack always uses,
-// trying pickPackFallbackTextForSlot's language-safe grounded fallback.
-// Returns the accepted subset unordered (slot order is restored by the
-// caller, which walks packSlots itself) plus everything needed to drive a
-// repair pass identical to the ordinary batch's.
+// validation) but never fills missing/rejected slots with anything. Returns
+// the accepted subset unordered (slot order is restored by the caller, which
+// walks packSlots itself) plus everything needed to drive a repair pass
+// identical to the ordinary batch's.
 function assemblePackFromGeneratedPhrases(phrases, languageCode, validationContext, packSlots, traceParts = null) {
   // Pass the slot OBJECTS (not bare slot_id strings) into collectUsablePhrases
   // so it can build slotTypeById and thread .type down into
@@ -1704,11 +1389,9 @@ Only JSON matching the schema: one phrase per slot, in slot order, with its slot
  * SEPARATE OpenAI call from the ordinary batch. Reuses createOpenAiBatch/
  * regenerateRejectedSlots/collectUsablePhrases/assignUniqueStyleIds -- the
  * exact same generation, repair and style-assignment machinery the ordinary
- * batch path uses -- but never falls back to generic filler text and never
- * pads the result: a slot that can't be grounded, or fails validation and
- * repair, is simply dropped (see pickPackFallbackTextForSlot for the one
- * exception -- a language-safe grounded/anchor fallback, same as the
- * ordinary morning anchors already use).
+ * batch path uses -- but never falls back to server-authored or fact-derived
+ * text and never pads the result: a slot that can't be grounded, or fails
+ * validation and repair, is simply dropped.
  *
  * Never throws -- every failure path (no candidates, no API key, OpenAI
  * error, parse error, everything rejected) returns `{ phrases: [], trace }`
@@ -1862,15 +1545,12 @@ async function generateMorningPack(device, targetDate, signals, weather, weather
     }
   }
 
-  // Rule: a slot still missing after repair either gets a language-safe
-  // grounded/anchor fallback (pickPackFallbackTextForSlot) or is dropped --
-  // NEVER any generic filler text. Slot order here is restored by
-  // walking packSlots itself, so a dropped slot never disturbs the relative
-  // order of the ones that remain.
+  // Rule: a slot still missing after repair is dropped -- never filled with
+  // server-authored text or raw grounded facts. Slot order here is restored
+  // by walking packSlots itself, so a dropped slot never disturbs the
+  // relative order of the ones that remain.
   const acceptedBySlot = new Map(assembly.phrases.map((item) => [item.slot_id, item]));
-  const seenTexts = new Set(assembly.phrases.map((item) => normalizeTextForDedupe(item.text)));
   const finalUnstyled = [];
-  const fallbackTrace = [];
   for (const slot of packSlots) {
     const generatedItem = acceptedBySlot.get(slot.slot_id);
     if (generatedItem) {
@@ -1882,14 +1562,10 @@ async function generateMorningPack(device, targetDate, signals, weather, weather
       });
       continue;
     }
-    const fallbackText = pickPackFallbackTextForSlot(slot, languageCode, seenTexts, fallbackTrace);
-    if (fallbackText) {
-      seenTexts.add(normalizeTextForDedupe(fallbackText));
-      finalUnstyled.push({ slot_id: slot.slot_id, text: fallbackText, style_id: null, _source: 'fallback_grounded' });
-    }
-    // else: dropped -- no entry pushed, pack simply gets shorter.
+    logMissingSlotPhrase(slot, validationContext);
+    // dropped -- no entry pushed, pack simply gets shorter.
   }
-  trace.fallback = fallbackTrace;
+  trace.fallback = [];
 
   if (finalUnstyled.length === 0) {
     trace.final = [];
@@ -1933,8 +1609,7 @@ async function generateMorningPack(device, targetDate, signals, weather, weather
   // pack slot was never shown, so it's excluded here, unlike the ordinary
   // path where every planned slot always ends up shown one way or another).
   // content_memory/learning_memory are recorded only for genuinely
-  // OpenAI-generated slots (openai_first/openai_repair), matching
-  // recordLearnedWords' own "fallback-filled slots never reach here" rule.
+  // OpenAI-generated slots (openai_first/openai_repair).
   const keptSlots = packSlots.filter((slot) => sourceBySlot.has(slot.slot_id));
   const openaiSlotIds = [...sourceBySlot.entries()]
     .filter(([, source]) => source === 'openai_first' || source === 'openai_repair')
@@ -2154,8 +1829,6 @@ module.exports = {
     buildContextPrompt,
     buildSystemPrompt,
     SUPPORTED_LANGUAGES,
-    fallbackTextForSlot,
-    currentFallbackSetIndex,
     LOCK_SCREEN_TEXT_MAX_LENGTH,
     buildBatchResponseFormat,
     isUnusableLockScreenText,

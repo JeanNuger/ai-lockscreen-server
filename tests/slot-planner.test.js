@@ -601,9 +601,8 @@ async function main() {
   // quality rebuild, requirement A). An overlong text is now the reliable way
   // to force a rejection regardless of language.
   const overlongText = 'x'.repeat(contentTest.LOCK_SCREEN_TEXT_MAX_LENGTH + 20);
-  // slotSubset is all 'everyday_lifehack' -- a non-anchor type with no
-  // grounded/ANCHOR_FALLBACK_TEXT fallback of its own, and the server no
-  // longer has a generic FALLBACK_PHRASES pool to draw from either. A
+  // slotSubset is all 'everyday_lifehack' -- a non-anchor type, and the
+  // server no longer has a generic FALLBACK_PHRASES pool to draw from. A
   // rejected slot like this is simply dropped (dropMissing=true, matching
   // generateBatch's real production call sites) rather than filled with
   // any fallback text.
@@ -638,18 +637,12 @@ async function main() {
     ],
     'en',
     {},
-    morningSlots
+    morningSlots,
+    null,
+    true
   );
-  assert.strictEqual(morningRejected.phrases[0].slot_id, morningSlots[0].slot_id, 'rejected morning greeting fallback must remain first');
-  // fallbackTextForSlot now rotates through 5 warm variants by calendar day
-  // (see ANCHOR_FALLBACK_TEXT/currentFallbackSetIndex in contentGenerator.js)
-  // rather than always returning the same single string, so this checks
-  // "is it today's actual anchor variant", not a fixed substring.
-  assert.strictEqual(
-    morningRejected.phrases[0].text,
-    contentTest.fallbackTextForSlot({ type: 'greeting_name' }, 'en'),
-    'morning greeting fallback must be greeting-specific'
-  );
+  assert(!morningRejected.phrases.some((item) => item.slot_id === morningSlots[0].slot_id), 'rejected morning greeting must be dropped, not filled by the server');
+  assert.strictEqual(morningRejected.phrases.length, morningSlots.length - 1, 'only the rejected greeting slot should be absent');
 
   function anchorRegressionSlots(anchorSlot) {
     return [
@@ -672,120 +665,48 @@ async function main() {
     return generated;
   }
 
-  // Same as generatedWithRejectedFirst, but with Cyrillic filler text for the
-  // 11 non-anchor slots -- without a Russian generic fallback pool to paper
-  // over it any more, the plain-English "Concrete slot line N" filler from
-  // validSlotPhrases would fail isValidLanguageText's ru script check on
-  // every one of those slots, not just the deliberately-overlong anchor slot
-  // this test targets.
-  function generatedWithRejectedFirstRu(slots) {
-    const generated = slots.map((slot, index) => ({
-      slot_id: slot.slot_id,
-      text: `Конкретная строка ${index + 1}`,
-      style_id: STYLE_IDS[index],
-    }));
-    generated[0] = { slot_id: slots[0].slot_id, text: overlongText, style_id: STYLE_IDS[0] };
-    return generated;
+  for (const anchorSlot of [
+    {
+      id: 'bank_holiday_anchor',
+      type: 'holiday_today',
+      facts: { text: 'World Cleanup Day highlights cleaner public spaces' },
+      bank_category: 'holiday',
+    },
+    {
+      id: 'bank_history_anchor',
+      type: 'history_today',
+      facts: { text: 'In 1960, USS Enterprise launched' },
+      bank_category: 'on_this_day',
+    },
+    {
+      id: 'bank_word_anchor',
+      type: 'word_learning',
+      facts: { word: 'Break the ice means ease tension' },
+      bank_category: 'idiom',
+    },
+    {
+      id: 'daily_horoscope_anchor',
+      type: 'daily_horoscope',
+      facts: { zodiac_sign: 'Virgo', interpretation_focus: 'organization' },
+    },
+    {
+      id: 'daily_numerology_anchor',
+      type: 'daily_numerology',
+      facts: { life_path_number: 5, personal_year_number: 8, personal_day_number: 3, interpretation_focus: 'communication' },
+    },
+  ]) {
+    const anchorSlots = anchorRegressionSlots(anchorSlot);
+    const anchorRejected = contentTest.assembleBatchFromGeneratedPhrases(
+      generatedWithRejectedFirst(anchorSlots),
+      'en',
+      {},
+      anchorSlots,
+      null,
+      true
+    );
+    assert(!anchorRejected.phrases.some((item) => item.slot_id === anchorSlots[0].slot_id), `${anchorSlot.type} must be dropped when model text is rejected`);
+    assert.strictEqual(anchorRejected.phrases.length, anchorSlots.length - 1, `${anchorSlot.type} rejection must not be filled from facts or server fallback text`);
   }
-
-  const holidayAnchorSlots = anchorRegressionSlots({
-    id: 'bank_holiday_anchor',
-    type: 'holiday_today',
-    facts: { text: 'World Cleanup Day highlights cleaner public spaces' },
-    bank_category: 'holiday',
-  });
-  const holidayAnchorRejected = contentTest.assembleBatchFromGeneratedPhrases(
-    generatedWithRejectedFirst(holidayAnchorSlots),
-    'en',
-    {},
-    holidayAnchorSlots
-  );
-  assert.strictEqual(holidayAnchorRejected.phrases[0].text, 'World Cleanup Day highlights cleaner public spaces');
-  assert.notStrictEqual(
-    holidayAnchorRejected.phrases[0].text,
-    'Иногда достаточно просто мирно пережить день',
-    'generic fallback phrase must never replace holiday_today'
-  );
-
-  const historyAnchorSlots = anchorRegressionSlots({
-    id: 'bank_history_anchor',
-    type: 'history_today',
-    facts: { text: 'In 1960, USS Enterprise launched' },
-    bank_category: 'on_this_day',
-  });
-  const historyAnchorRejected = contentTest.assembleBatchFromGeneratedPhrases(
-    generatedWithRejectedFirst(historyAnchorSlots),
-    'en',
-    {},
-    historyAnchorSlots
-  );
-  assert.strictEqual(historyAnchorRejected.phrases[0].text, 'In 1960, USS Enterprise launched');
-
-  const wordAnchorSlots = anchorRegressionSlots({
-    id: 'bank_word_anchor',
-    type: 'word_learning',
-    facts: { word: 'Break the ice means ease tension' },
-    bank_category: 'idiom',
-  });
-  const wordAnchorRejected = contentTest.assembleBatchFromGeneratedPhrases(
-    generatedWithRejectedFirst(wordAnchorSlots),
-    'en',
-    {},
-    wordAnchorSlots
-  );
-  assert.strictEqual(wordAnchorRejected.phrases[0].text, 'Break the ice means ease tension');
-
-  const horoscopeAnchorSlots = anchorRegressionSlots({
-    id: 'daily_horoscope_anchor',
-    type: 'daily_horoscope',
-    facts: { zodiac_sign: 'Virgo', interpretation_focus: 'organization' },
-  });
-  const horoscopeAnchorRejected = contentTest.assembleBatchFromGeneratedPhrases(
-    generatedWithRejectedFirst(horoscopeAnchorSlots),
-    'en',
-    {},
-    horoscopeAnchorSlots
-  );
-  assert.strictEqual(horoscopeAnchorRejected.phrases[0].text, 'Virgo energy today favors calm order');
-  const ruHoroscopeAnchorRejected = contentTest.assembleBatchFromGeneratedPhrases(
-    generatedWithRejectedFirstRu(horoscopeAnchorSlots),
-    'ru',
-    {},
-    horoscopeAnchorSlots
-  );
-  assert.strictEqual(ruHoroscopeAnchorRejected.phrases[0].text, 'Дева сегодня связана с ровностью и порядком');
-  assert(!ruHoroscopeAnchorRejected.phrases[0].text.includes('Virgo'), 'ru horoscope fallback must not expose canonical English zodiac sign');
-  assert.notStrictEqual(
-    horoscopeAnchorRejected.phrases[0].text,
-    'Иногда достаточно просто мирно пережить день',
-    'generic fallback phrase must never replace daily_horoscope'
-  );
-
-  const numerologyAnchorSlots = anchorRegressionSlots({
-    id: 'daily_numerology_anchor',
-    type: 'daily_numerology',
-    facts: { life_path_number: 5, personal_year_number: 8, personal_day_number: 3, interpretation_focus: 'communication' },
-  });
-  const numerologyAnchorRejected = contentTest.assembleBatchFromGeneratedPhrases(
-    generatedWithRejectedFirst(numerologyAnchorSlots),
-    'en',
-    {},
-    numerologyAnchorSlots
-  );
-  assert.strictEqual(numerologyAnchorRejected.phrases[0].text, 'Personal day 3 symbolically favors ideas and contact');
-  const ruNumerologyAnchorRejected = contentTest.assembleBatchFromGeneratedPhrases(
-    generatedWithRejectedFirstRu(numerologyAnchorSlots),
-    'ru',
-    {},
-    numerologyAnchorSlots
-  );
-  assert.strictEqual(ruNumerologyAnchorRejected.phrases[0].text, 'Личный день 3 символически связан с общением и идеями');
-  assert(/Личный день 3/.test(ruNumerologyAnchorRejected.phrases[0].text), 'ru numerology fallback must use Russian wording around the same number');
-  assert.notStrictEqual(
-    numerologyAnchorRejected.phrases[0].text,
-    'Иногда достаточно просто мирно пережить день',
-    'generic fallback phrase must never replace daily_numerology'
-  );
 
   const missingAnchorWarnings = [];
   const originalWarn = console.warn;
@@ -822,16 +743,7 @@ async function main() {
     style_id: STYLE_IDS[nightGenerated.length - 1],
   };
   const nightRejected = contentTest.assembleBatchFromGeneratedPhrases(nightGenerated, 'en', {}, nightSlots);
-  assert.strictEqual(
-    nightRejected.phrases[nightRejected.phrases.length - 1].slot_id,
-    nightSlots[nightSlots.length - 1].slot_id,
-    'rejected night goodnight fallback must remain last'
-  );
-  assert.strictEqual(
-    nightRejected.phrases[nightRejected.phrases.length - 1].text,
-    contentTest.fallbackTextForSlot({ type: 'goodnight_care' }, 'en'),
-    'night fallback must be goodnight-specific'
-  );
+  assert.strictEqual(nightRejected.phrases, null, 'direct assembly without dropMissing cannot fill a rejected night goodnight slot');
 
   const badSlotIds = contentTest.assembleBatchFromGeneratedPhrases(
     [

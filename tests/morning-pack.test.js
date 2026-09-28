@@ -156,13 +156,8 @@ async function testPackOrderFactsAndDrop() {
   // Deliberately overlong (content-quality rebuild: too_long is now one of
   // the very few remaining checks, see textFilter.js), so the OpenAI-
   // generated text for word_learning fails both the first pass and the
-  // repair pass. Unlike the old question-mark trick, this does NOT defeat
-  // word_learning's grounded fallback (groundedFallbackTextForSlot truncates
-  // facts.word to fit the hard cap -- see truncateFallbackText -- and
-  // truncation always produces a usable, in-length string now that the
-  // stylistic filters that used to also reject the truncated text are gone).
-  // So this now exercises "still rejected after repair -> rescued from the
-  // grounded fact, truncated" rather than a genuine drop.
+  // repair pass. The server must not replace it with raw facts.word text;
+  // after the repair attempt, the slot is simply dropped.
   insertBankItem(bankDate, 'idiom', `Break the ice means ${OVERLONG_TEXT}`);
 
   const device = insertDevice('pack-device-order');
@@ -173,8 +168,7 @@ async function testPackOrderFactsAndDrop() {
   const mock = installOpenAiMock((payload) => payload.slots.map((slot, index) => {
     // word_learning is deliberately always invalid (overlong, no real
     // content) on BOTH the first pass and the repair pass, to exercise
-    // "fails validation and still fails after repair -> fall back to the
-    // grounded, truncated fact".
+    // "fails validation and still fails after repair -> drop the slot".
     if (slot.type === 'word_learning') {
       return mockPhrase(slot, index, OVERLONG_TEXT);
     }
@@ -190,13 +184,10 @@ async function testPackOrderFactsAndDrop() {
     const types = phrases.map((p) => p.type);
     assert.deepStrictEqual(
       types,
-      ['greeting_name', 'weather_lifehack', 'daily_horoscope', 'holiday_today', 'history_today', 'daily_numerology', 'word_learning'],
-      'still-rejected-after-repair word_learning must be rescued from its grounded, truncated fact rather than dropped (fallback-filled slots land after the cleanly-generated ones)'
+      ['greeting_name', 'weather_lifehack', 'daily_horoscope', 'holiday_today', 'history_today', 'daily_numerology'],
+      'still-rejected-after-repair word_learning must be dropped, not replaced with raw bank fact text'
     );
-    const wordLearningPhrase = phrases.find((p) => p.type === 'word_learning');
-    assert(wordLearningPhrase, 'word_learning must be present (rescued via the grounded fallback)');
-    assert(wordLearningPhrase.text.length <= contentTest.LOCK_SCREEN_TEXT_MAX_LENGTH, 'the rescued grounded fallback text must respect the hard length cap');
-    assert(wordLearningPhrase.text.startsWith('Break the ice means'), 'the rescued fallback must come from the real grounded fact, truncated -- not an arbitrary generic phrase');
+    assert(!phrases.some((p) => p.type === 'word_learning'), 'word_learning must be absent when the model never supplies an accepted phrase');
 
     const holidayPhrase = phrases.find((p) => p.type === 'holiday_today');
     assert(holidayPhrase, 'holiday_today must be present');
@@ -263,7 +254,7 @@ async function testMissingHolidayAndWeatherDropped() {
   }
 }
 
-async function testZodiacFallbackLanguageMismatchDropped() {
+async function testZodiacStillRejectedAfterRepairDropped() {
   const bankDate = getBankDateString();
   const targetDate = '2026-05-01';
   insertBankItem(bankDate, 'idiom', 'Piece of cake means something very easy to do.');
@@ -273,10 +264,8 @@ async function testZodiacFallbackLanguageMismatchDropped() {
   const weather = { countryCode: 'JP' };
 
   const mock = installOpenAiMock((payload) => payload.slots.map((slot, index) => {
-    // daily_horoscope is always invalid (a question, no real content) on
-    // both first pass and repair -- ZODIAC_FALLBACK_TEXT has no 'ja' entry,
-    // so the grounded fallback would only be available in English, and must
-    // be dropped rather than shown in the wrong language.
+    // daily_horoscope is always invalid on both first pass and repair, so it
+    // must be dropped rather than shown with any server-authored fallback.
     if (slot.type === 'daily_horoscope') {
       return mockPhrase(slot, index, OVERLONG_TEXT_JA);
     }
@@ -286,7 +275,7 @@ async function testZodiacFallbackLanguageMismatchDropped() {
   try {
     const { phrases } = await generateMorningPack(device, targetDate, signals, weather, null);
     const types = phrases.map((p) => p.type);
-    assert(!types.includes('daily_horoscope'), 'daily_horoscope must be dropped, not shown with an English-only zodiac fallback for a ja pack');
+    assert(!types.includes('daily_horoscope'), 'daily_horoscope must be dropped, not shown with server-authored zodiac fallback text');
     assert(types.includes('daily_numerology'), 'daily_numerology (unrelated slot) should be unaffected');
   } finally {
     mock.restore();
@@ -595,7 +584,7 @@ async function main() {
   await testTargetDateComputation();
   await testPackOrderFactsAndDrop();
   await testMissingHolidayAndWeatherDropped();
-  await testZodiacFallbackLanguageMismatchDropped();
+  await testZodiacStillRejectedAfterRepairDropped();
   await testPackGeneratedExactlyOnceAndReused();
   await testDayWindowNoPackDateHeldGeneratesToday();
   await testPackFailureNeverBreaksOrdinaryBatch();

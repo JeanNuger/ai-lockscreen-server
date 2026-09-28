@@ -118,11 +118,11 @@ function main() {
     assert(!/естественным современным русским/i.test(promptNoArgs));
   }
 
-  // --- 8. the fixed fallback string no longer contains the dangling "его" ---
+  // --- 8. server-authored fallback strings are gone entirely ---
   {
     const src = fs.readFileSync(require.resolve('../src/contentGenerator.js'), 'utf8');
     assert(!src.includes('Отдохни — ты его заслужил'), 'the old calque fallback string must be gone from the source');
-    assert(src.includes('Ты заслуживаешь немного отдыха'), 'the corrected, gender-neutral fallback string must be present');
+    assert(!src.includes('Ты заслуживаешь немного отдыха'), 'server-authored fallback strings must not remain in the source');
   }
 }
 
