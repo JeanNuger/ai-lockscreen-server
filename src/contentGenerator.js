@@ -2095,15 +2095,25 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
         for (const item of repaired) {
           repairedSlotIds.add(item.slot_id);
         }
-        // A pair's ALREADY-accepted half can be among `repaired` too (it was
-        // pulled in by expandRejectedSlotIdsWithPairs above even though it
-        // wasn't itself rejected) -- its OLD entry must be dropped from
-        // assembly.phrases before merging, or collectUsablePhrases would see
-        // the same slot_id twice and reject the fresh (repaired) one as a
-        // duplicate, silently keeping the stale, now-inconsistent text.
-        const repairedIds = new Set(repaired.map((item) => item.slot_id));
+        // Every slot_id SENT to repair this round (repairSlotIds, not just
+        // the ones that came back accepted in `repaired`) must have its OLD
+        // entry dropped from assembly.phrases before merging -- filtering by
+        // `repaired`'s own slot_ids instead was a real bug: a pair's
+        // already-accepted half pulled in by expandRejectedSlotIdsWithPairs
+        // could come back rejected AGAIN this round (still in repairSlotIds,
+        // but absent from `repaired`), and its stale OLD text would then
+        // survive the filter and get concatenated back in unchanged --
+        // exactly the "new question + stale, no-longer-matching old answer"
+        // bug this fixes. Filtering by the full repairSlotIds instead means
+        // a half that fails again is correctly left OUT of `merged`
+        // entirely (missing, not stale), so the next assembleBatchFrom
+        // GeneratedPhrases call reports it as still-rejected -- feeding
+        // round 2's rejectedSlotIds, and ultimately
+        // enforcePairDropsAfterRepair, exactly as if it had never been
+        // accepted in the first place.
+        const repairSlotIdSet = new Set(repairSlotIds);
         const merged = (assembly.phrases || [])
-          .filter((item) => !repairedIds.has(item.slot_id))
+          .filter((item) => !repairSlotIdSet.has(item.slot_id))
           .concat(repaired);
         const repairTraceParts = { fallback: [], styleDedupe: [], firstPass: [] };
         // dropMissing=true here too -- a slot still rejected after this

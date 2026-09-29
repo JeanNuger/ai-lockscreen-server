@@ -269,12 +269,63 @@ async function testWordLearningFailsDropsRecallToo() {
   }
 }
 
+// --- Regression: new question accepted, new answer rejected in BOTH repair
+// rounds -> neither must survive, and the OLD (round-0) answer text must
+// NOT be the one left stale in the final batch. Before the fix, the old
+// accepted answer's entry was only removed from assembly.phrases when it
+// came back in `repaired` -- filtering by `repairedIds` instead of the full
+// `repairSlotIds` -- so a half that got pulled into repair (as the
+// rejected question's pair partner) but failed AGAIN on every repair
+// attempt never actually left assembly.phrases, and the final batch ended
+// up with a freshly-regenerated question paired with a stale, no-longer-
+// matching answer.
+async function testAnswerRejectedInRepairDoesNotLeaveStaleOldAnswer() {
+  process.env.OPENAI_API_KEY = 'test-key-pair-stale-answer-bug';
+  const deviceId = 'pair-stale-answer-bug-device';
+  insertDevice(deviceId);
+  try {
+    await withMockedOpenAi(
+      (type, callNumber) => {
+        if (type === 'quiz_question') {
+          // Rejected on the first pass only; accepted on every repair call.
+          return callNumber === 1 ? 'overlong' : 'good';
+        }
+        if (type === 'quiz_answer') {
+          // Accepted on the first pass, then rejected on EVERY repair call
+          // (both rounds) -- the exact regression scenario.
+          return callNumber === 1 ? 'good' : 'overlong';
+        }
+        return 'good';
+      },
+      async (getCallCount) => {
+        const { result } = await captureConsole(() => runBatch(deviceId, 'day'));
+        assert(getCallCount() >= 3, 'must have fired the first pass plus two repair rounds');
+        assert(
+          !result.phrases.some((p) => p.text.includes('quiz_question')),
+          'quiz_question must be absent (its pair partner never recovered)'
+        );
+        assert(
+          !result.phrases.some((p) => p.text.includes('quiz_answer')),
+          'quiz_answer must be absent (it was rejected on every repair attempt)'
+        );
+        assert(
+          !result.phrases.some((p) => p.text.startsWith('Concrete filler call1 quiz_answer')),
+          'the STALE round-0 (call 1) quiz_answer text must never survive into the final batch'
+        );
+      }
+    );
+  } finally {
+    delete process.env.OPENAI_API_KEY;
+  }
+}
+
 async function main() {
   testPairOrderWithinFixedOrder();
   await testRejectedQuizQuestionSendsBothHalvesToRepair();
   await testQuizQuestionNeverRecoversDropsBothHalves();
   await testOnlyRecallFailsKeepsWordLearning();
   await testWordLearningFailsDropsRecallToo();
+  await testAnswerRejectedInRepairDoesNotLeaveStaleOldAnswer();
 }
 
 main()
