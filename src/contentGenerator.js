@@ -42,6 +42,114 @@ const OPENAI_BATCH_MODEL = process.env.OPENAI_BATCH_MODEL || 'gpt-5-mini';
 // quality over 'low'. Not passed to non-gpt-5 models (see createOpenAiBatch).
 const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || 'low';
 
+// Per-attempt timeout for every individual OpenAI call this file makes
+// (primary batch/pack call, its retries, and the repair/regenerate call) --
+// bounds a single call so a hung request can't silently eat the Android
+// client's own read/call timeout (OkHttpPhraseApiClient.java: readTimeout
+// 60s, callTimeout 90s) the way the openai SDK's own 10-minute default
+// would. Passed as { timeout } on each `.create()` call.
+const OPENAI_CALL_TIMEOUT_MS = 30000;
+// Primary batch/pack call only (never the repair/regenerate call, which
+// stays single-attempt): 1 initial try + up to 3 retries, with the SDK's
+// own internal retry disabled ({ maxRetries: 0 } on the same call) so this
+// array is the only retry schedule in play and total attempts/timing stay
+// predictable. Owner-specified schedule.
+const OPENAI_MAX_ATTEMPTS = 4;
+const OPENAI_RETRY_DELAYS_MS = [1000, 2000, 3000];
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 429 and 5xx are transient server/quota conditions worth retrying; 4xx
+// other than 429 (400 bad request, 401/403 auth/permission) means retrying
+// with the same request will just fail the same way, so those -- and the
+// "no HTTP status at all" case for a genuinely unrecognized error -- are the
+// only ones NOT retried. An error with no `.status` at all (network
+// failure, DNS, connect/read timeout, our own AbortError from the timeout
+// above) is exactly the case retrying can help with, so it defaults to
+// retryable.
+function isRetryableOpenAiError(err) {
+  const status = err && typeof err.status === 'number' ? err.status : null;
+  if (status === null) {
+    return true;
+  }
+  if (status === 429) {
+    return true;
+  }
+  return status >= 500 && status < 600;
+}
+
+// Shared formatter for every AI_BATCH_ERROR/PACK_ERROR log line touched by
+// this task: err.name/status/code/type plus err.message truncated to 300
+// chars (never the API key or request headers, which aren't read here at
+// all). Collapsed to one line so a multi-line SDK error message can't split
+// the log entry.
+function formatOpenAiErrorDetails(err) {
+  const rawMessage = err && typeof err.message === 'string' ? err.message : '';
+  const message = rawMessage.replace(/\s+/g, ' ').trim().slice(0, 300);
+  const name = err && err.name ? err.name : 'Error';
+  const status = err && err.status !== undefined && err.status !== null ? err.status : 'none';
+  const code = err && err.code !== undefined && err.code !== null ? err.code : 'none';
+  const type = err && err.type !== undefined && err.type !== null ? err.type : 'none';
+  return `err_name=${name} err_status=${status} err_code=${code} err_type=${type} err_message="${message}"`;
+}
+
+// Retries ONLY the primary call+parse pair (createOpenAiBatch +
+// parseOpenAiBatchResponse) for the ordinary batch and the morning pack --
+// never the repair/regenerate call (owner decision: repair keeps its
+// existing single-attempt, up-to-2-rounds behavior untouched). A parse/
+// schema failure is treated the same as a transport failure: both re-issue
+// the OpenAI call, since a malformed response is exactly as likely to be a
+// one-off glitch as a dropped connection. Logs one OPENAI_ATTEMPT line per
+// attempt (console.log on success, console.error on failure) -- deliberately
+// NOT prefixed AI_BATCH_ERROR/PACK_ERROR, since a successful attempt isn't an
+// error and grep'ing those two prefixes for "did this batch/pack fail" must
+// not match a mid-retry success line. On final exhaustion throws an Error
+// tagged with `.retryReason` ('openai_error' or 'parse_or_schema_error') so
+// the caller can still report the same two distinct AI_BATCH_RESULT/PACK
+// reasons it always has.
+async function callOpenAiBatchWithRetry(client, context, languageCode, { count, schemaName, scope }) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= OPENAI_MAX_ATTEMPTS; attempt += 1) {
+    const attemptStartMs = Date.now();
+    let response;
+    try {
+      response = await createOpenAiBatch(client, context, languageCode, count, schemaName, OPENAI_CALL_TIMEOUT_MS);
+    } catch (err) {
+      const durationMs = Date.now() - attemptStartMs;
+      console.error(`OPENAI_ATTEMPT scope=${scope} result=openai_error attempt=${attempt}/${OPENAI_MAX_ATTEMPTS} duration_ms=${durationMs} ${formatOpenAiErrorDetails(err)}`);
+      lastErr = err;
+      lastErr.retryReason = 'openai_error';
+      if (!isRetryableOpenAiError(err) || attempt === OPENAI_MAX_ATTEMPTS) {
+        throw lastErr;
+      }
+      await sleep(OPENAI_RETRY_DELAYS_MS[attempt - 1]);
+      continue;
+    }
+
+    try {
+      const parsed = parseOpenAiBatchResponse(response);
+      const durationMs = Date.now() - attemptStartMs;
+      console.log(`OPENAI_ATTEMPT scope=${scope} result=success attempt=${attempt}/${OPENAI_MAX_ATTEMPTS} duration_ms=${durationMs}`);
+      return parsed;
+    } catch (err) {
+      const durationMs = Date.now() - attemptStartMs;
+      console.error(`OPENAI_ATTEMPT scope=${scope} result=parse_or_schema_error attempt=${attempt}/${OPENAI_MAX_ATTEMPTS} duration_ms=${durationMs} ${formatOpenAiErrorDetails(err)}`);
+      lastErr = err;
+      lastErr.retryReason = 'parse_or_schema_error';
+      if (attempt === OPENAI_MAX_ATTEMPTS) {
+        throw lastErr;
+      }
+      await sleep(OPENAI_RETRY_DELAYS_MS[attempt - 1]);
+    }
+  }
+  // Unreachable (the loop above always returns or throws), kept only so a
+  // future edit that breaks that invariant fails loudly instead of
+  // returning undefined.
+  throw lastErr || new Error('openai_retry_exhausted');
+}
+
 // `focus` (content-improvement follow-up, req 3 "усилить различие между
 // morning/day/evening/night") is a short, data-only mood/topic steer for the
 // currently-selected, non-fixed-type slots (everyday_lifehack/
@@ -922,7 +1030,15 @@ function buildBatchResponseFormat(name, count) {
 // call here sends max_tokens/temperature at all.
 const IS_REASONING_MODEL = /^gpt-5/i.test(OPENAI_BATCH_MODEL);
 
-async function createOpenAiBatch(client, context, languageCode, count = BATCH_SIZE, schemaName = 'lock_screen_batch') {
+// timeoutMs (optional): per-call { timeout } passed to the SDK, with the
+// SDK's own internal retry disabled ({ maxRetries: 0 }) so a caller doing
+// its own retry loop (callOpenAiBatchWithRetry) is the only thing deciding
+// when/whether this call is repeated -- without maxRetries: 0, the SDK's
+// default of 2 internal retries would silently multiply every attempt here
+// and make the owner-specified 1/2/3s retry schedule meaningless. Undefined
+// timeoutMs (no caller currently omits it) falls back to the SDK's own
+// defaults (600000ms timeout, maxRetries 2).
+async function createOpenAiBatch(client, context, languageCode, count = BATCH_SIZE, schemaName = 'lock_screen_batch', timeoutMs = undefined) {
   const params = {
     model: OPENAI_BATCH_MODEL,
     response_format: buildBatchResponseFormat(schemaName, count),
@@ -934,7 +1050,8 @@ async function createOpenAiBatch(client, context, languageCode, count = BATCH_SI
   if (IS_REASONING_MODEL) {
     params.reasoning_effort = OPENAI_REASONING_EFFORT;
   }
-  return client.chat.completions.create(params);
+  const options = timeoutMs === undefined ? undefined : { timeout: timeoutMs, maxRetries: 0 };
+  return client.chat.completions.create(params, options);
 }
 
 // rejectedDetails (optional, from assembly.rejectedDetails) carries the
@@ -1000,7 +1117,8 @@ async function regenerateRejectedSlots(client, basePayload, slots, rejectedSlotI
     JSON.stringify(repairPayload),
     languageCode,
     repairSlots.length,
-    'lock_screen_repair'
+    'lock_screen_repair',
+    OPENAI_CALL_TIMEOUT_MS
   );
   const parsed = parseOpenAiBatchResponse(response);
   const repaired = collectUsablePhrases(
@@ -1520,13 +1638,11 @@ async function generateMorningPack(device, targetDate, signals, weather, weather
   };
 
   let client;
-  let response;
   try {
     const OpenAI = require('openai');
     client = new OpenAI({ apiKey });
-    response = await createOpenAiBatch(client, context, languageCode, packSlots.length, 'lock_screen_morning_pack');
   } catch (err) {
-    console.error(`PACK_ERROR reason=openai_error error=${err.name || 'Error'}`);
+    console.error(`PACK_ERROR reason=openai_error attempt=1/1 ${formatOpenAiErrorDetails(err)}`);
     trace.summary = { reason: 'openai_error' };
     recordGenerationMs(trace, generationStartMs);
     return { phrases: [], trace };
@@ -1534,10 +1650,13 @@ async function generateMorningPack(device, targetDate, signals, weather, weather
 
   let parsed;
   try {
-    parsed = parseOpenAiBatchResponse(response);
+    parsed = await callOpenAiBatchWithRetry(client, context, languageCode, {
+      count: packSlots.length,
+      schemaName: 'lock_screen_morning_pack',
+      scope: 'pack',
+    });
   } catch (err) {
-    console.error(`PACK_ERROR reason=parse_or_schema_error error=${err.name || 'Error'}`);
-    trace.summary = { reason: 'parse_or_schema_error' };
+    trace.summary = { reason: err.retryReason || 'openai_error' };
     recordGenerationMs(trace, generationStartMs);
     return { phrases: [], trace };
   }
@@ -1596,7 +1715,7 @@ async function generateMorningPack(device, targetDate, signals, weather, weather
         assembly = assemblePackFromGeneratedPhrases(merged, languageCode, validationContext, packSlots, {});
       }
     } catch (err) {
-      console.error(`PACK_ERROR reason=slot_regeneration_error error=${err.name || 'Error'}`);
+      console.error(`PACK_ERROR reason=slot_regeneration_error attempt=1/1 ${formatOpenAiErrorDetails(err)}`);
     }
   };
 
@@ -1775,26 +1894,26 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
     return buildLoggedFallbackResult(languageCode, context, 'no_api_key_fallback', 0, trace, slots, dateContext, generationStartMs);
   }
 
-  let response;
   let client;
   try {
     // Lazy require: avoids crashing at startup if the package is present but
     // no key is set yet, and keeps the fallback path dependency-free.
     const OpenAI = require('openai');
     client = new OpenAI({ apiKey });
-    response = await createOpenAiBatch(client, context, languageCode);
-
   } catch (err) {
-    console.error(`AI_BATCH_ERROR reason=openai_error error=${err.name || 'Error'}`);
+    console.error(`AI_BATCH_ERROR reason=openai_error attempt=1/1 ${formatOpenAiErrorDetails(err)}`);
     return buildLoggedFallbackResult(languageCode, context, 'openai_error', 0, trace, slots, dateContext, generationStartMs);
   }
 
   let parsed;
   try {
-    parsed = parseOpenAiBatchResponse(response);
+    parsed = await callOpenAiBatchWithRetry(client, context, languageCode, {
+      count: BATCH_SIZE,
+      schemaName: 'lock_screen_batch',
+      scope: 'batch',
+    });
   } catch (err) {
-    console.error(`AI_BATCH_ERROR reason=parse_or_schema_error error=${err.name || 'Error'}`);
-    return buildLoggedFallbackResult(languageCode, context, 'parse_or_schema_error', 0, trace, slots, dateContext, generationStartMs);
+    return buildLoggedFallbackResult(languageCode, context, err.retryReason || 'openai_error', 0, trace, slots, dateContext, generationStartMs);
   }
 
   let assembly;
@@ -1810,7 +1929,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
       trace.first_pass = firstPassTraceParts.firstPass || [];
     });
   } catch (err) {
-    console.error(`AI_BATCH_ERROR reason=final_assembly_fallback error=${err.name || 'Error'}`);
+    console.error(`AI_BATCH_ERROR reason=final_assembly_fallback attempt=1/1 ${formatOpenAiErrorDetails(err)}`);
     return buildLoggedFallbackResult(languageCode, context, 'final_assembly_fallback', 0, trace, slots, dateContext, generationStartMs);
   }
 
@@ -1895,7 +2014,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
         }
       }
     } catch (err) {
-      console.error(`AI_BATCH_ERROR reason=slot_regeneration_error error=${err.name || 'Error'}`);
+      console.error(`AI_BATCH_ERROR reason=slot_regeneration_error attempt=1/1 ${formatOpenAiErrorDetails(err)}`);
     }
   };
 

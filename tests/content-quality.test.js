@@ -600,7 +600,7 @@ async function main() {
     assert.deepStrictEqual(openAiErrorLogs.result.phrases, [], 'OpenAI outage must return an empty batch, not fallback phrases');
     assert.strictEqual(openAiErrorLogs.result.source, 'fallback');
     assert(openAiErrorLogs.logs.some((line) => line.includes('reason=openai_error')), 'OpenAI error path should log fallback reason');
-    assert(openAiErrorLogs.errors.some((line) => line.includes('reason=openai_error')), 'OpenAI error path should log one error line');
+    assert(openAiErrorLogs.errors.some((line) => line.startsWith('OPENAI_ATTEMPT scope=batch result=openai_error')), 'OpenAI error path should log at least one OPENAI_ATTEMPT error line');
   } finally {
     Module._load = originalLoad;
     delete process.env.OPENAI_API_KEY;
