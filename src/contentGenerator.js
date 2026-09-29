@@ -1516,7 +1516,7 @@ SLOT TYPES
 - warm_wish: one sincere, specific, kind wish. Not a greeting-card cliché.
 - poetic_thought: a short evening image — stars, autumn, city lights. Gentle, not pompous.
 - goodnight_care: a calm, warm goodnight line.
-- phone_trend, context_signal: a gentle observation about the user's day. No numbers, no advice.
+- phone_trend, context_signal: a gentle observation about the user's day; follow the slot's topic.
 - A slot's own "topic" field, when given, is that specific slot's instruction -- follow it exactly, in addition to (or instead of, if this list is silent on its type) the type description above.
 
 WRITING STYLE (no sample phrases are given on purpose; never copy wording from anywhere):

@@ -29,7 +29,7 @@ const {
 const EXPECTED_CATEGORIES = [
   'holiday', 'on_this_day', 'humor', 'idiom', 'statistic',
   'quote', 'science', 'technology', 'economics', 'fact',
-  'country_fact', 'good_news',
+  'country_fact', 'good_news', 'born_today',
 ];
 
 const EXPECTED_MAPPING = {
@@ -45,6 +45,7 @@ const EXPECTED_MAPPING = {
   fact: 'unusual_fact',
   country_fact: 'country_fact',
   good_news: 'good_news',
+  born_today: 'born_today',
 };
 
 function insertBankRow(bankDate, category, contentText, tags = ['global']) {

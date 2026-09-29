@@ -17,6 +17,15 @@
 //      back to a model-only candidate (not skipped) when today's Daily Bank
 //      has no matching item.
 //   6. (step 3) phone_trend's topic differs between evening and night.
+//   7. (step 3) with a completely empty Daily Bank AND an empty profile,
+//      every window still produces EXACTLY 12 slots -- every position that
+//      used to be silently dropped now gets spare_fact instead, and every
+//      substitution is logged as SLOT_SPARE.
+//   8. (step 3) greeting_name/goodnight_care get an explicit no-name topic
+//      when device.name is absent.
+//   9. (step 3) born_today is Daily-Bank-grounded (not model-only) and
+//      falls back to spare_fact, like the other newly-covered types, when
+//      the bank has none.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -33,7 +42,24 @@ const {
   MODEL_ONLY_TYPES,
   _test: plannerTest,
 } = require('../src/slotPlanner');
-const { MODEL_ONLY_FALLBACK_TYPES, WORD_LEARNING_MODEL_ONLY_TOPIC } = plannerTest;
+const {
+  MODEL_ONLY_FALLBACK_TYPES,
+  WORD_LEARNING_MODEL_ONLY_TOPIC,
+  SPARE_FACT_FALLBACK_TYPES,
+  NAME_ABSENT_TOPIC_BY_TYPE,
+} = plannerTest;
+
+function withCapturedWarnings(fn) {
+  const warnCalls = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnCalls.push(args.join(' '));
+  try {
+    const result = fn();
+    return { result, warnCalls };
+  } finally {
+    console.warn = originalWarn;
+  }
+}
 
 function typesOf(slots) {
   return slots.map((slot) => slot.type);
@@ -63,6 +89,7 @@ const richBankItems = [
   { category: 'fact', content_text: 'Bananas are botanically berries.', tags: ['global'] },
   { category: 'country_fact', content_text: 'Kazakhstan is the largest landlocked country.', tags: ['global'] },
   { category: 'good_news', content_text: 'A rare species was rediscovered after 30 years.', tags: ['global'] },
+  { category: 'born_today', content_text: 'Marie Curie was born on this day.', tags: ['global'] },
 ];
 
 function richDevice(deviceId) {
@@ -262,6 +289,124 @@ function testCultureHasTopic() {
   assert.strictEqual(cultureSlot.topic, 'A short real quote with its author.', 'culture must carry its topic hint');
 }
 
+// Owner requirement, step 3: "всегда 12 фраз" -- with a completely empty
+// Daily Bank AND a bare-minimum (nameless, genderless, no birth_date)
+// device, EVERY window must still produce exactly BATCH_SIZE slots. Every
+// FIXED_ORDER_BY_WINDOW type is now covered by one of: MODEL_ONLY_TYPES,
+// MODEL_ONLY_FALLBACK_TYPES, SPARE_FACT_FALLBACK_TYPES, or one of the
+// always-present special builders (greeting_name/goodnight_care/gender_tip/
+// city_fact/word_recall_same_batch).
+function testAlways12SlotsWithEmptyBankAndProfile() {
+  for (const window of Object.keys(FIXED_ORDER_BY_WINDOW)) {
+    const input = {
+      device: { device_id: `always-12-${window}-device` },
+      window,
+      dateContext,
+      bankItems: [],
+    };
+    const planned = planSlots(input, { seed: `always-12-${window}-seed` });
+    assert.strictEqual(
+      planned.slots.length,
+      BATCH_SIZE,
+      `${window}: must be exactly ${BATCH_SIZE} slots with an empty Daily Bank and an empty profile, got ${planned.slots.length} (${JSON.stringify(typesOf(planned.slots))})`
+    );
+    // Position count/order is preserved -- each position is either its own
+    // declared type (real or model-only data found) or spare_fact (that
+    // type's fallback fired), never dropped, never a different type.
+    const actualTypes = typesOf(planned.slots);
+    FIXED_ORDER_BY_WINDOW[window].forEach((expectedType, index) => {
+      const actualType = actualTypes[index];
+      const isExpectedOrSpare = actualType === expectedType || (actualType === 'spare_fact' && SPARE_FACT_FALLBACK_TYPES.has(expectedType));
+      assert(
+        isExpectedOrSpare,
+        `${window} position ${index + 1}: expected "${expectedType}" or its spare_fact substitute, got "${actualType}"`
+      );
+    });
+  }
+}
+
+// Every SPARE_FACT_FALLBACK_TYPES substitution must log one SLOT_SPARE line
+// naming the window and the ORIGINAL type that got replaced.
+function testSpareFactSubstitutionsAreLogged() {
+  for (const window of Object.keys(FIXED_ORDER_BY_WINDOW)) {
+    const spareEligibleTypesForWindow = FIXED_ORDER_BY_WINDOW[window].filter((type) => SPARE_FACT_FALLBACK_TYPES.has(type));
+    if (spareEligibleTypesForWindow.length === 0) {
+      continue;
+    }
+    const input = {
+      device: { device_id: `spare-log-${window}-device` },
+      window,
+      dateContext,
+      bankItems: [],
+    };
+    const { result: planned, warnCalls } = withCapturedWarnings(() => planSlots(input, { seed: `spare-log-${window}-seed` }));
+    for (const originalType of spareEligibleTypesForWindow) {
+      assert(
+        warnCalls.some((line) => line === `SLOT_SPARE window=${window} replaced_type=${originalType}`),
+        `${window}: must log "SLOT_SPARE window=${window} replaced_type=${originalType}" when it has no candidate, got: ${JSON.stringify(warnCalls)}`
+      );
+      const slot = planned.slots.find((s) => s.id === `model_only_spare_fact_${originalType}`);
+      assert(slot, `${window}: a spare_fact slot substituting "${originalType}" must be present`);
+      assert.strictEqual(slot.type, 'spare_fact', `${window}: the substituted slot's type must be spare_fact, not "${originalType}"`);
+    }
+  }
+}
+
+function testGreetingAndGoodnightGetNoNameTopicWhenNameIsAbsent() {
+  const morningPlanned = planSlots({
+    device: { device_id: 'no-name-morning-device' },
+    window: 'morning',
+    dateContext,
+    bankItems: [],
+  }, { seed: 'no-name-morning-seed' });
+  const greetingSlot = morningPlanned.slots.find((s) => s.type === 'greeting_name');
+  assert(greetingSlot, 'greeting_name must be present even with no device.name');
+  assert.strictEqual(greetingSlot.topic, NAME_ABSENT_TOPIC_BY_TYPE.greeting_name, 'greeting_name must carry the no-name topic when device.name is absent');
+
+  const nightPlanned = planSlots({
+    device: { device_id: 'no-name-night-device' },
+    window: 'night',
+    dateContext,
+    bankItems: [],
+  }, { seed: 'no-name-night-seed' });
+  const goodnightSlot = nightPlanned.slots.find((s) => s.type === 'goodnight_care');
+  assert(goodnightSlot, 'goodnight_care must be present even with no device.name');
+  assert.strictEqual(goodnightSlot.topic, NAME_ABSENT_TOPIC_BY_TYPE.goodnight_care, 'goodnight_care must carry the no-name topic when device.name is absent');
+}
+
+function testGreetingAndGoodnightKeepDefaultTopicWhenNameIsKnown() {
+  const morningPlanned = planSlots(richInput('morning', 'with-name-morning-device'), { seed: 'with-name-morning-seed' });
+  const greetingSlot = morningPlanned.slots.find((s) => s.type === 'greeting_name');
+  assert(greetingSlot, 'greeting_name must be present with rich data');
+  assert.notStrictEqual(greetingSlot.topic, NAME_ABSENT_TOPIC_BY_TYPE.greeting_name, 'greeting_name must NOT use the no-name topic when the name is known');
+
+  const nightPlanned = planSlots(richInput('night', 'with-name-night-device'), { seed: 'with-name-night-seed' });
+  const goodnightSlot = nightPlanned.slots.find((s) => s.type === 'goodnight_care');
+  assert(goodnightSlot, 'goodnight_care must be present with rich data');
+  assert.strictEqual(
+    goodnightSlot.topic,
+    plannerTest.TOPIC_HINT_BY_TYPE.goodnight_care,
+    'goodnight_care must keep its normal (name-known) topic when the name is known'
+  );
+}
+
+function testBornTodayComesFromBankAndFallsBackToSpareFact() {
+  const withBank = planSlots(richInput('evening', 'born-today-bank-device'), { seed: 'born-today-bank-seed' });
+  const bornTodaySlot = withBank.slots.find((s) => s.type === 'born_today');
+  assert(bornTodaySlot, 'born_today must be present with a matching Daily Bank item');
+  assert.strictEqual(bornTodaySlot.source, 'daily_bank', 'born_today must come from the Daily Bank, not be model-only, when a bank item exists');
+
+  const withoutBank = planSlots({
+    device: richDevice('born-today-no-bank-device'),
+    window: 'evening',
+    dateContext,
+    bankItems: richBankItems.filter((item) => item.category !== 'born_today'),
+  }, { seed: 'born-today-no-bank-seed' });
+  const spareSlot = withoutBank.slots.find((s) => s.id === 'model_only_spare_fact_born_today');
+  assert(spareSlot, 'born_today must fall back to spare_fact when the Daily Bank has no born_today item');
+  assert.strictEqual(spareSlot.type, 'spare_fact');
+}
+
 function main() {
   testExactOrderWithRichData();
   testModelOnlySlotsSurviveEmptyBank();
@@ -272,6 +417,11 @@ function main() {
   testGenderTipUsesProfileGenderWhenGiven();
   testPhoneTrendTopicDiffersByWindow();
   testCultureHasTopic();
+  testAlways12SlotsWithEmptyBankAndProfile();
+  testSpareFactSubstitutionsAreLogged();
+  testGreetingAndGoodnightGetNoNameTopicWhenNameIsAbsent();
+  testGreetingAndGoodnightKeepDefaultTopicWhenNameIsKnown();
+  testBornTodayComesFromBankAndFallsBackToSpareFact();
 }
 
 try {

@@ -143,6 +143,10 @@ async function main() {
       { category: 'on_this_day', bank_date: '2026-09-21', content_text: 'x' },
       { category: 'on_this_day', bank_date: '2026-09-22', content_text: 'x' },
       { category: 'on_this_day', bank_date: '2026-09-23', content_text: 'x' },
+      // born_today added (fixed-order rebuild, step 3): now date-sensitive too.
+      { category: 'born_today', bank_date: '2026-09-21', content_text: 'x' },
+      { category: 'born_today', bank_date: '2026-09-22', content_text: 'x' },
+      { category: 'born_today', bank_date: '2026-09-23', content_text: 'x' },
       { category: 'idiom', bank_date: bankDate, content_text: 'x' },
     ];
     const { warnCalls } = withCapturedConsole(() => {

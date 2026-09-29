@@ -20,6 +20,10 @@ const BANK_CATEGORIES = [
   'fact',
   'country_fact',
   'good_news',
+  // Fixed-order rebuild, step 3: date-sensitive like holiday/on_this_day
+  // (see DATE_SENSITIVE_CATEGORIES/GUARANTEED_SELECTION_CATEGORIES below) --
+  // real people actually born on the given date, not a generic fact.
+  'born_today',
 ];
 
 // How many bank items to ask the model for. Not a hard contract with the
@@ -30,7 +34,7 @@ const BANK_CATEGORIES = [
 // undersold how much real content this one call is now expected to return.
 const TARGET_BANK_SIZE = 50;
 const BANK_TIMEZONE = 'Asia/Almaty';
-const DATE_SENSITIVE_CATEGORIES = new Set(['holiday', 'on_this_day']);
+const DATE_SENSITIVE_CATEGORIES = new Set(['holiday', 'on_this_day', 'born_today']);
 
 const insertBankItemStatement = db.prepare(`
   INSERT INTO daily_content_bank (bank_date, category, content_text, tags)
@@ -41,9 +45,11 @@ const deleteBankItemsForDateStatement = db.prepare(`
   DELETE FROM daily_content_bank WHERE bank_date = ?
 `);
 
+// Kept in sync with DATE_SENSITIVE_CATEGORIES by hand (SQL IN can't
+// reference a JS Set) -- born_today added, fixed-order rebuild step 3.
 const selectDateSensitiveBankDatesStatement = db.prepare(`
   SELECT DISTINCT bank_date FROM daily_content_bank
-  WHERE category IN ('holiday', 'on_this_day')
+  WHERE category IN ('holiday', 'on_this_day', 'born_today')
   ORDER BY bank_date ASC
 `);
 
@@ -88,7 +94,12 @@ const insertShownCategoryStatement = db.prepare(`
 `);
 
 const DEFAULT_SELECTION_COUNT = 5;
-const GUARANTEED_SELECTION_CATEGORIES = ['holiday', 'on_this_day', 'idiom'];
+// born_today added (fixed-order rebuild, step 3): without a guaranteed pick,
+// it would only be offered some of the time (selectBankItemsForDevice's
+// shuffled, count-limited non-guaranteed round below), which would make
+// evening's born_today position fall back to spare_fact far more often than
+// "the bank genuinely has no one born today" alone would justify.
+const GUARANTEED_SELECTION_CATEGORIES = ['holiday', 'on_this_day', 'idiom', 'born_today'];
 
 // Shared product-day date for the global bank. This is deliberately one fixed
 // timezone, not per-user, so the app still generates one reusable bank per day.
@@ -191,14 +202,15 @@ function buildBankPrompt(bankDate, preparedDates = getPreparedBankDates(bankDate
   return `Search the web for what's notable around ${bankDate} and put together a varied global "content bank" for a phone lock screen app.
 Return STRICTLY a JSON array (no wrapper object, no explanations) of ${TARGET_BANK_SIZE} objects.
 Each object: {"bank_date": "YYYY-MM-DD", "category": one of [${BANK_CATEGORIES.join(', ')}], "content_text": "a short, self-contained piece of content in English, up to 200 characters", "tags": ["lowercase", "keyword", "tags"]}.
-For date-sensitive categories only ("holiday" and "on_this_day"), include real items for EACH of these dates: ${preparedDates.join(', ')}. Set bank_date to the exact date the item belongs to.
+For date-sensitive categories only ("holiday", "on_this_day", and "born_today"), include real items for EACH of these dates: ${preparedDates.join(', ')}. Set bank_date to the exact date the item belongs to.
 For "holiday" specifically: for EACH of these countries, search for that country's own official or widely observed public holidays, national days, or major cultural/religious observances falling on or very near each listed date, and tag every such item with that country's ISO code: ${countryCodes.join(', ')}. If a country genuinely has no such holiday on a given date, skip it there -- never invent one. Also include, for EVERY listed date, at least one genuine international observance day (a UN/UNESCO/WHO day or similarly widely-recognized global observance falling on that date), tagged "global". Only real, search-verified holidays and observances, never commercial/marketing "days of X" with no real official or cultural standing.
 Include at least one on_this_day item for every listed date.
+For "born_today": for EACH of these dates, include 1-2 real, well-known people actually born on that date, verified by web search, tag "global". Never invent a person or a birth date.
 For all other categories, set bank_date to ${bankDate}; these are reusable shared items for the generation day.
 Cover a genuine mix across ALL the listed categories, not just one or two -- include notable quotes, interesting statistics, an interesting idiom or expression with its meaning, a fact about one specific country, a genuinely positive and recent news development, and light humor only if it localizes cleanly.
 Choose "category" precisely -- it is used directly to decide what this item is, not just a label: "science" is for a science fact (physics, biology, space, chemistry, etc.); "technology" is for a technology/computing fact; "economics" is for a money/economics fact; "fact" is only for a genuinely miscellaneous interesting fact that does not belong in science, technology, or economics; "country_fact" is a fact specifically about ONE particular country (not a generic global fact), and must always carry that country's ISO code in tags; "good_news" is a genuinely positive, real, verifiable development from roughly the last few days -- never invented, never old news presented as new. Do not put a science/technology/economics fact under "fact".
 Keep the bank international and reusable for users in many countries: do not make it US-centric or Russia-centric.
-Prioritize accuracy from web search for date-specific items (holiday, on_this_day, good_news) -- holiday/on_this_day must match their own bank_date; good_news must be a real, recent, verifiable development; do not invent fake historical events, holidays, or news.
+Prioritize accuracy from web search for date-specific items (holiday, on_this_day, born_today, good_news) -- holiday/on_this_day/born_today must match their own bank_date; good_news must be a real, recent, verifiable development; do not invent fake historical events, holidays, birth dates, or news.
 Keep every content_text glanceable and self-contained (no "as mentioned above", no follow-up questions).
 For global/international items, add "global" to tags. For country-specific items -- including every "country_fact" item, which must always have one -- add the ISO country code tag such as "KZ", "FR", or "JP". Avoid country-specific politics.
 Do not generate self-help, motivational coaching, psychology tips, productivity advice, or generic wishes.

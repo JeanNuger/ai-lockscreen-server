@@ -64,6 +64,11 @@ const CONTENT_TYPES = [
   'nature_fact',
   'word_in_languages',
   'small_task_tomorrow',
+  // Fixed-order rebuild, step 3 (owner requirement: "всегда 12 фраз") --
+  // last-resort substitute for a fixed position whose own type has no
+  // candidate at all, so the position is never simply dropped. See
+  // SPARE_FACT_FALLBACK_TYPES/createSpareFactCandidate below.
+  'spare_fact',
 ];
 
 // Per-type length hint, sent to OpenAI alongside each slot (see
@@ -165,6 +170,7 @@ const TOPIC_HINT_BY_TYPE = {
   nature_fact: 'One surprising fact about nature.',
   word_in_languages: 'How an interesting word sounds in a few different languages.',
   small_task_tomorrow: 'One small, easy thing to do tomorrow.',
+  spare_fact: 'One interesting fact on any topic that does not repeat any other slot in this batch.',
 };
 
 // Window-specific override on top of TOPIC_HINT_BY_TYPE, for a type whose
@@ -412,9 +418,21 @@ const FIXED_ORDER_BY_WINDOW = {
 const MODEL_ONLY_TYPES = new Set([
   'days_countdown', 'quiz_question', 'quiz_answer', 'number_of_the_day',
   'word_origin', 'animal_fact', 'mind_fact', 'short_thought', 'space_fact',
-  'born_today', 'quick_dinner_idea', 'how_things_work', 'evening_idea',
+  'quick_dinner_idea', 'how_things_work', 'evening_idea',
   'watch_or_read', 'world_tradition', 'nature_fact', 'word_in_languages',
   'small_task_tomorrow',
+  // 'spare_fact' is deliberately NOT here -- it's never looked up by its own
+  // FIXED_ORDER_BY_WINDOW position (nothing ever asks for it directly), only
+  // synthesized as a substitute for a DIFFERENT type that had no candidate
+  // (see SPARE_FACT_FALLBACK_TYPES/createSpareFactCandidate). Listing it here
+  // would be harmless but misleading -- MODEL_ONLY_TYPES means "this exact
+  // type is always synthesized when its own position comes up", which is
+  // never true for spare_fact.
+  // 'born_today' removed (step 3): now Daily-Bank-grounded (see
+  // mapBankItemType's 'born_today' category) like any other existing type,
+  // going through the ordinary selectBestCandidateForType lookup below --
+  // falls back to spare_fact (SPARE_FACT_FALLBACK_TYPES), not a bare
+  // model-only candidate, when today's bank has none.
 ]);
 
 const CONTENT_MEMORY_EXEMPT_TYPES = new Set([
@@ -511,6 +529,10 @@ function mapBankItemType(item) {
   // keyword inference (see HANDOFF_2 content-diversity follow-up).
   if (item.category === 'country_fact') return 'country_fact';
   if (item.category === 'good_news') return 'good_news';
+  // Fixed-order rebuild, step 3: born_today is now date-sensitive
+  // Daily-Bank content (see dailyContentBank.js's DATE_SENSITIVE_CATEGORIES/
+  // GUARANTEED_SELECTION_CATEGORIES), same treatment as holiday/on_this_day.
+  if (item.category === 'born_today') return 'born_today';
   return 'unusual_fact';
 }
 
@@ -1746,16 +1768,76 @@ function buildCityFactCandidate(weather, signals) {
 // Fixed-order rebuild, step 3: these are normally Daily-Bank/profile-grounded
 // types (real data preferred, as before), but when today's bank has no
 // matching item for one, the position falls back to a model-only candidate
-// (the model invents the content) instead of being skipped entirely. Not
-// every existing type is here yet -- holiday_today/history_today/good_news/
-// learning_recall/phone_trend/weather_lifehack/daily_horoscope/
-// daily_numerology/greeting_name/goodnight_care still get skipped when
-// ungrounded, same as before (owner decision: a later step).
+// of the SAME type (the model invents the content) instead of being skipped
+// entirely.
 const MODEL_ONLY_FALLBACK_TYPES = new Set([
   'culture', 'science_fact', 'technology_fact', 'country_fact',
   'money_economics', 'unusual_fact', 'smart_humor_observation',
   'everyday_lifehack', 'warm_wish', 'poetic_thought', 'word_learning',
 ]);
+
+// Fixed-order rebuild, step 3 (owner requirement: "всегда 12 фраз" -- a
+// position must never be silently dropped, for ANY type): the remaining
+// Daily-Bank/profile-grounded types NOT in MODEL_ONLY_FALLBACK_TYPES above
+// (those get a model-only candidate of their OWN type; these instead get
+// substituted with a completely different type, spare_fact, since a
+// meaningful same-type fallback doesn't make sense for e.g. "today's
+// holiday" or "yesterday's phone trend" with no underlying data/history).
+// Every substitution is logged (see createSpareFactCandidate's caller in
+// buildFixedOrderSlots) so a real content gap stays observable.
+const SPARE_FACT_FALLBACK_TYPES = new Set([
+  'holiday_today', 'history_today', 'good_news', 'learning_recall',
+  'phone_trend', 'weather_lifehack', 'daily_horoscope', 'daily_numerology',
+  'born_today',
+]);
+
+// Substitute for any SPARE_FACT_FALLBACK_TYPES position with no candidate --
+// `originalType` is folded into the id only (for uniqueness across several
+// simultaneous substitutions in the same batch, e.g. a morning with no
+// weather AND no horoscope data), never into the slot's actual `type`,
+// which is always spare_fact. priority/constraints unused, same as every
+// other model-only candidate.
+function createSpareFactCandidate(originalType) {
+  return createCandidate({
+    id: `model_only_spare_fact_${originalType}`,
+    type: 'spare_fact',
+    priority: 0,
+    facts: {},
+    source: 'model_only',
+    constraints: [],
+  });
+}
+
+// Fixed-order rebuild, step 3: greeting_name/goodnight_care already always
+// produce a candidate (collectCandidates creates one unconditionally for
+// their window, with or without device.name -- see its own 'morning'/
+// 'night' blocks), so they were never actually skipped. What they lacked
+// was an explicit no-name instruction: TOPIC_HINT_BY_TYPE.goodnight_care's
+// "must include the user's name if it is in the profile" (and
+// greeting_name's system-prompt line, which mentions the name at all) both
+// implicitly assume a name might be used, which reads oddly with no name to
+// use. This overrides `topic` with an explicit no-name framing whenever
+// facts.name is absent, leaving the with-name case (the existing
+// topic/system-prompt text) completely unchanged.
+const NAME_ABSENT_TOPIC_BY_TYPE = {
+  greeting_name: 'A warm morning greeting. The user\'s name is not known -- greet warmly without using any name.',
+  goodnight_care: 'A calm, warm goodnight line. The user\'s name is not known -- do not use any name.',
+};
+
+// Returns a NEW object (never mutates `candidate` in place) -- candidates
+// can come from a caller-supplied/shared options.candidates pool (see
+// planSlots/tests), so mutating one in place could leak this window's
+// no-name topic into a later, unrelated call that reuses the same pool.
+function applyNameAbsentTopicIfNeeded(candidate) {
+  if (!candidate || !NAME_ABSENT_TOPIC_BY_TYPE[candidate.type]) {
+    return candidate;
+  }
+  const hasName = candidate.facts && typeof candidate.facts.name === 'string' && candidate.facts.name.trim();
+  if (hasName) {
+    return candidate;
+  }
+  return { ...candidate, topic: NAME_ABSENT_TOPIC_BY_TYPE[candidate.type] };
+}
 
 // Builds the 12 slots for a FIXED_ORDER_BY_WINDOW window strictly
 // position-by-position: one type per position, in that exact order, each
@@ -1795,7 +1877,15 @@ function buildFixedOrderSlots(order, candidates, input, rng, memoryIndex, exclud
       if (!candidate && MODEL_ONLY_FALLBACK_TYPES.has(type) && !(excludeTypes && excludeTypes.has(type))) {
         candidate = createModelOnlyCandidate(type, type === 'word_learning' ? WORD_LEARNING_MODEL_ONLY_TOPIC : undefined);
       }
+      // Same excludeTypes guard as above -- a SPARE_FACT_FALLBACK_TYPES type
+      // deliberately excluded for the morning-pack feature must stay
+      // skipped here too, not get replaced with spare_fact.
+      if (!candidate && SPARE_FACT_FALLBACK_TYPES.has(type) && !(excludeTypes && excludeTypes.has(type))) {
+        candidate = createSpareFactCandidate(type);
+        console.warn(`SLOT_SPARE window=${input.window} replaced_type=${type}`);
+      }
     }
+    candidate = applyNameAbsentTopicIfNeeded(candidate);
     if (!candidate) {
       continue;
     }
@@ -2247,6 +2337,10 @@ module.exports = {
     topicHintForType,
     MODEL_ONLY_FALLBACK_TYPES,
     WORD_LEARNING_MODEL_ONLY_TOPIC,
+    SPARE_FACT_FALLBACK_TYPES,
+    createSpareFactCandidate,
+    NAME_ABSENT_TOPIC_BY_TYPE,
+    applyNameAbsentTopicIfNeeded,
     buildFixedOrderSlots,
     createModelOnlyCandidate,
     buildWordRecallSameBatchCandidate,
