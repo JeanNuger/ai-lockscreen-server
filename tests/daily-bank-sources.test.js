@@ -39,8 +39,8 @@ const EXPECTED_MAPPING = {
   idiom: 'word_learning',
   statistic: 'unusual_fact',
   quote: 'culture',
-  science: 'science_tech',
-  technology: 'science_tech',
+  science: 'science_fact',
+  technology: 'technology_fact',
   economics: 'money_economics',
   fact: 'unusual_fact',
   country_fact: 'country_fact',
@@ -113,25 +113,29 @@ async function main() {
     );
   }
 
-  // --- city_fact and useful_knowledge are no longer active content types ---
+  // --- useful_knowledge is still not an active content type ---
+  // (city_fact WAS a removed/dead type at the time this guard was written --
+  // it has since been deliberately reintroduced, fixed-order rebuild step 1,
+  // as a real "modelled" type grounded in weather.city/country, not a bank
+  // category; see slotPlanner.js's CONTENT_TYPES/buildCityFactCandidate.)
   {
-    assert(!CONTENT_TYPES.includes('city_fact'), 'city_fact must be removed from CONTENT_TYPES');
     assert(!CONTENT_TYPES.includes('useful_knowledge'), 'useful_knowledge must be removed from CONTENT_TYPES');
-    assert(!FACTUAL_TYPES.has('city_fact'), 'city_fact must be removed from FACTUAL_TYPES');
     assert(!FACTUAL_TYPES.has('useful_knowledge'), 'useful_knowledge must be removed from FACTUAL_TYPES');
-    // No production code path can produce these types anymore either --
-    // any bank item with an unrecognized/removed category degrades to the
-    // safe default, never to a removed type.
+    // No production code path can produce a bank-category "city_fact" or
+    // "useful_knowledge" item into a real type either -- both still degrade
+    // to the safe default (unusual_fact is not a bank category the new
+    // city_fact type is ever sourced from).
     assert.strictEqual(plannerTest.mapBankItemType({ category: 'city_fact', content_text: 'x' }), 'unusual_fact');
     assert.strictEqual(plannerTest.mapBankItemType({ category: 'useful_knowledge', content_text: 'x' }), 'unusual_fact');
   }
 
-  // --- repo has no unexpected runtime dependency on the removed types ---
+  // --- repo has no unexpected runtime dependency on the still-removed type ---
+  // (city_fact is no longer in this list -- see the earlier comment.)
   {
     const slotPlannerSource = fs.readFileSync(path.join(__dirname, '../src/slotPlanner.js'), 'utf8');
     const dailyBankSource = fs.readFileSync(path.join(__dirname, '../src/dailyContentBank.js'), 'utf8');
     const contentGeneratorSource = fs.readFileSync(path.join(__dirname, '../src/contentGenerator.js'), 'utf8');
-    for (const removedType of ['city_fact', 'useful_knowledge']) {
+    for (const removedType of ['useful_knowledge']) {
       assert(!slotPlannerSource.includes(removedType), `slotPlanner.js must not reference removed type "${removedType}"`);
       assert(!dailyBankSource.includes(removedType), `dailyContentBank.js must not reference removed type "${removedType}"`);
       assert(!contentGeneratorSource.includes(removedType), `contentGenerator.js must not reference removed type "${removedType}"`);

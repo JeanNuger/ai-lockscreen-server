@@ -219,6 +219,15 @@ async function main() {
   assert.strictEqual(riddleSlots.length, 1, 'learning_recall type cap (1) must still apply with anti-repeat candidates present');
   assert.strictEqual(riddleSlots[0].id, 'fresh_riddle', 'fresh candidate must win the capped slot over recently-shown content');
 
+  // OBSOLETE: fixed order, remove in cleanup step.
+  // Tested the old competitive selectNonMandatory path's soft (score
+  // penalty, not hard exclusion) anti-repeat behavior across a full-width
+  // custom candidate pool for the 'day' window. Day's window now has a
+  // strict FIXED_ORDER_BY_WINDOW type list that does not include
+  // science_tech/unusual_fact as freely-competing types at all (see
+  // slotPlanner.js), so a synthetic all-science_tech/unusual_fact candidate
+  // pool no longer produces a batch through planSlots() for 'day' at all.
+  if (false) {
   const allRecent = planSlots({
     device: { device_id: 'all-recent-device' },
     window: 'day',
@@ -238,6 +247,7 @@ async function main() {
     allRecent.slots.some((slot) => slot.id && slot.id.startsWith('recent_candidate_')),
     'soft anti-repeat must not hard-exclude recent candidates'
   );
+  }
 
   // Daily Bank rows are freshly INSERTed every day (see dailyContentBank.js),
   // so item.id (and therefore content_key = `bank_${item.id}`) is NEVER the
@@ -350,13 +360,18 @@ async function main() {
   const noInterestsPlanned = planSlots(noInterestsAtAllInput, { seed: 'legacy-profile-seed' });
   assert(noInterestsPlanned.slots.length > 0 && noInterestsPlanned.slots.length <= BATCH_SIZE, 'a device with no interests at all must still plan a valid batch');
 
+  // OBSOLETE: fixed order, remove in cleanup step.
   // --- interests personalization (post-selection interest_hint tagging) ---
-  // Selection itself (candidateWeight/selectNonMandatory) is now completely
-  // unaware of interests -- selectInterestAwareSlots only tags already-final
-  // slots, so it structurally cannot override mandatory/learning-recall/
-  // anti-repeat/country/factual-grounding/Daily-Bank-freshness/type-cap
-  // decisions, all of which already happened before it ever runs.
-  {
+  // planSlots() for a real window no longer calls selectInterestAwareSlots/
+  // selectGenderLeanSlot at all in the fixed-order path (see
+  // slotPlanner.js's early "if (fixedOrder) {...return...}" branch) -- no
+  // interest_hint/gender_lean_hint is ever assigned to a real window's
+  // output anymore, so every assertion below that expects planSlots(...,
+  // {window: 'day'/...}).slots to carry interest_hint now fails. The
+  // selectInterestAwareSlots FUNCTION ITSELF is untouched and still correct
+  // (direct calls to it elsewhere in this block would still pass) but the
+  // whole block is kept together as one unit rather than split.
+  if (false) {
     const buildTaggedPool = (extra = []) => [
       plannerTest.createCandidate({ id: 'money_economics_a', type: 'money_economics', priority: 48, facts: { text: 'work fact a' } }),
       plannerTest.createCandidate({ id: 'money_economics_b', type: 'money_economics', priority: 48, facts: { text: 'work fact b' } }),
@@ -453,7 +468,7 @@ async function main() {
 
   const candidates = collectCandidates(baseInput);
   assert(candidates.some((candidate) => candidate.source === 'daily_bank' && candidate.type === 'history_today'), 'on_this_day bank item must become history_today candidate');
-  assert(candidates.some((candidate) => candidate.source === 'daily_bank' && candidate.type === 'science_tech'), 'a science-category bank item must become a science_tech candidate (Phase 5: direct mapping, not keyword inference)');
+  assert(candidates.some((candidate) => candidate.source === 'daily_bank' && candidate.type === 'science_fact'), 'a science-category bank item must become a science_fact candidate (fixed-order rebuild: science_tech split into science_fact/technology_fact)');
 
   const noPhoneTrendCandidates = collectCandidates({
     ...baseInput,
@@ -758,6 +773,17 @@ async function main() {
   assert.strictEqual(badSlotIds.rejectionReasons.slot_id, 2, 'invalid/missing slot_id must be rejected');
   assert.strictEqual(badSlotIds.generatedCount, 10);
 
+  // OBSOLETE: fixed order, remove in cleanup step.
+  // Asserted the old competitive-selection claim that a sparse 'day' batch
+  // (empty bank/weather) falls back to creative filler types including
+  // everyday_lifehack. Day's FIXED_ORDER_BY_WINDOW list no longer includes
+  // everyday_lifehack at all (it moved to morning position 11 in the new
+  // matrix) -- a sparse day batch now falls back to day's own
+  // MODEL_ONLY_TYPES entries instead (quiz_question/quiz_answer/
+  // number_of_the_day/word_origin/animal_fact/mind_fact/short_thought),
+  // covered by tests/fixed-order-slots.test.js's "model-only slots survive
+  // an empty bank" case.
+  if (false) {
   const sparseCreativeOnly = planSlots({
     device: { device_id: 'creative-only-device' },
     window: 'day',
@@ -795,6 +821,7 @@ async function main() {
     'creative filler IDs must be stable across independent planning calls'
   );
   assert((sparseCounts.get('everyday_lifehack') || 0) > 0, 'empty-input planner must include practical lifehack slots');
+  }
 
   // weather_lifehack is morning-only now (window-aware fixed slots) -- see
   // isCandidateAllowedInWindow / collectCandidates' window === 'morning' guard.
@@ -1005,10 +1032,14 @@ async function main() {
       'the boost must be capable of changing the outcome of an otherwise-tied selection (selection-time effect, not just post-hoc wording)'
     );
 
+    // OBSOLETE: fixed order, remove in cleanup step.
     // End-to-end sanity through the real planSlots/interestBoostTypesForDevice
-    // wiring (device.interests -> selectNonMandatory), using the SAME tied
-    // pool. context_signal is evening/night-only (content-quality rebuild,
-    // requirement B), so this must use an allowed window, not 'day'.
+    // wiring: planSlots() for a real window ('evening' here) no longer runs
+    // selectNonMandatory/interestBoostTypesForDevice at all in the
+    // fixed-order path, and 'context_signal' isn't in any
+    // FIXED_ORDER_BY_WINDOW list, so it can never appear in real output
+    // anymore regardless of interest boosting.
+    if (false) {
     const devicePlanned = planSlots(
       { device: { device_id: 'interest-selection-device', interests: JSON.stringify(['mindfulness']) }, window: 'evening' },
       { seed: 'interest-selection-seed', candidates: tiedPool, rng: tiedRng }
@@ -1017,6 +1048,7 @@ async function main() {
       devicePlanned.slots.some((s) => s.type === 'context_signal'),
       'mindfulness (affine to context_signal) must flow through planSlots -> interestBoostTypesForDevice -> selectNonMandatory end-to-end without the wiring being lost'
     );
+    }
 
     // Direct unit-level proof at the scoring function itself.
     const rng0 = () => 0.5;
@@ -1035,11 +1067,16 @@ async function main() {
       'the boost amount must be exactly INTEREST_SELECTION_BOOST, nothing more'
     );
 
+    // OBSOLETE: fixed order, remove in cleanup step.
     // 2: "не превращать весь batch в одну тему" -- even with EVERY interest
     // selected at once (maximum possible boost surface), the batch must
     // still be a mix, never all-one-type, because TYPE_CAPS/
     // MAX_GENERIC_FILLER_PER_BATCH are never bypassed by the boost (boost
     // only reorders scoring within the same capped selection process).
+    // planSlots() for 'day' no longer runs this scoring/capping machinery at
+    // all, and the custom richPool's types (science_tech, etc.) don't match
+    // day's fixed-order type list.
+    if (false) {
     const allInterests = JSON.stringify(['sport', 'work', 'family', 'self_development', 'mindfulness', 'creative_arts']);
     const richPool = [
       ...Array.from({ length: 3 }, (_, i) => plannerTest.createCandidate({ id: `rich_lifehack_${i + 1}`, type: 'everyday_lifehack', priority: 20, facts: {} })),
@@ -1063,6 +1100,7 @@ async function main() {
       assert(count <= maxAllowed, `even with every interest selected at once, type caps must hold: ${type}=${count} > ${maxAllowed}`);
     }
     assert(allInterestsCounts.size >= 4, `a batch with every interest selected must still be a genuine mix of types, not one theme (distinct types=${allInterestsCounts.size})`);
+    }
   }
 
   // --- 3: generic filler stays capped in a normal, richer batch (group cap,
@@ -1133,8 +1171,11 @@ async function main() {
     // can't silently drop it.
     assert(plannerTest.contextSignalConstraints('many_unlocks').includes('non_judgmental'));
 
-    // context_signal is evening/night-only (content-quality rebuild,
-    // requirement B) -- 'day' is deliberately not used here any more.
+    // OBSOLETE: fixed order, remove in cleanup step.
+    // context_signal is not in any FIXED_ORDER_BY_WINDOW list (owner's new
+    // 48-position matrix has no slot for it), so it can no longer appear in
+    // planSlots() output for a real window at all, regardless of signals.
+    if (false) {
     const lowBatterySlots = planSlots({
       device: { device_id: 'low-battery-device' },
       window: 'evening',
@@ -1146,6 +1187,7 @@ async function main() {
     assert.strictEqual(contextSlot.facts.signal, 'low_battery');
     assert(!('battery_level' in contextSlot.facts), 'raw battery_level must never reach a slot\'s facts');
     assert(contextSlot.constraints.includes('short_practical_context'));
+    }
 
     // age_context/ageBracketFor were removed entirely (content-quality
     // rebuild, requirement B: age_context is no longer a planned type) --

@@ -1100,6 +1100,7 @@ async function regenerateRejectedSlots(client, basePayload, slots, rejectedSlotI
         type: slot.type,
         facts: slot.facts || {},
         constraints: slot.constraints || [],
+        topic: slot.topic || undefined,
         interest_hint: slot.interest_hint || undefined,
         gender_lean_hint: slot.gender_lean_hint || undefined,
         // B3: the exact text that got rejected, why (detail carries the
@@ -1426,6 +1427,12 @@ function buildContextPrompt(device, window, signals, weather, languageCode, slot
         type: slot.type,
         facts: slot.facts || {},
         constraints: slot.constraints || [],
+        // Per-slot topic instruction (see TOPIC_HINT_BY_TYPE in
+        // slotPlanner.js) -- only present for the specific types that need
+        // one; every other slot omits this field entirely (dropped by
+        // JSON.stringify), relying purely on buildSystemPrompt's static SLOT
+        // TYPES section as before.
+        topic: slot.topic || undefined,
         // Target length for this specific slot (see TYPE_LENGTH_HINTS in
         // slotPlanner.js) -- 'short'/'medium'/'long' are targets the model
         // should aim for, not the hard cap; LOCK_SCREEN_TEXT_MAX_LENGTH (70)
@@ -1500,7 +1507,7 @@ SLOT TYPES
 - holiday_today: name the holiday, local one of the user's country first; friendly touch.
 - history_today: the year and what happened, vividly.
 - daily_numerology: the personal day number and its light meaning today; name the number.
-- word_learning: a real expression in the target language and its meaning.
+- word_learning: a rare but real word of the user's language and its meaning, to grow vocabulary.
 - learning_recall: remind an expression from recent days and its meaning.
 - science_tech, good_news, unusual_fact, country_fact: the most surprising part, simply.
 - culture: a short famous quote with the author, or a cultural fact.
@@ -1510,6 +1517,7 @@ SLOT TYPES
 - poetic_thought: a short evening image — stars, autumn, city lights. Gentle, not pompous.
 - goodnight_care: a calm, warm goodnight line.
 - phone_trend, context_signal: a gentle observation about the user's day. No numbers, no advice.
+- A slot's own "topic" field, when given, is that specific slot's instruction -- follow it exactly, in addition to (or instead of, if this list is silent on its type) the type description above.
 
 WRITING STYLE (no sample phrases are given on purpose; never copy wording from anywhere):
 - One short thought per phrase, natural spoken language, informal tone.

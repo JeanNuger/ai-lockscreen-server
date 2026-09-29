@@ -33,6 +33,37 @@ const CONTENT_TYPES = [
   'poetic_thought',
   'culture',
   'phone_trend',
+  // Fixed-order rebuild (owner-approved 12-slot-per-window matrix, see
+  // FIXED_ORDER_BY_WINDOW below) -- science_fact/technology_fact are a split
+  // of the old science_tech Daily Bank mapping (still Daily-Bank-grounded,
+  // just two distinct types now instead of one); everything else here is a
+  // brand new type with NO server-side facts source ("modelled" type, see
+  // MODEL_ONLY_TYPES) except gender_tip/city_fact/word_recall_same_batch,
+  // which get light server-computed facts (see buildGenderTipCandidate/
+  // buildCityFactCandidate/buildWordRecallSameBatchCandidate).
+  'days_countdown',
+  'word_recall_same_batch',
+  'quiz_question',
+  'quiz_answer',
+  'science_fact',
+  'number_of_the_day',
+  'word_origin',
+  'animal_fact',
+  'technology_fact',
+  'mind_fact',
+  'short_thought',
+  'gender_tip',
+  'space_fact',
+  'born_today',
+  'city_fact',
+  'quick_dinner_idea',
+  'how_things_work',
+  'evening_idea',
+  'watch_or_read',
+  'world_tradition',
+  'nature_fact',
+  'word_in_languages',
+  'small_task_tomorrow',
 ];
 
 // Per-type length hint, sent to OpenAI alongside each slot (see
@@ -82,6 +113,61 @@ const TYPE_LENGTH_HINTS = {
 
 function lengthHintForType(type) {
   return TYPE_LENGTH_HINTS[type] || 'medium';
+}
+
+// Per-slot topic instruction (fixed-order rebuild, step 2 -- prompt-size
+// fix): sent once per slot, in the per-batch context payload, instead of as
+// a static line in buildSystemPrompt that would be repeated on every single
+// request regardless of which types are actually in this batch. Covers:
+//   - every NEW type from the owner-approved 12-topic-per-window matrix
+//     (step 1) -- these never had a system-prompt line at all now;
+//   - the two types whose instruction needed to be STRICTER than their
+//     existing static system-prompt line for specific fixed positions
+//     (history_today's morning position 5 "must start with..."; goodnight_care's
+//     night position 12 "must include the user's name...") -- their original,
+//     looser static line stays in buildSystemPrompt unchanged, this ADDS
+//     the stricter requirement on top, per-slot;
+//   - money_economics, which never had its own system-prompt line at all
+//     before step 1 (it was covered only by the generic WRITING STYLE
+//     section) -- day position 10 needed one, so it lives here instead of
+//     growing the static prompt.
+// Deliberately NOT exhaustive over every type: a type absent from this map
+// (e.g. greeting_name, weather_lifehack, learning_recall, smart_humor_observation,
+// everyday_lifehack, warm_wish, poetic_thought, phone_trend/context_signal,
+// culture, science_tech/good_news/unusual_fact/country_fact) relies purely
+// on buildSystemPrompt's own SLOT TYPES section, exactly as before this
+// whole rebuild -- no behavior change for those types' prompting.
+const TOPIC_HINT_BY_TYPE = {
+  history_today: 'The year and what happened, vividly. Must start with "On this day in <year>," in the user\'s language.',
+  goodnight_care: 'A calm, warm goodnight line. Must include the user\'s name if it is in the profile.',
+  money_economics: 'Money explained simply, one practical idea.',
+  days_countdown: 'How many days are left until the weekend or the nearest well-known holiday, based on now.date.',
+  word_recall_same_batch: 'Ask the reader if they remember the meaning of the word from the word_learning slot in this same batch, then give it briefly. If no word_learning slot/word is given, ask generally about a word they may have learned recently.',
+  quiz_question: 'A short, fun trivia question with one clear correct answer. You also write that answer, matching this exact question, in the quiz_answer slot in this same batch. Do not reveal the answer here.',
+  quiz_answer: 'The correct answer to the quiz_question slot in this same batch — must match that question exactly. State it briefly and confidently.',
+  science_fact: 'One surprising science fact.',
+  number_of_the_day: 'One surprising real number with a short explanation of what it means.',
+  word_origin: 'Where a common word of the user\'s language comes from.',
+  animal_fact: 'One surprising fact about animals.',
+  technology_fact: 'One interesting technology fact.',
+  mind_fact: 'One interesting fact about the brain or human psychology.',
+  short_thought: 'One short wise thought. Not a quote, not a motivational cliché.',
+  gender_tip: 'One practical tip for a man or a woman, matching facts.gender if given; no stereotypes. If facts.gender is not given, a neutral practical tip for anyone.',
+  space_fact: 'One surprising fact about space.',
+  born_today: 'A well-known person born on this date, and one line about them.',
+  city_fact: 'An interesting fact about the user\'s city if facts.city is given, otherwise about facts.country; if neither is given, an interesting fact about a city or place somewhere in the world.',
+  quick_dinner_idea: 'An idea for a dinner that takes about 15 minutes.',
+  how_things_work: 'How a familiar everyday thing works.',
+  evening_idea: 'An idea for how to spend this evening.',
+  watch_or_read: 'One specific film, series or book worth trying tonight.',
+  world_tradition: 'An unusual, real tradition from another country.',
+  nature_fact: 'One surprising fact about nature.',
+  word_in_languages: 'How an interesting word sounds in a few different languages.',
+  small_task_tomorrow: 'One small, easy thing to do tomorrow.',
+};
+
+function topicHintForType(type) {
+  return TOPIC_HINT_BY_TYPE[type] || undefined;
 }
 
 const FACTUAL_TYPES = new Set([
@@ -254,6 +340,62 @@ const GUARANTEED_TYPES_BY_WINDOW = {
   night: [],
 };
 
+// Fixed-order rebuild, step 1 (owner-approved 12-topic matrix per window):
+// when a window has an entry here, planSlots() builds its 12 slots strictly
+// position-by-position from this list -- one type per position, in this
+// exact order -- instead of running the old priority/rng scoring + shuffle
+// (selectNonMandatory/candidateWeight) below. That old code is intentionally
+// left in place, unused for these four windows, for a later cleanup step
+// (owner decision) rather than deleted now.
+//
+// A position whose type currently has no real candidate (e.g. a Daily Bank
+// category empty today) is simply skipped -- same "drop, don't fake" rule
+// used everywhere else in this file -- EXCEPT for MODEL_ONLY_TYPES entries
+// (and the 3 lightly-computed ones below), which have no candidate
+// dependency at all and are therefore never skipped for lack of data (owner
+// requirement: "модельные слоты доступны всегда").
+const FIXED_ORDER_BY_WINDOW = {
+  morning: [
+    'greeting_name', 'weather_lifehack', 'daily_horoscope', 'holiday_today',
+    'history_today', 'daily_numerology', 'word_learning', 'days_countdown',
+    'culture', 'word_recall_same_batch', 'everyday_lifehack', 'warm_wish',
+  ],
+  day: [
+    'smart_humor_observation', 'science_fact', 'country_fact', 'quiz_question',
+    'number_of_the_day', 'quiz_answer', 'word_origin', 'animal_fact',
+    'technology_fact', 'money_economics', 'mind_fact', 'short_thought',
+  ],
+  evening: [
+    'good_news', 'phone_trend', 'unusual_fact', 'gender_tip', 'space_fact',
+    'born_today', 'city_fact', 'quick_dinner_idea', 'quiz_question',
+    'how_things_work', 'quiz_answer', 'evening_idea',
+  ],
+  night: [
+    'smart_humor_observation', 'phone_trend', 'watch_or_read', 'quiz_question',
+    'world_tradition', 'quiz_answer', 'poetic_thought', 'learning_recall',
+    'nature_fact', 'word_in_languages', 'small_task_tomorrow', 'goodnight_care',
+  ],
+};
+
+// "Modelled" types (owner's term): no server-side facts at all, just a short
+// topic instruction in buildSystemPrompt's SLOT TYPES section (never a
+// ready-made example phrase, per owner instruction) -- the model invents the
+// actual content itself. Always synthesized directly in
+// buildFixedOrderSlots(), never looked up against the candidates list, so
+// they can never be skipped for lack of a matching candidate. Does NOT
+// include word_recall_same_batch/gender_tip/city_fact (also facts-free from
+// the server's *bank* in the sense of no Daily Bank grounding, but each gets
+// a small amount of server-computed context -- see their own builders below)
+// or science_fact/technology_fact (genuinely Daily-Bank-grounded, handled
+// like any other existing type via selectBestCandidateForType).
+const MODEL_ONLY_TYPES = new Set([
+  'days_countdown', 'quiz_question', 'quiz_answer', 'number_of_the_day',
+  'word_origin', 'animal_fact', 'mind_fact', 'short_thought', 'space_fact',
+  'born_today', 'quick_dinner_idea', 'how_things_work', 'evening_idea',
+  'watch_or_read', 'world_tradition', 'nature_fact', 'word_in_languages',
+  'small_task_tomorrow',
+]);
+
 const CONTENT_MEMORY_EXEMPT_TYPES = new Set([
   'greeting_name',
   'goodnight_care',
@@ -328,11 +470,12 @@ function mapBankItemType(item) {
   if (item.category === 'idiom') return 'word_learning';
   if (item.category === 'statistic') return 'unusual_fact';
   if (item.category === 'quote') return 'culture';
-  // science and technology bank categories both fold into one science_tech
-  // content type (rebuild task) -- there was never a meaningfully different
-  // prompt treatment between the two on the client side anyway.
-  if (item.category === 'science') return 'science_tech';
-  if (item.category === 'technology') return 'science_tech';
+  // Split out of the old shared science_tech mapping (fixed-order rebuild,
+  // step 1): science/technology now need to occupy two DISTINCT, independently
+  // positioned slots in the day window's fixed order (positions 2 and 9), so
+  // they can no longer share one content type.
+  if (item.category === 'science') return 'science_fact';
+  if (item.category === 'technology') return 'technology_fact';
   if (item.category === 'economics') return 'money_economics';
   if (item.category === 'fact') return 'unusual_fact';
   // country_fact/good_news added in the same direct-mapping style, no
@@ -623,7 +766,9 @@ function isCadencedCandidateAllowed(candidate, input, typeMemoryIndex) {
       && !isDailyLimitedTypeAlreadyShown(typeMemoryIndex, candidate.type);
   }
   if (candidate.type === 'warm_wish') {
-    return (window === 'day' || window === 'evening')
+    // 'morning' added for the fixed-order rebuild's morning position 12 --
+    // see isCandidateAllowedInWindow's identical addition.
+    return (window === 'morning' || window === 'day' || window === 'evening')
       && !isDailyLimitedTypeAlreadyShown(typeMemoryIndex, candidate.type);
   }
   if (candidate.type === 'poetic_thought') {
@@ -1082,11 +1227,26 @@ function collectCandidates(input = {}) {
       });
     }
   }
+  // dedupeEconomicsAndStatisticBankEntries was written for the old
+  // competitive-selection windows, where money_economics and unusual_fact
+  // (fed by 'statistic') could end up fighting over the same handful of
+  // slots and the rule kept only one "dry/numeric" bank item per batch. In a
+  // FIXED_ORDER_BY_WINDOW window that reasoning no longer applies: day's
+  // fixed position 10 (money_economics) and evening's fixed position 3
+  // (unusual_fact) are two DISTINCT, independently guaranteed positions in
+  // two DIFFERENT batches (this function is called once per window), so
+  // dropping the economics candidate whenever a statistic candidate also
+  // exists (or vice versa) would wrongly starve a fixed position of data it
+  // owner-guaranteed should have. Skipped entirely for fixed-order windows;
+  // unchanged for any other window (kept old code path/tests untouched).
+  const economicsStatisticEntries = FIXED_ORDER_BY_WINDOW[window]
+    ? bankEntries
+    : dedupeEconomicsAndStatisticBankEntries(bankEntries);
   // One-topic-once-per-batch (production incident, batch_id 19): drop any
   // bank candidate that describes the same real-world event/topic as an
   // earlier bank candidate already kept for this batch -- see
   // dedupeByTopic/isSameTopicText above.
-  for (const candidate of dedupeByTopic(dedupeEconomicsAndStatisticBankEntries(bankEntries))) {
+  for (const candidate of dedupeByTopic(economicsStatisticEntries)) {
     candidates.push(candidate);
   }
 
@@ -1439,7 +1599,9 @@ function isCandidateAllowedInWindow(candidate, window) {
     return window === 'evening' || window === 'night';
   }
   if (candidate.type === 'warm_wish') {
-    return window === 'day' || window === 'evening';
+    // 'morning' added for the fixed-order rebuild's morning position 12
+    // (owner-approved) -- day/evening unchanged.
+    return window === 'morning' || window === 'day' || window === 'evening';
   }
   if (candidate.type === 'poetic_thought') {
     return window === 'evening' || window === 'night';
@@ -1455,6 +1617,134 @@ function selectBestCandidateForType(candidates, type, rng, memoryIndex) {
   return pool
     .map((candidate) => ({ candidate, score: candidateWeight(candidate, rng, memoryIndex) }))
     .sort((a, b) => b.score - a.score)[0].candidate;
+}
+
+// Bare "no server facts" candidate for any MODEL_ONLY_TYPES entry -- always
+// returns a usable candidate (never null), which is what makes these types
+// impossible to skip for lack of data. priority/constraints are irrelevant
+// here (never competes in the old scoring path); the model's actual
+// instruction for the type lives in buildSystemPrompt's SLOT TYPES section.
+function createModelOnlyCandidate(type) {
+  return createCandidate({
+    id: `model_only_${type}`,
+    type,
+    priority: 0,
+    facts: {},
+    source: 'model_only',
+    constraints: [],
+  });
+}
+
+// Morning position 10 (word_recall_same_batch): the SAME word taught at
+// position 7 (word_learning) in this same batch -- not the cross-day
+// device_learning_memory recall night's learning_recall uses. Reads
+// facts.word directly off the word_learning candidate this planSlots() call
+// already picked, so it can never disagree with what position 7 actually
+// says. If position 7 had no candidate at all (Daily Bank has no idiom item
+// today), this still returns a usable candidate with empty facts -- the
+// model-facing instruction is written to degrade gracefully to a generic
+// "a word you learned recently" framing in that case (owner requirement:
+// this type must never be skipped).
+function buildWordRecallSameBatchCandidate(wordLearningCandidate) {
+  const word = wordLearningCandidate && wordLearningCandidate.facts && wordLearningCandidate.facts.word;
+  return createCandidate({
+    id: 'model_only_word_recall_same_batch',
+    type: 'word_recall_same_batch',
+    priority: 0,
+    facts: word ? { word } : {},
+    source: 'model_only',
+    constraints: [],
+  });
+}
+
+// Evening position 4 (gender_tip): device.gender is untrusted/optional free
+// text from the profile, same as every other profile field this file reads
+// (see personalMorningFacts) -- passed through as-is when present, omitted
+// entirely when not, so the model-facing instruction (written to require a
+// neutral tip when facts.gender is absent) has an unambiguous signal for
+// "gender unknown" rather than an empty string. Always returns a usable
+// candidate (owner requirement: never skipped, degrades to a neutral tip).
+function buildGenderTipCandidate(device) {
+  const gender = device && typeof device.gender === 'string' && device.gender.trim()
+    ? device.gender.trim()
+    : null;
+  return createCandidate({
+    id: 'model_only_gender_tip',
+    type: 'gender_tip',
+    priority: 0,
+    facts: gender ? { gender } : {},
+    source: 'model_only',
+    constraints: [],
+  });
+}
+
+// Evening position 7 (city_fact): city from weather.city (the same field
+// weather_lifehack already reads for morning) when available; falls back to
+// the same country-code resolution buildContextPrompt itself uses (IP
+// geolocation, then device locale) when there's no city. Always returns a
+// usable candidate -- with neither city nor country, facts stays empty and
+// the model-facing instruction is written to fall back to a general
+// "somewhere interesting" framing rather than being skipped (owner
+// requirement: never skipped for lack of data).
+function buildCityFactCandidate(weather, signals) {
+  const city = weather && typeof weather.city === 'string' && weather.city.trim()
+    ? weather.city.trim()
+    : null;
+  const country = weather && typeof weather.countryCode === 'string' && weather.countryCode
+    ? weather.countryCode
+    : (signals && typeof signals.region === 'string' && signals.region ? signals.region : null);
+  const facts = {};
+  if (city) facts.city = city;
+  else if (country) facts.country = country;
+  return createCandidate({
+    id: 'model_only_city_fact',
+    type: 'city_fact',
+    priority: 0,
+    facts,
+    source: city ? 'weather' : (country ? 'device_signal' : 'model_only'),
+    constraints: [],
+  });
+}
+
+// Builds the 12 slots for a FIXED_ORDER_BY_WINDOW window strictly
+// position-by-position: one type per position, in that exact order, each
+// looked up (or synthesized, for MODEL_ONLY_TYPES/word_recall_same_batch/
+// gender_tip/city_fact) independently of every other position -- no scoring,
+// no shuffling, no type caps. `candidates` is the SAME filtered pool
+// planSlots() already built (window-eligibility + cadence/anti-repeat still
+// apply to every EXISTING type here exactly as before -- see planSlots'
+// caller). A position whose type has no matching candidate is skipped
+// (array simply comes out shorter than 12 for that day), except for the
+// three special-cased types above and every MODEL_ONLY_TYPES entry, which
+// always produce a candidate.
+function buildFixedOrderSlots(order, candidates, input, rng, memoryIndex) {
+  const usedIds = new Set();
+  const result = [];
+  let wordLearningCandidate = null;
+  for (const type of order) {
+    let candidate;
+    if (type === 'word_recall_same_batch') {
+      candidate = buildWordRecallSameBatchCandidate(wordLearningCandidate);
+    } else if (type === 'gender_tip') {
+      candidate = buildGenderTipCandidate(input.device);
+    } else if (type === 'city_fact') {
+      candidate = buildCityFactCandidate(input.weather, input.signals);
+    } else if (MODEL_ONLY_TYPES.has(type)) {
+      candidate = createModelOnlyCandidate(type);
+    } else {
+      const pool = candidates.filter((c) => !usedIds.has(c.id));
+      candidate = selectBestCandidateForType(pool, type, rng, memoryIndex);
+    }
+    if (!candidate) {
+      continue;
+    }
+    result.push(candidate);
+    usedIds.add(candidate.id);
+    if (type === 'word_learning') {
+      wordLearningCandidate = candidate;
+    }
+  }
+  return result;
 }
 
 function selectNonMandatory(candidates, count, rng, memoryIndex = buildRecentMemoryIndex(), initialTypeCounts = new Map(), interestBoostTypes = null) {
@@ -1491,8 +1781,19 @@ function addSlotIds(candidates) {
     bank_category: candidate.bank_category || undefined,
     constraints: candidate.constraints,
     length_hint: lengthHintForType(candidate.type),
+    // Per-slot topic instruction (fixed-order rebuild, step 2 -- prompt-size
+    // fix): only the types listed in TOPIC_HINT_BY_TYPE get one; everything
+    // else stays undefined and is dropped by JSON.stringify, relying purely
+    // on buildSystemPrompt's own static SLOT TYPES section as before. This
+    // is what let the new 23 types' (plus history_today/goodnight_care's
+    // stricter wording, plus money_economics') instructions move OUT of the
+    // static system prompt (sent on every single request) and into the
+    // per-batch context payload (sent once per slot per request, only for
+    // the <=12 slots actually in THIS batch) -- see buildContextPrompt.
+    topic: topicHintForType(candidate.type),
     // Server-only; buildContextPrompt hand-picks {slot_id, type, facts,
-    // constraints} for the OpenAI payload and does not include this field.
+    // constraints, topic} for the OpenAI payload and does not include this
+    // field.
     learning_memory_id: candidate.learning_memory_id,
     // Set below, after selection, by selectInterestAwareSlots/
     // selectGenderLeanSlot -- for the vast majority of slots these stay
@@ -1533,6 +1834,25 @@ function planSlots(input = {}, options = {}) {
   ].filter(Boolean).join('|');
   const rng = options.rng || createSeededRng(seed || 'slot-planner');
   const memoryIndex = buildRecentMemoryIndex(options.recentContentMemory);
+
+  // Fixed-order rebuild, step 1: when this window has a strict 12-position
+  // order (currently all four real windows -- see FIXED_ORDER_BY_WINDOW's own
+  // comment), it takes over completely here -- no mandatory/guaranteed/
+  // competitive/shuffle selection below runs at all for this call. `candidates`
+  // above already has the same window-eligibility/cadence filtering every
+  // existing type has always gone through, so nothing about an EXISTING
+  // type's data or anti-repeat behavior changes -- only which position it
+  // lands on, and whether it's still subject to TYPE_CAPS/scoring (it no
+  // longer is).
+  const fixedOrder = FIXED_ORDER_BY_WINDOW[input.window];
+  if (fixedOrder) {
+    const fixedSlots = addSlotIds(buildFixedOrderSlots(fixedOrder, candidates, input, rng, memoryIndex).slice(0, BATCH_SIZE));
+    return {
+      candidates,
+      slots: fixedSlots,
+    };
+  }
+
   const fixedMorning = [];
   if (input.window === 'morning') {
     const fixedIds = new Set();
@@ -1809,6 +2129,8 @@ module.exports = {
   planMorningPack,
   MORNING_FIXED_TYPES,
   MORNING_PACK_ORDER,
+  FIXED_ORDER_BY_WINDOW,
+  MODEL_ONLY_TYPES,
   createSeededRng,
   _test: {
     bankItemToCandidate,
@@ -1856,5 +2178,12 @@ module.exports = {
     selectNonMandatory,
     TYPE_LENGTH_HINTS,
     lengthHintForType,
+    TOPIC_HINT_BY_TYPE,
+    topicHintForType,
+    buildFixedOrderSlots,
+    createModelOnlyCandidate,
+    buildWordRecallSameBatchCandidate,
+    buildGenderTipCandidate,
+    buildCityFactCandidate,
   },
 };
