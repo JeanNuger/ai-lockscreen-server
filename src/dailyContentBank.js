@@ -24,8 +24,11 @@ const BANK_CATEGORIES = [
 
 // How many bank items to ask the model for. Not a hard contract with the
 // model -- generateDailyBank() below accepts whatever valid array it gets
-// back, even if shorter or longer than this.
-const TARGET_BANK_SIZE = 35;
+// back, even if shorter or longer than this. Raised 35 -> 50 (fixed-order
+// rebuild step 2): the "holiday" ask now covers up to 20 countries across 3
+// prepared dates instead of one shared item per date, so the old 35 target
+// undersold how much real content this one call is now expected to return.
+const TARGET_BANK_SIZE = 50;
 const BANK_TIMEZONE = 'Asia/Almaty';
 const DATE_SENSITIVE_CATEGORIES = new Set(['holiday', 'on_this_day']);
 
