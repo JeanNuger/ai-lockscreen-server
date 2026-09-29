@@ -1,4 +1,5 @@
 const db = require('./db');
+const { countryForTimezone } = require('./timezoneCountry');
 
 // Fixed category set for daily_content_bank rows. Step 2 (personalization,
 // not this task) will filter/select by these when building a device's batch,
@@ -120,11 +121,76 @@ function getPreparedBankDates(bankDate = getBankDateString()) {
   ].filter(Boolean);
 }
 
-function buildBankPrompt(bankDate, preparedDates = getPreparedBankDates(bankDate)) {
+// Countries this task's holiday coverage always asks for, regardless of
+// device data -- the app's core Central Asian/CIS market (owner-specified
+// list). Included even on a day with zero registered devices at all, so the
+// bank's holiday coverage never degrades to nothing for these countries
+// just because the `devices` table is empty/thin.
+const ALWAYS_INCLUDED_HOLIDAY_COUNTRIES = ['KZ', 'RU', 'UZ', 'KG', 'BY', 'UA', 'AZ', 'AM', 'GE', 'TJ', 'TM', 'MD'];
+// Hard cap on how many countries go into ONE bank-generation request --
+// keeps the prompt (and the model's web-search fan-out) bounded regardless
+// of how many distinct countries the device base ever grows to. The 12
+// ALWAYS_INCLUDED_HOLIDAY_COUNTRIES count against this same cap, so at most
+// (20 - 12) = 8 additional device-derived countries are ever added.
+const MAX_HOLIDAY_COUNTRIES = 20;
+
+const selectDeviceLocationsStatement = db.prepare(`
+  SELECT timezone, city_country_code FROM devices
+`);
+
+// Same two-step resolution routes/batch.js already uses for weather/country
+// (PRODUCT_REBUILD_PLAN.md: a device's own picked city outranks IP/timezone):
+// city_country_code (set at registration when the device picked a city --
+// see routes/register.js) first, else countryForTimezone(device.timezone).
+// Returns null (not 'unknown') when neither resolves, so callers can filter
+// with a plain truthiness check.
+function resolveDeviceCountryCode(device) {
+  const cityCountry = normalizeCountryCode(device && device.city_country_code);
+  if (cityCountry) {
+    return cityCountry;
+  }
+  const timezoneCountry = countryForTimezone(device && device.timezone);
+  return timezoneCountry && timezoneCountry !== 'unknown' ? timezoneCountry : null;
+}
+
+// Builds the country list buildBankPrompt asks for holiday coverage on:
+// ALWAYS_INCLUDED_HOLIDAY_COUNTRIES first, then every OTHER distinct country
+// resolved from a real device (see resolveDeviceCountryCode), most-devices-
+// first, until MAX_HOLIDAY_COUNTRIES is reached. A device whose country
+// can't be resolved at all (no city, unrecognized timezone) contributes
+// nothing here -- it isn't an error, there's just no country to ask for.
+function collectHolidayCountryCodes() {
+  const counts = new Map();
+  for (const device of selectDeviceLocationsStatement.all()) {
+    const country = resolveDeviceCountryCode(device);
+    if (!country) {
+      continue;
+    }
+    counts.set(country, (counts.get(country) || 0) + 1);
+  }
+  const deviceCountriesByPopularity = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([country]) => country);
+
+  const result = [];
+  const seen = new Set();
+  for (const country of [...ALWAYS_INCLUDED_HOLIDAY_COUNTRIES, ...deviceCountriesByPopularity]) {
+    if (seen.has(country) || result.length >= MAX_HOLIDAY_COUNTRIES) {
+      continue;
+    }
+    result.push(country);
+    seen.add(country);
+  }
+  return result;
+}
+
+function buildBankPrompt(bankDate, preparedDates = getPreparedBankDates(bankDate), countryCodes = collectHolidayCountryCodes()) {
   return `Search the web for what's notable around ${bankDate} and put together a varied global "content bank" for a phone lock screen app.
 Return STRICTLY a JSON array (no wrapper object, no explanations) of ${TARGET_BANK_SIZE} objects.
 Each object: {"bank_date": "YYYY-MM-DD", "category": one of [${BANK_CATEGORIES.join(', ')}], "content_text": "a short, self-contained piece of content in English, up to 200 characters", "tags": ["lowercase", "keyword", "tags"]}.
-For date-sensitive categories only ("holiday" and "on_this_day"), include real items for EACH of these dates: ${preparedDates.join(', ')}. Set bank_date to the exact date the item belongs to. Include at least one holiday and one on_this_day item for every listed date.
+For date-sensitive categories only ("holiday" and "on_this_day"), include real items for EACH of these dates: ${preparedDates.join(', ')}. Set bank_date to the exact date the item belongs to.
+For "holiday" specifically: for EACH of these countries, search for that country's own official or widely observed public holidays, national days, or major cultural/religious observances falling on or very near each listed date, and tag every such item with that country's ISO code: ${countryCodes.join(', ')}. If a country genuinely has no such holiday on a given date, skip it there -- never invent one. Also include, for EVERY listed date, at least one genuine international observance day (a UN/UNESCO/WHO day or similarly widely-recognized global observance falling on that date), tagged "global". Only real, search-verified holidays and observances, never commercial/marketing "days of X" with no real official or cultural standing.
+Include at least one on_this_day item for every listed date.
 For all other categories, set bank_date to ${bankDate}; these are reusable shared items for the generation day.
 Cover a genuine mix across ALL the listed categories, not just one or two -- include notable quotes, interesting statistics, an interesting idiom or expression with its meaning, a fact about one specific country, a genuinely positive and recent news development, and light humor only if it localizes cleanly.
 Choose "category" precisely -- it is used directly to decide what this item is, not just a label: "science" is for a science fact (physics, biology, space, chemistry, etc.); "technology" is for a technology/computing fact; "economics" is for a money/economics fact; "fact" is only for a genuinely miscellaneous interesting fact that does not belong in science, technology, or economics; "country_fact" is a fact specifically about ONE particular country (not a generic global fact), and must always carry that country's ISO code in tags; "good_news" is a genuinely positive, real, verifiable development from roughly the last few days -- never invented, never old news presented as new. Do not put a science/technology/economics fact under "fact".
@@ -252,6 +318,8 @@ async function generateDailyBank() {
 
   const bankDate = getBankDateString();
   const preparedDates = getPreparedBankDates(bankDate);
+  const countryCodes = collectHolidayCountryCodes();
+  console.log(`generateDailyBank: holiday_country_codes=${countryCodes.join(',')} count=${countryCodes.length}`);
 
   try {
     const OpenAI = require('openai');
@@ -263,7 +331,7 @@ async function generateDailyBank() {
     const response = await client.responses.create({
       model: 'gpt-4o',
       tools: [{ type: 'web_search' }],
-      input: buildBankPrompt(bankDate, preparedDates),
+      input: buildBankPrompt(bankDate, preparedDates, countryCodes),
     });
 
     const items = parseBankItems(response.output_text, bankDate, preparedDates);
@@ -329,6 +397,22 @@ function isBankItemAllowedForCountry(row, countryCode) {
     return true;
   }
   return targetCountry ? itemCountries.has(targetCountry) : false;
+}
+
+// Step 2: within an already-country-filtered pool of "holiday" rows (see
+// isBankItemAllowedForCountry), prefer the ones actually tagged with this
+// device's own country over the international/"global" ones -- picking
+// among several local matches (if more than one) is still a random choice,
+// same as the surrounding selection logic. Returns `rows` unchanged
+// (international item(s) included) when there's no country to match against
+// or no local match exists.
+function preferLocalHolidayRows(rows, countryCode) {
+  const targetCountry = normalizeCountryCode(countryCode);
+  if (!targetCountry) {
+    return rows;
+  }
+  const localMatches = rows.filter((row) => countryTagsFromBankItem(row).has(targetCountry));
+  return localMatches.length > 0 ? localMatches : rows;
 }
 
 function dateDistanceDays(a, b) {
@@ -436,7 +520,17 @@ function selectBankItemsForDevice(
     if (!rowsInCategory || rowsInCategory.length === 0) {
       continue;
     }
-    const pick = rowsInCategory[Math.floor(Math.random() * rowsInCategory.length)];
+    // Step 2: for "holiday" specifically, prefer a row tagged with THIS
+    // device's own country over a global/other-country one, when both exist
+    // -- rowsInCategory is already restricted to items allowed for this
+    // country by isBankItemAllowedForCountry above (device-country-tagged +
+    // untagged/"global" items only), so preferLocalHolidayRows only ever
+    // narrows it further, never adds anything new. Falls back to the full
+    // (already-filtered) pool -- i.e. the international item -- when no
+    // local match exists, same "if none at all, skip" behavior as before
+    // when rowsInCategory itself is empty.
+    const pickPool = category === 'holiday' ? preferLocalHolidayRows(rowsInCategory, countryCode) : rowsInCategory;
+    const pick = pickPool[Math.floor(Math.random() * pickPool.length)];
     selected.push({ id: pick.id, category: pick.category, content_text: pick.content_text });
     selectedCategories.add(category);
   }
@@ -494,6 +588,8 @@ module.exports = {
   getBankDateString,
   getPreparedBankDates,
   BANK_CATEGORIES,
+  buildBankPrompt,
+  collectHolidayCountryCodes,
   _test: {
     countryTagsFromBankItem,
     isBankItemAllowedForCountry,
@@ -506,5 +602,9 @@ module.exports = {
     DATE_SENSITIVE_CATEGORIES,
     logMissingRequiredCategories,
     logBankSummary,
+    resolveDeviceCountryCode,
+    preferLocalHolidayRows,
+    ALWAYS_INCLUDED_HOLIDAY_COUNTRIES,
+    MAX_HOLIDAY_COUNTRIES,
   },
 };
