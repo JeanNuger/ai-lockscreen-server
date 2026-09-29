@@ -14,7 +14,7 @@ const {
   recordLearnedWords,
   recordRecalledWords,
 } = require('./learningMemory');
-const { planSlots, planMorningPack, MORNING_FIXED_TYPES } = require('./slotPlanner');
+const { planSlots, planMorningPack, MORNING_FIXED_TYPES, PAIRED_TYPES } = require('./slotPlanner');
 const {
   validateLockScreenText,
 } = require('./textFilter');
@@ -688,6 +688,89 @@ function logSlotsDroppedAfterRepair(slots, assembly, rejectionDetailBySlotId) {
       continue;
     }
     logSlotDroppedAfterRepair(slot, rejectionDetailBySlotId.get(slot.slot_id));
+  }
+}
+
+// Fixed-order rebuild, step 4: expands a rejected-slot-id set to include the
+// PAIRED_TYPES partner of any rejected slot, so one repair call regenerates
+// BOTH halves together -- a regenerated quiz_question needs a matching
+// regenerated quiz_answer (not the stale one still describing the OLD
+// question), same for word_learning/word_recall_same_batch. A partner
+// that isn't in `slots` at all (a window with no such pair) or was already
+// in the rejected set contributes nothing extra. Order-independent (a Set
+// under the hood); the caller only cares about final membership.
+function expandRejectedSlotIdsWithPairs(rejectedSlotIds, slots) {
+  const slotIdByType = new Map(slots.map((slot) => [slot.type, slot.slot_id]));
+  const expanded = new Set(rejectedSlotIds);
+  for (const [typeA, typeB] of PAIRED_TYPES) {
+    const idA = slotIdByType.get(typeA);
+    const idB = slotIdByType.get(typeB);
+    if (!idA || !idB) {
+      continue;
+    }
+    if (expanded.has(idA) || expanded.has(idB)) {
+      expanded.add(idA);
+      expanded.add(idB);
+    }
+  }
+  return [...expanded];
+}
+
+// Fixed-order rebuild, step 4: after both repair attempts, enforces the
+// owner's pair-completeness rule on the FINAL assembly (mutates
+// assembly.phrases/generatedSlotIds in place) -- called once, after
+// logSlotsDroppedAfterRepair has already logged the plain per-slot drops.
+//   - quiz (quiz_question/quiz_answer): symmetric. If exactly one half
+//     survived repair, the surviving half is ALSO dropped -- a lone
+//     question with no answer, or a lone answer with no visible question,
+//     is worse than neither.
+//   - word (word_learning/word_recall_same_batch): asymmetric, by design.
+//     Losing word_learning drops its recall too (nothing left to recall).
+//     Losing only the recall leaves word_learning exactly as it is --
+//     teaching a word doesn't require a later recall to stand on its own.
+// A pair with BOTH halves already missing needs no action (there's no
+// surviving half left to drop) and logs nothing extra here.
+function enforcePairDropsAfterRepair(assembly, slots, window) {
+  if (!Array.isArray(assembly.phrases) || assembly.phrases.length === 0) {
+    return;
+  }
+  const slotIdByType = new Map(slots.map((slot) => [slot.type, slot.slot_id]));
+  const acceptedIds = new Set(assembly.phrases.map((item) => item.slot_id));
+
+  const dropSlot = (slotId) => {
+    if (!slotId || !acceptedIds.has(slotId)) {
+      return;
+    }
+    assembly.phrases = assembly.phrases.filter((item) => item.slot_id !== slotId);
+    if (Array.isArray(assembly.generatedSlotIds)) {
+      assembly.generatedSlotIds = assembly.generatedSlotIds.filter((id) => id !== slotId);
+    }
+    acceptedIds.delete(slotId);
+  };
+
+  const quizQuestionId = slotIdByType.get('quiz_question');
+  const quizAnswerId = slotIdByType.get('quiz_answer');
+  if (quizQuestionId && quizAnswerId) {
+    const questionOk = acceptedIds.has(quizQuestionId);
+    const answerOk = acceptedIds.has(quizAnswerId);
+    if (questionOk !== answerOk) {
+      console.warn(`PAIR_DROPPED window=${window} pair=quiz reason=${questionOk ? 'quiz_answer_missing' : 'quiz_question_missing'}`);
+      dropSlot(quizQuestionId);
+      dropSlot(quizAnswerId);
+    }
+  }
+
+  const wordLearningId = slotIdByType.get('word_learning');
+  const wordRecallId = slotIdByType.get('word_recall_same_batch');
+  if (wordLearningId && wordRecallId) {
+    const wordOk = acceptedIds.has(wordLearningId);
+    const recallOk = acceptedIds.has(wordRecallId);
+    if (!wordOk && recallOk) {
+      console.warn(`PAIR_DROPPED window=${window} pair=word reason=word_learning_missing`);
+      dropSlot(wordRecallId);
+    }
+    // !recallOk && wordOk: word_learning is left exactly as it is -- see
+    // this function's own comment on the asymmetry.
   }
 }
 
@@ -1991,14 +2074,18 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
     }
     try {
       const basePayload = JSON.parse(context);
-      const rejectedDetailsForRepair = assembly.rejectedSlotIds
+      // Fixed-order rebuild, step 4: pull in the PAIRED_TYPES partner of any
+      // rejected slot too, so a repair call regenerates both halves of a
+      // quiz/word pair together and they stay consistent with each other.
+      const repairSlotIds = expandRejectedSlotIdsWithPairs(assembly.rejectedSlotIds, slots);
+      const rejectedDetailsForRepair = repairSlotIds
         .map((slotId) => rejectionDetailBySlotId.get(slotId))
         .filter(Boolean);
       const repaired = await regenerateRejectedSlots(
         client,
         basePayload,
         slots,
-        assembly.rejectedSlotIds,
+        repairSlotIds,
         languageCode,
         validationContext,
         trace,
@@ -2008,7 +2095,16 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
         for (const item of repaired) {
           repairedSlotIds.add(item.slot_id);
         }
-        const merged = (assembly.phrases || []).concat(repaired);
+        // A pair's ALREADY-accepted half can be among `repaired` too (it was
+        // pulled in by expandRejectedSlotIdsWithPairs above even though it
+        // wasn't itself rejected) -- its OLD entry must be dropped from
+        // assembly.phrases before merging, or collectUsablePhrases would see
+        // the same slot_id twice and reject the fresh (repaired) one as a
+        // duplicate, silently keeping the stale, now-inconsistent text.
+        const repairedIds = new Set(repaired.map((item) => item.slot_id));
+        const merged = (assembly.phrases || [])
+          .filter((item) => !repairedIds.has(item.slot_id))
+          .concat(repaired);
         const repairTraceParts = { fallback: [], styleDedupe: [], firstPass: [] };
         // dropMissing=true here too -- a slot still rejected after this
         // repair round is dropped, not generic-filled (see B5/dropMissing's
@@ -2049,6 +2145,12 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
     assembly.reason = assembly.reason || 'all_slots_dropped';
   }
 
+  // Fixed-order rebuild, step 4: enforce quiz/word pair-completeness on the
+  // now-final assembly (after both repair rounds) -- see
+  // enforcePairDropsAfterRepair's own comment for the exact (asymmetric for
+  // the word pair) rule.
+  enforcePairDropsAfterRepair(assembly, slots, window);
+
   // Record planned daily-bank categories for this batch. With slot-based
   // generation the model no longer chooses categories; the server does, so the
   // repeat-avoidance signal comes from selected slots rather than model labels.
@@ -2081,5 +2183,7 @@ module.exports = {
     isUnusableLockScreenText,
     rejectionReasonForText,
     collectUsablePhrases,
+    expandRejectedSlotIdsWithPairs,
+    enforcePairDropsAfterRepair,
   },
 };

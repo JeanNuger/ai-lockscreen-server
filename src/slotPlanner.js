@@ -435,6 +435,22 @@ const MODEL_ONLY_TYPES = new Set([
   // model-only candidate, when today's bank has none.
 ]);
 
+// Fixed-order rebuild, step 4: slot pairs whose content must stay internally
+// consistent with each other -- a quiz's question and its answer must match
+// each other; the recall slot must reference the SAME word word_learning
+// actually taught. Consumed only by contentGenerator.js's repair/drop
+// logic: when either half of a pair is rejected, BOTH halves are sent to
+// repair together (so a regenerated question gets a matching regenerated
+// answer, not a stale one); when a pair ends up incomplete after all repair
+// attempts, contentGenerator.js applies its own (intentionally asymmetric
+// for the word pair -- see its own comment) drop rule. Order within each
+// pair is [taught/asked first, referenced/answered second] -- matches
+// FIXED_ORDER_BY_WINDOW's own ordering, not used programmatically here.
+const PAIRED_TYPES = [
+  ['quiz_question', 'quiz_answer'],
+  ['word_learning', 'word_recall_same_batch'],
+];
+
 const CONTENT_MEMORY_EXEMPT_TYPES = new Set([
   'greeting_name',
   'goodnight_care',
@@ -2285,6 +2301,7 @@ module.exports = {
   MORNING_PACK_ORDER,
   FIXED_ORDER_BY_WINDOW,
   MODEL_ONLY_TYPES,
+  PAIRED_TYPES,
   createSeededRng,
   _test: {
     bankItemToCandidate,
