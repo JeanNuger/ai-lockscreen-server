@@ -43,6 +43,16 @@ function assertFactualSlotsAreGrounded(slots) {
     if (!FACTUAL_TYPES.has(slot.type)) {
       continue;
     }
+    // Fixed-order rebuild, step 3: a small set of FACTUAL_TYPES members
+    // (word_learning/money_economics/unusual_fact/country_fact among them)
+    // now deliberately fall back to a model-only candidate (empty facts,
+    // source='model_only') when today's Daily Bank has no matching item --
+    // see MODEL_ONLY_FALLBACK_TYPES in slotPlanner.js. That's the intended,
+    // ungrounded case this helper otherwise exists to catch, so it's the
+    // one source value exempted from the "must have facts" check below.
+    if (slot.source === 'model_only') {
+      continue;
+    }
     assert(
       slot.facts && Object.keys(slot.facts).length > 0,
       `factual slot must include grounded facts: ${slot.type}`

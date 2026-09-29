@@ -11,6 +11,12 @@
 //      word_learning slot in the same batch.
 //   4. gender_tip/city_fact degrade to a usable candidate with no facts
 //      when there's nothing to ground them in, rather than being skipped.
+//   5. (step 3) culture/science_fact/technology_fact/country_fact/
+//      money_economics/unusual_fact/smart_humor_observation/
+//      everyday_lifehack/warm_wish/poetic_thought/word_learning also fall
+//      back to a model-only candidate (not skipped) when today's Daily Bank
+//      has no matching item.
+//   6. (step 3) phone_trend's topic differs between evening and night.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -27,6 +33,7 @@ const {
   MODEL_ONLY_TYPES,
   _test: plannerTest,
 } = require('../src/slotPlanner');
+const { MODEL_ONLY_FALLBACK_TYPES, WORD_LEARNING_MODEL_ONLY_TOPIC } = plannerTest;
 
 function typesOf(slots) {
   return slots.map((slot) => slot.type);
@@ -122,6 +129,49 @@ function testModelOnlySlotsSurviveEmptyBank() {
   }
 }
 
+// everyday_lifehack/smart_humor_observation/warm_wish/poetic_thought are
+// members of MODEL_ONLY_FALLBACK_TYPES but already have a pre-existing,
+// unrelated non-bank fallback (SYNTHETIC_POOL, source='creative') that
+// selectBestCandidateForType finds even with an empty bank -- so the NEW
+// model-only fallback this test otherwise checks for never actually fires
+// for them (their candidate is never null to begin with). Checked
+// separately below (presence only, not source).
+const SYNTHETIC_POOL_BACKED_TYPES = new Set(['everyday_lifehack', 'smart_humor_observation', 'warm_wish', 'poetic_thought']);
+
+// Fixed-order rebuild, step 3: culture/science_fact/technology_fact/
+// country_fact/money_economics/unusual_fact/word_learning now fall back to
+// a genuinely NEW model-only candidate instead of being skipped, when
+// today's Daily Bank has no matching item (owner requirement, this step).
+// Covers every window whose fixed order actually contains one of these
+// types.
+function testModelOnlyFallbackTypesSurviveEmptyBank() {
+  for (const window of Object.keys(FIXED_ORDER_BY_WINDOW)) {
+    const input = {
+      device: { device_id: `bare-fallback-${window}-device` },
+      window,
+      dateContext,
+      bankItems: [],
+    };
+    const planned = planSlots(input, { seed: `bare-fallback-${window}-seed` });
+    const slotByType = new Map(planned.slots.map((s) => [s.type, s]));
+    for (const type of FIXED_ORDER_BY_WINDOW[window]) {
+      if (!MODEL_ONLY_FALLBACK_TYPES.has(type)) {
+        continue;
+      }
+      const slot = slotByType.get(type);
+      assert(
+        slot,
+        `${window}: "${type}" must be present (as a model-only fallback) even with an empty Daily Bank`
+      );
+      if (SYNTHETIC_POOL_BACKED_TYPES.has(type)) {
+        continue;
+      }
+      assert.strictEqual(slot.source, 'model_only', `${window}: "${type}" fallback slot must be source=model_only`);
+      assert.deepStrictEqual(slot.facts, {}, `${window}: "${type}" fallback slot must have empty facts (the model invents the content)`);
+    }
+  }
+}
+
 function testWordRecallSameBatchUsesWordLearningWord() {
   const input = richInput('morning', 'word-recall-device');
   const planned = planSlots(input, { seed: 'word-recall-seed' });
@@ -137,10 +187,11 @@ function testWordRecallSameBatchUsesWordLearningWord() {
 }
 
 function testWordRecallSameBatchDegradesGracefullyWithNoWord() {
-  // No idiom bank item at all -> word_learning has no candidate -> the
-  // recall slot must still appear (it's in MODEL_ONLY territory in
-  // practice, even though it's not in the MODEL_ONLY_TYPES set), just
-  // without a word to reference.
+  // No idiom bank item at all -> word_learning falls back to a model-only
+  // candidate (step 3: word_learning is in MODEL_ONLY_FALLBACK_TYPES) with
+  // its own topic override -- the model picks the word itself, so
+  // word_recall_same_batch has no real word.word to reference and must
+  // fall back to empty facts too, but BOTH slots must still be present.
   const input = {
     device: richDevice('no-word-device'),
     window: 'morning',
@@ -149,10 +200,35 @@ function testWordRecallSameBatchDegradesGracefullyWithNoWord() {
     bankItems: richBankItems.filter((item) => item.category !== 'idiom'),
   };
   const planned = planSlots(input, { seed: 'no-word-seed' });
-  assert(!planned.slots.some((s) => s.type === 'word_learning'), 'word_learning must be absent with no idiom bank item');
+  const wordLearningSlot = planned.slots.find((s) => s.type === 'word_learning');
+  assert(wordLearningSlot, 'word_learning must still be present (model-only fallback) with no idiom bank item');
+  assert.strictEqual(wordLearningSlot.source, 'model_only', 'word_learning fallback slot must be source=model_only');
+  assert.deepStrictEqual(wordLearningSlot.facts, {}, 'word_learning fallback slot must have empty facts');
+  assert.strictEqual(
+    wordLearningSlot.topic,
+    WORD_LEARNING_MODEL_ONLY_TOPIC,
+    'word_learning fallback slot must carry the model-only-specific topic override, not the default (none)'
+  );
   const recallSlot = planned.slots.find((s) => s.type === 'word_recall_same_batch');
-  assert(recallSlot, 'word_recall_same_batch must still be present even when word_learning has no candidate');
+  assert(recallSlot, 'word_recall_same_batch must still be present even when word_learning has no real word');
   assert.deepStrictEqual(recallSlot.facts, {}, 'word_recall_same_batch must fall back to empty facts with no word to reference');
+}
+
+// Fixed-order rebuild, step 3: phone_trend's topic must differ between
+// evening and night (both windows include it) -- see
+// TOPIC_HINT_BY_WINDOW_TYPE in slotPlanner.js.
+function testPhoneTrendTopicDiffersByWindow() {
+  const eveningPlanned = planSlots(richInput('evening', 'phone-trend-evening-device'), { seed: 'phone-trend-evening-seed' });
+  const nightPlanned = planSlots(richInput('night', 'phone-trend-night-device'), { seed: 'phone-trend-night-seed' });
+  const eveningSlot = eveningPlanned.slots.find((s) => s.type === 'phone_trend');
+  const nightSlot = nightPlanned.slots.find((s) => s.type === 'phone_trend');
+  assert(eveningSlot, 'phone_trend must be present in evening with rich data');
+  assert(nightSlot, 'phone_trend must be present in night with rich data');
+  assert(eveningSlot.topic, 'phone_trend must carry a topic in evening');
+  assert(nightSlot.topic, 'phone_trend must carry a topic in night');
+  assert.notStrictEqual(eveningSlot.topic, nightSlot.topic, 'phone_trend topic must differ between evening and night');
+  assert(/first half of the day/.test(eveningSlot.topic), 'evening phone_trend topic must match the owner-specified wording');
+  assert(/gentle, non-preachy suggestion/.test(nightSlot.topic), 'night phone_trend topic must match the owner-specified wording');
 }
 
 function testGenderTipAndCityFactDegradeGracefully() {
@@ -179,13 +255,23 @@ function testGenderTipUsesProfileGenderWhenGiven() {
   assert.strictEqual(genderSlot.facts.gender, 'female', 'gender_tip must carry the profile gender when known');
 }
 
+function testCultureHasTopic() {
+  const planned = planSlots(richInput('morning', 'culture-topic-device'), { seed: 'culture-topic-seed' });
+  const cultureSlot = planned.slots.find((s) => s.type === 'culture');
+  assert(cultureSlot, 'culture must be present with rich data');
+  assert.strictEqual(cultureSlot.topic, 'A short real quote with its author.', 'culture must carry its topic hint');
+}
+
 function main() {
   testExactOrderWithRichData();
   testModelOnlySlotsSurviveEmptyBank();
+  testModelOnlyFallbackTypesSurviveEmptyBank();
   testWordRecallSameBatchUsesWordLearningWord();
   testWordRecallSameBatchDegradesGracefullyWithNoWord();
   testGenderTipAndCityFactDegradeGracefully();
   testGenderTipUsesProfileGenderWhenGiven();
+  testPhoneTrendTopicDiffersByWindow();
+  testCultureHasTopic();
 }
 
 try {

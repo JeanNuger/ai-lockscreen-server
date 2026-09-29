@@ -141,6 +141,7 @@ const TOPIC_HINT_BY_TYPE = {
   history_today: 'The year and what happened, vividly. Must start with "On this day in <year>," in the user\'s language.',
   goodnight_care: 'A calm, warm goodnight line. Must include the user\'s name if it is in the profile.',
   money_economics: 'Money explained simply, one practical idea.',
+  culture: 'A short real quote with its author.',
   days_countdown: 'How many days are left until the weekend or the nearest well-known holiday, based on now.date.',
   word_recall_same_batch: 'Ask the reader if they remember the meaning of the word from the word_learning slot in this same batch, then give it briefly. If no word_learning slot/word is given, ask generally about a word they may have learned recently.',
   quiz_question: 'A short, fun trivia question with one clear correct answer. You also write that answer, matching this exact question, in the quiz_answer slot in this same batch. Do not reveal the answer here.',
@@ -166,7 +167,27 @@ const TOPIC_HINT_BY_TYPE = {
   small_task_tomorrow: 'One small, easy thing to do tomorrow.',
 };
 
-function topicHintForType(type) {
+// Window-specific override on top of TOPIC_HINT_BY_TYPE, for a type whose
+// instruction genuinely needs to differ by window -- currently only
+// phone_trend (evening's "first half of the day" framing vs. night's
+// "today's phone use + one gentle suggestion" framing; see
+// isCandidateAllowedInWindow -- phone_trend is only ever evening/night to
+// begin with). Checked FIRST so a window-specific entry always wins over
+// the type-only default.
+const TOPIC_HINT_BY_WINDOW_TYPE = {
+  evening: {
+    phone_trend: 'A light observation about phone use in the first half of the day, no advice.',
+  },
+  night: {
+    phone_trend: 'A short summary of today\'s phone use, and one gentle, non-preachy suggestion.',
+  },
+};
+
+function topicHintForType(type, window) {
+  const windowHint = window && TOPIC_HINT_BY_WINDOW_TYPE[window] && TOPIC_HINT_BY_WINDOW_TYPE[window][type];
+  if (windowHint) {
+    return windowHint;
+  }
   return TOPIC_HINT_BY_TYPE[type] || undefined;
 }
 
@@ -449,6 +470,14 @@ function createCandidate(candidate) {
     constraints: Array.isArray(candidate.constraints) ? candidate.constraints : [],
     group: candidate.group || null,
     bank_category: candidate.bank_category || null,
+    // Per-candidate topic override (distinct from topic_key, which is an
+    // anti-repeat dedup hash, not a model instruction) -- takes priority
+    // over TOPIC_HINT_BY_TYPE's per-type default in addSlotIds. Used by
+    // createModelOnlyCandidate for the word_learning-with-no-bank-data
+    // fallback, whose instruction differs from ordinary (bank-grounded)
+    // word_learning. null for every other candidate, which falls back to
+    // the type/window-based lookup as before.
+    topic: candidate.topic || null,
     // Server-only reference to a device_learning_memory row (Phase 4 recall).
     // Never included in the OpenAI payload (see addSlotIds/buildContextPrompt) --
     // used only by the post-generation hook to mark the right row recalled.
@@ -1624,7 +1653,7 @@ function selectBestCandidateForType(candidates, type, rng, memoryIndex) {
 // impossible to skip for lack of data. priority/constraints are irrelevant
 // here (never competes in the old scoring path); the model's actual
 // instruction for the type lives in buildSystemPrompt's SLOT TYPES section.
-function createModelOnlyCandidate(type) {
+function createModelOnlyCandidate(type, topicOverride) {
   return createCandidate({
     id: `model_only_${type}`,
     type,
@@ -1632,8 +1661,16 @@ function createModelOnlyCandidate(type) {
     facts: {},
     source: 'model_only',
     constraints: [],
+    topic: topicOverride || null,
   });
 }
+
+// Instruction for a MODEL_ONLY_FALLBACK_TYPES word_learning candidate (see
+// buildFixedOrderSlots) -- ordinary (bank-grounded) word_learning has no
+// TOPIC_HINT_BY_TYPE entry at all and relies on buildSystemPrompt's static
+// line, but that line assumes a real word was already chosen; with no
+// Daily Bank idiom item today, the model must pick the word itself instead.
+const WORD_LEARNING_MODEL_ONLY_TOPIC = 'The model picks a rare but real word of the user\'s language itself.';
 
 // Morning position 10 (word_recall_same_batch): the SAME word taught at
 // position 7 (word_learning) in this same batch -- not the cross-day
@@ -1706,18 +1743,31 @@ function buildCityFactCandidate(weather, signals) {
   });
 }
 
+// Fixed-order rebuild, step 3: these are normally Daily-Bank/profile-grounded
+// types (real data preferred, as before), but when today's bank has no
+// matching item for one, the position falls back to a model-only candidate
+// (the model invents the content) instead of being skipped entirely. Not
+// every existing type is here yet -- holiday_today/history_today/good_news/
+// learning_recall/phone_trend/weather_lifehack/daily_horoscope/
+// daily_numerology/greeting_name/goodnight_care still get skipped when
+// ungrounded, same as before (owner decision: a later step).
+const MODEL_ONLY_FALLBACK_TYPES = new Set([
+  'culture', 'science_fact', 'technology_fact', 'country_fact',
+  'money_economics', 'unusual_fact', 'smart_humor_observation',
+  'everyday_lifehack', 'warm_wish', 'poetic_thought', 'word_learning',
+]);
+
 // Builds the 12 slots for a FIXED_ORDER_BY_WINDOW window strictly
 // position-by-position: one type per position, in that exact order, each
 // looked up (or synthesized, for MODEL_ONLY_TYPES/word_recall_same_batch/
-// gender_tip/city_fact) independently of every other position -- no scoring,
-// no shuffling, no type caps. `candidates` is the SAME filtered pool
-// planSlots() already built (window-eligibility + cadence/anti-repeat still
-// apply to every EXISTING type here exactly as before -- see planSlots'
-// caller). A position whose type has no matching candidate is skipped
-// (array simply comes out shorter than 12 for that day), except for the
-// three special-cased types above and every MODEL_ONLY_TYPES entry, which
-// always produce a candidate.
-function buildFixedOrderSlots(order, candidates, input, rng, memoryIndex) {
+// gender_tip/city_fact/MODEL_ONLY_FALLBACK_TYPES) independently of every
+// other position -- no scoring, no shuffling, no type caps. `candidates` is
+// the SAME filtered pool planSlots() already built (window-eligibility +
+// cadence/anti-repeat still apply to every EXISTING type here exactly as
+// before -- see planSlots' caller). A position whose type has no matching
+// candidate AND is not in MODEL_ONLY_TYPES/MODEL_ONLY_FALLBACK_TYPES is
+// skipped (array simply comes out shorter than 12 for that day).
+function buildFixedOrderSlots(order, candidates, input, rng, memoryIndex, excludeTypes = null) {
   const usedIds = new Set();
   const result = [];
   let wordLearningCandidate = null;
@@ -1734,6 +1784,17 @@ function buildFixedOrderSlots(order, candidates, input, rng, memoryIndex) {
     } else {
       const pool = candidates.filter((c) => !usedIds.has(c.id));
       candidate = selectBestCandidateForType(pool, type, rng, memoryIndex);
+      // Only fall back to a model-only candidate when there's genuinely no
+      // data for this type today -- NOT when it's absent from `candidates`
+      // because the morning-pack feature deliberately excluded it
+      // (options.excludeTypes, see planSlots) so the pack can own it
+      // exclusively. Without this guard, a MODEL_ONLY_FALLBACK_TYPES type
+      // (e.g. word_learning) would reappear in the ordinary batch as
+      // model-only content even while supports_morning_pack=1 is asking for
+      // it to come only from the pack.
+      if (!candidate && MODEL_ONLY_FALLBACK_TYPES.has(type) && !(excludeTypes && excludeTypes.has(type))) {
+        candidate = createModelOnlyCandidate(type, type === 'word_learning' ? WORD_LEARNING_MODEL_ONLY_TOPIC : undefined);
+      }
     }
     if (!candidate) {
       continue;
@@ -1769,7 +1830,7 @@ function selectNonMandatory(candidates, count, rng, memoryIndex = buildRecentMem
   return shuffle(selected, rng);
 }
 
-function addSlotIds(candidates) {
+function addSlotIds(candidates, window) {
   return candidates.map((candidate, index) => ({
     slot_id: `s${index + 1}`,
     id: candidate.id,
@@ -1782,15 +1843,18 @@ function addSlotIds(candidates) {
     constraints: candidate.constraints,
     length_hint: lengthHintForType(candidate.type),
     // Per-slot topic instruction (fixed-order rebuild, step 2 -- prompt-size
-    // fix): only the types listed in TOPIC_HINT_BY_TYPE get one; everything
-    // else stays undefined and is dropped by JSON.stringify, relying purely
-    // on buildSystemPrompt's own static SLOT TYPES section as before. This
-    // is what let the new 23 types' (plus history_today/goodnight_care's
-    // stricter wording, plus money_economics') instructions move OUT of the
-    // static system prompt (sent on every single request) and into the
-    // per-batch context payload (sent once per slot per request, only for
-    // the <=12 slots actually in THIS batch) -- see buildContextPrompt.
-    topic: topicHintForType(candidate.type),
+    // fix): only the types listed in TOPIC_HINT_BY_TYPE (or, for phone_trend,
+    // TOPIC_HINT_BY_WINDOW_TYPE) get one; everything else stays undefined and
+    // is dropped by JSON.stringify, relying purely on buildSystemPrompt's own
+    // static SLOT TYPES section as before. This is what let the new 23
+    // types' (plus history_today/goodnight_care's stricter wording, plus
+    // money_economics'/culture's) instructions move OUT of the static
+    // system prompt (sent on every single request) and into the per-batch
+    // context payload (sent once per slot per request, only for the <=12
+    // slots actually in THIS batch) -- see buildContextPrompt. A candidate's
+    // own explicit `topic` (see createCandidate) always wins over the
+    // type/window lookup -- see WORD_LEARNING_MODEL_ONLY_TOPIC.
+    topic: candidate.topic || topicHintForType(candidate.type, window),
     // Server-only; buildContextPrompt hand-picks {slot_id, type, facts,
     // constraints, topic} for the OpenAI payload and does not include this
     // field.
@@ -1846,7 +1910,7 @@ function planSlots(input = {}, options = {}) {
   // longer is).
   const fixedOrder = FIXED_ORDER_BY_WINDOW[input.window];
   if (fixedOrder) {
-    const fixedSlots = addSlotIds(buildFixedOrderSlots(fixedOrder, candidates, input, rng, memoryIndex).slice(0, BATCH_SIZE));
+    const fixedSlots = addSlotIds(buildFixedOrderSlots(fixedOrder, candidates, input, rng, memoryIndex, excludeTypes).slice(0, BATCH_SIZE), input.window);
     return {
       candidates,
       slots: fixedSlots,
@@ -1931,7 +1995,7 @@ function planSlots(input = {}, options = {}) {
   if (fixedNightRecall) ordered.push(fixedNightRecall);
   if (mandatoryLast) ordered.push(mandatoryLast);
 
-  const slots = addSlotIds(ordered.slice(0, BATCH_SIZE));
+  const slots = addSlotIds(ordered.slice(0, BATCH_SIZE), input.window);
 
   // Interest hints are assigned only now, after the 12 slots are already
   // final -- selection above ran completely unaware of interests, so
@@ -2118,7 +2182,7 @@ function planMorningPack(input = {}) {
   const ordered = MORNING_PACK_ORDER
     .map((type) => slotsByType.get(type))
     .filter(Boolean);
-  return addSlotIds(ordered);
+  return addSlotIds(ordered, 'morning');
 }
 
 module.exports = {
@@ -2179,7 +2243,10 @@ module.exports = {
     TYPE_LENGTH_HINTS,
     lengthHintForType,
     TOPIC_HINT_BY_TYPE,
+    TOPIC_HINT_BY_WINDOW_TYPE,
     topicHintForType,
+    MODEL_ONLY_FALLBACK_TYPES,
+    WORD_LEARNING_MODEL_ONLY_TOPIC,
     buildFixedOrderSlots,
     createModelOnlyCandidate,
     buildWordRecallSameBatchCandidate,
