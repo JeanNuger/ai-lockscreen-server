@@ -103,9 +103,18 @@ function buildWeatherStatus(geo, weather, locationMismatch, source) {
     : weather && typeof weather.temperatureC === 'number'
       ? 'ok'
       : 'failed';
+  // The exact reason a weather lookup failed (see weather.js's WEATHER_FAILED
+  // log line): http_429, timeout, network_error:<code>, no_coordinates, ...
+  const failureReason = weatherStatus !== 'failed'
+    ? undefined
+    : weather && weather.weatherFailure
+      ? weather.weatherFailure
+      : weather ? 'no_temperature' : 'no_geolocation';
   return {
     geo: geoStatus,
     weather: weatherStatus,
+    provider: 'met.no',
+    ...(failureReason ? { reason: failureReason } : {}),
     source: source === 'city' ? 'city' : 'ip',
     country: weather && typeof weather.countryCode === 'string' && weather.countryCode
       ? weather.countryCode
@@ -402,6 +411,8 @@ router.get('/batch', async (req, res, next) => {
     }
 
     const hasCity = deviceHasCity(device);
+    // The forecast is for the user's LOCAL date (see weather.js).
+    const weatherLocalDate = dateContext && typeof dateContext.date === 'string' ? dateContext.date : null;
 
     const generationPromise = (async () => {
       // City outranks IP entirely (see deviceHasCity/PRODUCT_REBUILD_PLAN.md):
@@ -418,6 +429,8 @@ router.get('/batch', async (req, res, next) => {
         weather = await resolveWeatherByCoords(device.city_lat, device.city_lon, {
           countryCode: device.city_country_code,
           city: device.city_name,
+          localDate: weatherLocalDate,
+          timeZone: device.timezone,
         });
       } else {
         // Geolocation is resolved ONCE per request and shared between the
@@ -447,7 +460,7 @@ router.get('/batch', async (req, res, next) => {
         // second country-plumbing path through generateBatch/generateMorningPack.
         weather = locationMismatch
           ? { countryCode: locationMismatch.tz_country, countrySource: 'timezone' }
-          : await resolveWeather(req.ip, geo);
+          : await resolveWeather(req.ip, geo, { localDate: weatherLocalDate, timeZone: device.timezone });
 
         if (locationMismatch) {
           // Only the resolved countries are logged here -- never the raw IP
@@ -502,6 +515,7 @@ router.get('/batch', async (req, res, next) => {
             ? await resolveWeatherForecastByCoords(device.city_lat, device.city_lon, targetDate, {
               countryCode: device.city_country_code,
               city: device.city_name,
+              timeZone: device.timezone,
             })
             : undefined,
         }).catch((err) => {

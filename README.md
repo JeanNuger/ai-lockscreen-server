@@ -162,6 +162,22 @@ Node.js-совместимого хостинга/VPS:
 сам, ограничение соблюдается на Android-стороне через `WorkManager` (пока
 не реализовано на клиенте).
 
+## Погода (MET Norway)
+
+Прогноз на локальную дату пользователя берётся из MET Norway Locationforecast 2.0
+(`complete`), см. `src/weather.js`. Координаты: город устройства
+(`city_geoname_id`), иначе IP (ipwho.is).
+
+- `WEATHER_USER_AGENT` — заголовок `User-Agent` (обязателен для MET Norway);
+  по умолчанию `ai-lockscreen-server/1.0 volaris.kz`.
+- Кэш по округлённым координатам (2 знака), 3 часа; учитываются `Expires`
+  и `If-Modified-Since`.
+- Причина сбоя пишется в лог (`WEATHER_FAILED reason=...`) и в
+  `trace.meta.weather_status.reason`.
+- **Атрибуция (CC BY 4.0 / NLOD 2.0):** приложение должно показывать
+  «Based on data from MET Norway» (данные обработаны) со ссылкой на
+  https://api.met.no/doc/License.
+
 ## Что дальше (не сделано в этой версии)
 
 - Реальный `OPENAI_API_KEY` — добавить в `.env` на сервере, когда будет создан.

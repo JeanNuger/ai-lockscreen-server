@@ -1,6 +1,6 @@
 // Owner-specified retry/backoff for the primary OpenAI call (ordinary batch
-// and morning pack): up to 3 retries (1s/2s/3s pauses) on transient
-// failures -- network errors, timeouts, 429, 5xx, and a broken/off-schema
+// and morning pack): 60s per attempt, at most 2 attempts (1 retry after a 1s
+// pause) on transient failures -- network errors, timeouts, 429, 5xx, and a broken/off-schema
 // response (parse_or_schema_error) -- but never on 400/401/403 or a missing
 // key, where retrying can't help. Drives this entirely through the real
 // generateBatch() (see contentGenerator.js's callOpenAiBatchWithRetry),
@@ -9,10 +9,12 @@
 // never AI_BATCH_ERROR, which stays reserved for the final give-up/other
 // failure reasons -- so a mid-retry success is never mistaken for a
 // reportable error.
-//   1. two 500s then a success -> the batch is generated normally, 3 calls.
+//   1. one 500 then a success -> the batch is generated normally, 2 calls,
+//      each primary call made with a 60s timeout.
 //   2. a 401 -> no retry at all, 1 call, empty fallback batch.
-//   3. four 500s in a row (every attempt fails) -> empty fallback batch,
-//      exactly 4 calls (1 initial + 3 retries), no more.
+//   3. two 500s in a row (every attempt fails) -> empty fallback batch,
+//      exactly 2 calls (1 initial + 1 retry), no more.
+//   4. a timeout (no HTTP status) is retried once, then the batch is empty.
 const assert = require('assert');
 const Module = require('module');
 const fs = require('fs');
@@ -32,6 +34,8 @@ function insertDevice(deviceId) {
     VALUES (?, ?, ?, ?, ?, ?)
   `).run(deviceId, 'Nurlan', 'male', '1992-06-10', 'Asia/Almaty', '2026-09-01 00:00:00');
 }
+
+let seenOptions = [];
 
 function makeError({ name, status, message }) {
   const err = new Error(message);
@@ -77,8 +81,9 @@ function withMockedOpenAi(callBehavior, run) {
         constructor() {
           this.chat = {
             completions: {
-              create: async (requestBody) => {
+              create: async (requestBody, options) => {
                 callCount += 1;
+                seenOptions.push(options);
                 const thisCall = callCount;
                 const behavior = callBehavior(thisCall);
                 if (behavior && behavior.error) {
@@ -120,32 +125,34 @@ async function runBatch(deviceId) {
   );
 }
 
-// --- Case 1: two 500s, then success -> batch is present --------------------
-async function testTwo500sThenSuccess() {
+// --- Case 1: one 500, then success -> batch is present ---------------------
+async function testOne500ThenSuccess() {
+  seenOptions = [];
   process.env.OPENAI_API_KEY = 'test-key-retry-two-500s';
   const deviceId = 'retry-two-500s-device';
   insertDevice(deviceId);
   try {
     await withMockedOpenAi(
-      (callCount) => (callCount <= 2
+      (callCount) => (callCount <= 1
         ? { error: makeError({ name: 'InternalServerError', status: 500, message: 'server had a problem' }) }
         : null),
       async (getCallCount) => {
         const { result, lines } = await captureConsole(() => runBatch(deviceId));
-        assert.strictEqual(getCallCount(), 3, 'must retry exactly twice (3 total calls) before succeeding on the 3rd');
-        assert(result.phrases.length > 0, 'a batch must be produced once the 3rd attempt succeeds');
+        assert.strictEqual(getCallCount(), 2, 'must retry exactly once (2 total calls) before succeeding on the 2nd');
+        assert(result.phrases.length > 0, 'a batch must be produced once the 2nd attempt succeeds');
         assert(
-          lines.some((l) => l.startsWith('OPENAI_ATTEMPT scope=batch result=openai_error') && l.includes('attempt=1/4') && l.includes('err_status=500')),
-          'attempt 1 failure must be logged as OPENAI_ATTEMPT scope=batch result=openai_error attempt=1/4 err_status=500'
+          lines.some((l) => l.startsWith('OPENAI_ATTEMPT scope=batch result=openai_error') && l.includes('attempt=1/2') && l.includes('err_status=500')),
+          'attempt 1 failure must be logged as OPENAI_ATTEMPT scope=batch result=openai_error attempt=1/2 err_status=500'
         );
         assert(
-          lines.some((l) => l.startsWith('OPENAI_ATTEMPT scope=batch result=openai_error') && l.includes('attempt=2/4') && l.includes('err_status=500')),
-          'attempt 2 failure must be logged as OPENAI_ATTEMPT scope=batch result=openai_error attempt=2/4 err_status=500'
+          lines.some((l) => l.startsWith('OPENAI_ATTEMPT scope=batch result=success') && l.includes('attempt=2/2')),
+          'attempt 2 success must be logged as OPENAI_ATTEMPT scope=batch result=success attempt=2/2'
         );
-        assert(
-          lines.some((l) => l.startsWith('OPENAI_ATTEMPT scope=batch result=success') && l.includes('attempt=3/4')),
-          'attempt 3 success must be logged as OPENAI_ATTEMPT scope=batch result=success attempt=3/4'
-        );
+        assert(seenOptions.length >= 2, 'both primary calls must pass request options');
+        for (const options of seenOptions.slice(0, 2)) {
+          assert.strictEqual(options.timeout, 60000, 'each primary OpenAI attempt must wait up to 60s');
+          assert.strictEqual(options.maxRetries, 0, 'the SDK must not add its own retries on top');
+        }
         assert(
           !lines.some((l) => l.startsWith('AI_BATCH_ERROR')),
           'a batch that eventually succeeds must never log an AI_BATCH_ERROR line -- only OPENAI_ATTEMPT per-attempt lines'
@@ -174,8 +181,8 @@ async function test401NoRetry() {
         assert.strictEqual(getCallCount(), 1, 'a 401 must never be retried -- exactly 1 call total');
         assert.strictEqual(result.phrases.length, 0, 'a 401 with no retry must fall back to an empty batch');
         assert(
-          lines.some((l) => l.startsWith('OPENAI_ATTEMPT scope=batch result=openai_error') && l.includes('attempt=1/4') && l.includes('err_status=401')),
-          'the single failed attempt must be logged as OPENAI_ATTEMPT scope=batch result=openai_error attempt=1/4 err_status=401'
+          lines.some((l) => l.startsWith('OPENAI_ATTEMPT scope=batch result=openai_error') && l.includes('attempt=1/2') && l.includes('err_status=401')),
+          'the single failed attempt must be logged as OPENAI_ATTEMPT scope=batch result=openai_error attempt=1/2 err_status=401'
         );
         assert(
           lines.some((l) => l.startsWith('AI_BATCH_RESULT') && l.includes('reason=openai_error')),
@@ -188,27 +195,50 @@ async function test401NoRetry() {
   }
 }
 
-// --- Case 3: 4 failures in a row -> empty batch, exactly 4 attempts --------
-async function testFourFailuresExhaustsRetries() {
-  process.env.OPENAI_API_KEY = 'test-key-retry-four-failures';
-  const deviceId = 'retry-four-failures-device';
+// --- Case 3: 2 failures in a row -> empty batch, exactly 2 attempts --------
+async function testTwoFailuresExhaustsRetries() {
+  process.env.OPENAI_API_KEY = 'test-key-retry-two-failures';
+  const deviceId = 'retry-two-failures-device';
   insertDevice(deviceId);
   try {
     await withMockedOpenAi(
       () => ({ error: makeError({ name: 'InternalServerError', status: 500, message: 'server had a problem' }) }),
       async (getCallCount) => {
         const { result, lines } = await captureConsole(() => runBatch(deviceId));
-        assert.strictEqual(getCallCount(), 4, 'must attempt exactly 4 times (1 initial + 3 retries), never more');
+        assert.strictEqual(getCallCount(), 2, 'must attempt exactly 2 times (1 initial + 1 retry), never more');
         assert.strictEqual(result.phrases.length, 0, 'exhausting all retries must fall back to an empty batch');
-        for (let attempt = 1; attempt <= 4; attempt += 1) {
+        for (let attempt = 1; attempt <= 2; attempt += 1) {
           assert(
-            lines.some((l) => l.startsWith('OPENAI_ATTEMPT scope=batch result=openai_error') && l.includes(`attempt=${attempt}/4`) && l.includes('err_status=500')),
-            `attempt ${attempt} failure must be logged as OPENAI_ATTEMPT scope=batch result=openai_error attempt=${attempt}/4`
+            lines.some((l) => l.startsWith('OPENAI_ATTEMPT scope=batch result=openai_error') && l.includes(`attempt=${attempt}/2`) && l.includes('err_status=500')),
+            `attempt ${attempt} failure must be logged as OPENAI_ATTEMPT scope=batch result=openai_error attempt=${attempt}/2`
           );
         }
         assert(
           lines.some((l) => l.startsWith('AI_BATCH_RESULT') && l.includes('reason=openai_error')),
-          'AI_BATCH_RESULT must report reason=openai_error once all 4 attempts fail'
+          'AI_BATCH_RESULT must report reason=openai_error once both attempts fail'
+        );
+      }
+    );
+  } finally {
+    delete process.env.OPENAI_API_KEY;
+  }
+}
+
+// --- Case 4: a timeout (no HTTP status) is retried once, then gives up -----
+async function testTimeoutRetriedOnce() {
+  process.env.OPENAI_API_KEY = 'test-key-retry-timeout';
+  const deviceId = 'retry-timeout-device';
+  insertDevice(deviceId);
+  try {
+    await withMockedOpenAi(
+      () => ({ error: makeError({ name: 'APIConnectionTimeoutError', message: 'Request timed out.' }) }),
+      async (getCallCount) => {
+        const { result, lines } = await captureConsole(() => runBatch(deviceId));
+        assert.strictEqual(getCallCount(), 2, 'a timeout must be attempted exactly twice');
+        assert.strictEqual(result.phrases.length, 0, 'two timeouts fall back to an empty batch');
+        assert(
+          lines.some((l) => l.startsWith('OPENAI_ATTEMPT scope=batch result=openai_error') && l.includes('attempt=2/2') && l.includes('APIConnectionTimeoutError')),
+          'the second timeout must be logged as attempt=2/2'
         );
       }
     );
@@ -218,9 +248,10 @@ async function testFourFailuresExhaustsRetries() {
 }
 
 async function main() {
-  await testTwo500sThenSuccess();
+  await testOne500ThenSuccess();
   await test401NoRetry();
-  await testFourFailuresExhaustsRetries();
+  await testTwoFailuresExhaustsRetries();
+  await testTimeoutRetriedOnce();
 }
 
 main()

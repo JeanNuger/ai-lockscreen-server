@@ -1168,6 +1168,77 @@ function weatherConditionLean(description) {
   return null;
 }
 
+// Facts + constraints for a weather_lifehack slot built from a DAY forecast
+// (the forecast for the user's local date -- see weather.js: temperatureC = the
+// day's max, temperatureMinC = the day's min, precipitationProbabilityMax,
+// uvIndexMax). Shared by the morning pack and the ordinary morning batch so the
+// bands (day_temp_band, morning_temp_band, rain_chance, uv_level) can never
+// drift apart. Returns null when there is nothing grounded to say.
+function buildForecastWeatherLifehack(forecast) {
+  if (!forecast || typeof forecast.temperatureC !== 'number') {
+    return null;
+  }
+  const facts = { temperature_c: Math.round(forecast.temperatureC) };
+  // day_temp_band: today's ordinary band computed from the day's max -- kept as
+  // `temp_band` too for backward compatibility with anything still reading that
+  // field, and duplicated as `day_temp_band` alongside morning_temp_band below
+  // so the prompt can reason about "cold morning, warmer day" (layering advice)
+  // rather than only a single band.
+  const band = temperatureBand(forecast.temperatureC);
+  if (band) {
+    facts.temp_band = band;
+    facts.day_temp_band = band;
+  }
+  const lean = weatherConditionLean(forecast.description);
+  if (lean) facts.condition_lean = lean;
+  if (forecast.city) facts.city = forecast.city;
+  if (forecast.description) facts.condition = forecast.description;
+
+  // morning_temp_band: the day's MINIMUM banded the same way as day_temp_band --
+  // mornings care about the coldest part of the day, not the eventual daily
+  // high, so this can legitimately land in a colder band than day_temp_band.
+  if (typeof forecast.temperatureMinC === 'number') {
+    const morningBand = temperatureBand(forecast.temperatureMinC);
+    if (morningBand) facts.morning_temp_band = morningBand;
+  }
+
+  // rain_chance: low/medium/high from the precipitation probability (%).
+  // Cutoffs: <30% low, 30-60% medium, >60% high -- a simple split, coarse
+  // enough to flip an umbrella suggestion on/off.
+  if (typeof forecast.precipitationProbabilityMax === 'number') {
+    const p = forecast.precipitationProbabilityMax;
+    facts.rain_chance = p > 60 ? 'high' : p >= 30 ? 'medium' : 'low';
+  }
+
+  // uv_level: low/moderate/high from the UV index, conventional WHO scale:
+  // 0-2 low, 3-7 moderate, 8+ high.
+  if (typeof forecast.uvIndexMax === 'number') {
+    const uv = forecast.uvIndexMax;
+    facts.uv_level = uv >= 8 ? 'high' : uv >= 3 ? 'moderate' : 'low';
+  }
+
+  // Only a genuinely usable grounded fact (a temp band or a condition lean)
+  // makes this a real candidate.
+  if (!(facts.temp_band || facts.condition_lean)) {
+    return null;
+  }
+  const constraints = ['avoid_exact_right_now', 'forecast_for_target_date', 'temperature_grounding_only', 'do_not_state_exact_temperature', 'no_digits', 'simple_clothing_umbrella_shoes_sun_advice', 'vary_advice_by_temp_band_and_condition'];
+  // Extra constraints only make sense, and are only added, when the matching
+  // fact is actually present -- an absent uv_level/rain_chance must not
+  // silently imply "low" to the model.
+  if (facts.rain_chance === 'high') {
+    constraints.push('suggest_umbrella_or_rain_protection');
+  }
+  if (facts.uv_level === 'high' && facts.rain_chance !== 'high') {
+    constraints.push('suggest_sunglasses_or_sun_protection');
+  }
+  if (facts.morning_temp_band && facts.day_temp_band
+    && isColderBand(facts.morning_temp_band, facts.day_temp_band)) {
+    constraints.push('suggest_layered_clothing_cold_morning_warmer_day');
+  }
+  return { facts, constraints };
+}
+
 function collectCandidates(input = {}) {
   const candidates = [];
   const { device = {}, window, dateContext, weather, bankItems = [], phoneTrends = {}, recallCandidate = null, signals = {} } = input;
@@ -1199,7 +1270,22 @@ function collectCandidates(input = {}) {
     }));
   }
 
-  if (window === 'morning' && weather && typeof weather.temperatureC === 'number') {
+  // The ordinary morning batch (what the phone actually receives) uses the same
+  // forecast-for-the-local-date facts and bands as the morning pack when the
+  // weather comes from weather.js (weather.forecast === true).
+  const forecastWeather = window === 'morning' && weather && weather.forecast === true
+    ? buildForecastWeatherLifehack(weather)
+    : null;
+  if (forecastWeather) {
+    candidates.push(createCandidate({
+      id: 'weather_current_safe',
+      type: 'weather_lifehack',
+      priority: 62,
+      facts: forecastWeather.facts,
+      source: 'weather',
+      constraints: forecastWeather.constraints,
+    }));
+  } else if (window === 'morning' && weather && typeof weather.temperatureC === 'number') {
     const facts = { temperature_c: Math.round(weather.temperatureC) };
     const band = temperatureBand(weather.temperatureC);
     if (band) facts.temp_band = band;
@@ -2159,81 +2245,16 @@ function planMorningPack(input = {}) {
     constraints: ['warm', 'one_per_batch', 'no_fixed_template', 'name_if_known', 'light_send_off_for_the_day'],
   }));
 
-  if (weatherForecast && typeof weatherForecast.temperatureC === 'number') {
-    const facts = { temperature_c: Math.round(weatherForecast.temperatureC) };
-    // day_temp_band: today's ordinary band computed from the day's max
-    // (weatherForecast.temperatureC, see resolveWeatherForecast) -- kept as
-    // `temp_band` too for backward compatibility with anything still reading
-    // that field, and duplicated as `day_temp_band` alongside the new
-    // morning_temp_band below so the prompt can reason about "cold morning,
-    // warmer day" (layering advice) rather than only a single band.
-    const band = temperatureBand(weatherForecast.temperatureC);
-    if (band) {
-      facts.temp_band = band;
-      facts.day_temp_band = band;
-    }
-    const lean = weatherConditionLean(weatherForecast.description);
-    if (lean) facts.condition_lean = lean;
-    if (weatherForecast.city) facts.city = weatherForecast.city;
-    if (weatherForecast.description) facts.condition = weatherForecast.description;
-
-    // morning_temp_band: the day's MINIMUM (temperature_2m_min) banded the
-    // same way as day_temp_band -- mornings care about the coldest part of
-    // the day, not the eventual daily high, so this can legitimately land in
-    // a colder band than day_temp_band even on a day that warms up a lot.
-    if (typeof weatherForecast.temperatureMinC === 'number') {
-      const morningBand = temperatureBand(weatherForecast.temperatureMinC);
-      if (morningBand) facts.morning_temp_band = morningBand;
-    }
-
-    // rain_chance: low/medium/high from precipitation_probability_max (%).
-    // Cutoffs (documented here, not just in the task): <30% low, 30-60%
-    // medium, >60% high -- picked as a simple, easy-to-reason-about split
-    // rather than any meteorological standard, since this only needs to be
-    // coarse enough to flip an umbrella suggestion on/off.
-    if (typeof weatherForecast.precipitationProbabilityMax === 'number') {
-      const p = weatherForecast.precipitationProbabilityMax;
-      facts.rain_chance = p > 60 ? 'high' : p >= 30 ? 'medium' : 'low';
-    }
-
-    // uv_level: low/moderate/high from uv_index_max, using the conventional
-    // WHO UV Index scale: 0-2 low, 3-7 moderate, 8+ high.
-    if (typeof weatherForecast.uvIndexMax === 'number') {
-      const uv = weatherForecast.uvIndexMax;
-      facts.uv_level = uv >= 8 ? 'high' : uv >= 3 ? 'moderate' : 'low';
-    }
-
-    // Only a genuinely usable grounded fact (a temp band or a condition lean)
-    // makes this a real candidate -- mirrors the "no weather forecast
-    // available -> drop the weather slot" pack rule. rain_chance/uv_level/
-    // morning_temp_band alone (without a day_temp_band/condition_lean) never
-    // happens in practice (temperature_2m_max is required to reach this
-    // branch at all), but the check is left keyed on the original two facts
-    // so the "no forecast -> drop the slot" rule is unchanged.
-    if (facts.temp_band || facts.condition_lean) {
-      const constraints = ['avoid_exact_right_now', 'forecast_for_target_date', 'temperature_grounding_only', 'do_not_state_exact_temperature', 'no_digits', 'simple_clothing_umbrella_shoes_sun_advice', 'vary_advice_by_temp_band_and_condition'];
-      // Extra constraints only make sense, and are only added, when the
-      // matching fact is actually present -- an absent uv_level/rain_chance
-      // must not silently imply "low" to the model.
-      if (facts.rain_chance === 'high') {
-        constraints.push('suggest_umbrella_or_rain_protection');
-      }
-      if (facts.uv_level === 'high' && facts.rain_chance !== 'high') {
-        constraints.push('suggest_sunglasses_or_sun_protection');
-      }
-      if (facts.morning_temp_band && facts.day_temp_band
-        && isColderBand(facts.morning_temp_band, facts.day_temp_band)) {
-        constraints.push('suggest_layered_clothing_cold_morning_warmer_day');
-      }
-      slotsByType.set('weather_lifehack', createCandidate({
-        id: 'pack_weather_forecast',
-        type: 'weather_lifehack',
-        priority: 62,
-        facts,
-        source: 'weather',
-        constraints,
-      }));
-    }
+  const packWeather = buildForecastWeatherLifehack(weatherForecast);
+  if (packWeather) {
+    slotsByType.set('weather_lifehack', createCandidate({
+      id: 'pack_weather_forecast',
+      type: 'weather_lifehack',
+      priority: 62,
+      facts: packWeather.facts,
+      source: 'weather',
+      constraints: packWeather.constraints,
+    }));
   }
 
   const bankByType = new Map();
@@ -2335,6 +2356,7 @@ module.exports = {
     personalDayNumberForBirthDate,
     deterministicFocusHint,
     temperatureBand,
+    buildForecastWeatherLifehack,
     isColderBand,
     weatherConditionLean,
     contextSignalConstraints,

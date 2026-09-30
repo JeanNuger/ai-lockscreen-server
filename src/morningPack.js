@@ -95,9 +95,7 @@ async function getOrGenerateMorningPack({ device, window, dateContext, signals, 
     // resolveWeatherForecast falls back to resolving geolocation itself.
     const weatherForecast = precomputedWeatherForecast !== undefined
       ? precomputedWeatherForecast
-      : geo !== undefined
-        ? await resolveWeatherForecast(ip, targetDate, geo)
-        : await resolveWeatherForecast(ip, targetDate);
+      : await resolveWeatherForecast(ip, targetDate, geo, { timeZone: device.timezone });
     const { phrases, trace } = await generateMorningPack(device, targetDate, signals, weather, weatherForecast);
 
     if (!Array.isArray(phrases) || phrases.length === 0) {

@@ -47,20 +47,24 @@ const OPENAI_BATCH_MODEL = process.env.OPENAI_BATCH_MODEL || 'gpt-5-mini';
 // quality over 'low'. Not passed to non-gpt-5 models (see createOpenAiBatch).
 const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || 'low';
 
-// Per-attempt timeout for every individual OpenAI call this file makes
-// (primary batch/pack call, its retries, and the repair/regenerate call) --
-// bounds a single call so a hung request can't silently eat the Android
-// client's own read/call timeout (OkHttpPhraseApiClient.java: readTimeout
-// 60s, callTimeout 90s) the way the openai SDK's own 10-minute default
-// would. Passed as { timeout } on each `.create()` call.
-const OPENAI_CALL_TIMEOUT_MS = 30000;
+// Per-attempt timeout for one primary batch/pack OpenAI call -- bounds a single
+// call so a hung request can't silently eat the Android client's own
+// read/call timeout the way the openai SDK's own 10-minute default would.
+// Passed as { timeout } on each `.create()` call. 60s: at 30s every attempt of
+// a slow generation was cut off (4 attempts x 30s = 126s of nothing, empty
+// batch); a real generation of 12 slots can take longer than 30s.
+const OPENAI_CALL_TIMEOUT_MS = 60000;
+// The repair/regenerate call keeps its shorter limit: it can run up to 2 rounds
+// after the primary call, and the worst case (2 primary attempts + 2 repair
+// rounds) has to stay inside the phone's 240s call timeout.
+const OPENAI_REPAIR_TIMEOUT_MS = 30000;
 // Primary batch/pack call only (never the repair/regenerate call, which
-// stays single-attempt): 1 initial try + up to 3 retries, with the SDK's
+// stays single-attempt per round): 1 initial try + 1 retry, with the SDK's
 // own internal retry disabled ({ maxRetries: 0 } on the same call) so this
 // array is the only retry schedule in play and total attempts/timing stay
-// predictable. Owner-specified schedule.
-const OPENAI_MAX_ATTEMPTS = 4;
-const OPENAI_RETRY_DELAYS_MS = [1000, 2000, 3000];
+// predictable. Owner-specified: at most 2 attempts.
+const OPENAI_MAX_ATTEMPTS = 2;
+const OPENAI_RETRY_DELAYS_MS = [1000];
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1217,7 +1221,7 @@ async function regenerateRejectedSlots(client, basePayload, slots, rejectedSlotI
     languageCode,
     repairSlots.length,
     'lock_screen_repair',
-    OPENAI_CALL_TIMEOUT_MS
+    OPENAI_REPAIR_TIMEOUT_MS
   );
   const parsed = parseOpenAiBatchResponse(response);
   const repaired = collectUsablePhrases(
