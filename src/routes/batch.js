@@ -78,7 +78,7 @@ function resolveLocationMismatch(geo, timezone) {
 }
 
 // requestMs (optional): total wall-clock time for the whole /batch request
-// (batch generation + pack generation running concurrently, DB writes, etc.)
+// (batch generation, DB writes, etc.)
 // -- observation-only, see the route handler's own requestStartMs comment.
 // Distinct from trace.meta.generation_ms (contentGenerator.js), which only
 // covers the ordinary batch's own generateBatch() call.
@@ -385,13 +385,8 @@ router.get('/batch', async (req, res, next) => {
           timeZone: device.timezone,
         });
       } else {
-        // Geolocation is resolved ONCE per request and shared between the
-        // current-weather lookup (resolveWeather, needed by the ordinary batch)
-        // and the day-forecast lookup inside getOrGenerateMorningPack
-        // (resolveWeatherForecast, needed by the pack) — see weather.js's
-        // resolveGeolocation. Without this, two concurrent branches each doing
-        // their own IP geolocation lookup would double the ipwho.is calls for
-        // every request.
+        // Geolocation is resolved ONCE per request (see weather.js's
+        // resolveGeolocation) and reused for the weather lookup.
         geo = await resolveGeolocation(req.ip);
 
         // IP-vs-timezone sanity check (see resolveLocationMismatch above). Uses
@@ -409,7 +404,7 @@ router.get('/batch', async (req, res, next) => {
         // country-dependent content selection (Daily Bank country_fact
         // eligibility, the `now.country` prompt field -- see contentGenerator.js)
         // uses the correct country per the product decision, without needing a
-        // second country-plumbing path through generateBatch/generateMorningPack.
+        // second country-plumbing path through generateBatch.
         weather = locationMismatch
           ? { countryCode: locationMismatch.tz_country, countrySource: 'timezone' }
           : await resolveWeather(req.ip, geo, { localDate: weatherLocalDate, timeZone: device.timezone });

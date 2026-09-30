@@ -82,15 +82,15 @@ router.get('/api/recent-batches', requireAdminAuth, (req, res) => {
 });
 
 const listDevicesStatement = db.prepare(`
-  SELECT device_id, gender, birth_date, interests, personal_goal, tone, timezone, created_at, updated_at
+  SELECT device_id, gender, birth_date, interests, timezone, created_at, updated_at
   FROM devices
   ORDER BY updated_at DESC
   LIMIT 200
 `);
 const searchDevicesStatement = db.prepare(`
-  SELECT device_id, gender, birth_date, interests, personal_goal, tone, timezone, created_at, updated_at
+  SELECT device_id, gender, birth_date, interests, timezone, created_at, updated_at
   FROM devices
-  WHERE device_id LIKE ? OR gender LIKE ? OR personal_goal LIKE ? OR tone LIKE ?
+  WHERE device_id LIKE ? OR gender LIKE ?
   ORDER BY updated_at DESC
   LIMIT 200
 `);
@@ -100,7 +100,7 @@ router.get('/api/devices', requireAdminAuth, (req, res) => {
   let rows;
   if (q && typeof q === 'string' && q.trim()) {
     const like = `%${q.trim()}%`;
-    rows = searchDevicesStatement.all(like, like, like, like);
+    rows = searchDevicesStatement.all(like, like);
   } else {
     rows = listDevicesStatement.all();
   }

@@ -61,7 +61,7 @@
     <input type="text" id="searchBox" placeholder="Поиск по device_id, полу, цели, тону...">
     <table>
       <thead>
-        <tr><th>Device ID</th><th>Пол</th><th>Дата рождения</th><th>Интересы</th><th>Цель</th><th>Тон</th><th>Часовой пояс</th><th>Обновлено</th></tr>
+        <tr><th>Device ID</th><th>Пол</th><th>Дата рождения</th><th>Интересы</th><th>Часовой пояс</th><th>Обновлено</th></tr>
       </thead>
       <tbody id="devicesTableBody"></tbody>
     </table>
@@ -164,12 +164,10 @@ async function refreshDevices(query) {
     <td>${escapeHtml(d.gender || '—')}</td>
     <td>${escapeHtml(d.birth_date || '—')}</td>
     <td>${escapeHtml((d.interests || []).join(', ') || '—')}</td>
-    <td>${escapeHtml(d.personal_goal || '—')}</td>
-    <td>${escapeHtml(d.tone || '—')}</td>
     <td>${escapeHtml(d.timezone || '—')}</td>
     <td class="muted">${escapeHtml(d.updated_at)}</td>
   </tr>`).join('');
-  document.getElementById('devicesTableBody').innerHTML = rows || '<tr><td colspan="8" class="muted">Нет устройств</td></tr>';
+  document.getElementById('devicesTableBody').innerHTML = rows || '<tr><td colspan="6" class="muted">Нет устройств</td></tr>';
 
   // Also populate the target dropdown on the messages tab.
   const select = document.getElementById('targetSelect');

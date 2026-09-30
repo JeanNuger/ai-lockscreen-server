@@ -33,8 +33,8 @@ const {
 // enforces -- never lowered, never used to slice/truncate a phrase.
 const LOCK_SCREEN_TEXT_MAX_LENGTH = 70;
 
-// Model used for the ordinary batch, its repair round, and the morning pack
-// (all three go through createOpenAiBatch below) -- overridable via env so a
+// Model used for the ordinary batch and its repair round
+// (both go through createOpenAiBatch below) -- overridable via env so a
 // model swap doesn't need a code change. Daily Bank generation
 // (dailyContentBank.js's gpt-4o + web_search call) is a separate, unrelated
 // OpenAI call and is not affected by either of these.
@@ -47,7 +47,7 @@ const OPENAI_BATCH_MODEL = process.env.OPENAI_BATCH_MODEL || 'gpt-5-mini';
 // quality over 'low'. Not passed to non-gpt-5 models (see createOpenAiBatch).
 const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || 'low';
 
-// Per-attempt timeout for one primary batch/pack OpenAI call -- bounds a single
+// Per-attempt timeout for one primary batch OpenAI call -- bounds a single
 // call so a hung request can't silently eat the Android client's own
 // read/call timeout the way the openai SDK's own 10-minute default would.
 // Passed as { timeout } on each `.create()` call. 60s: at 30s every attempt of
@@ -58,7 +58,7 @@ const OPENAI_CALL_TIMEOUT_MS = 60000;
 // after the primary call, and the worst case (2 primary attempts + 2 repair
 // rounds) has to stay inside the phone's 240s call timeout.
 const OPENAI_REPAIR_TIMEOUT_MS = 30000;
-// Primary batch/pack call only (never the repair/regenerate call, which
+// Primary batch call only (never the repair/regenerate call, which
 // stays single-attempt per round): 1 initial try + 1 retry, with the SDK's
 // own internal retry disabled ({ maxRetries: 0 } on the same call) so this
 // array is the only retry schedule in play and total attempts/timing stay
@@ -89,8 +89,7 @@ function isRetryableOpenAiError(err) {
   return status >= 500 && status < 600;
 }
 
-// Shared formatter for every AI_BATCH_ERROR/PACK_ERROR log line touched by
-// this task: err.name/status/code/type plus err.message truncated to 300
+// Shared formatter for every AI_BATCH_ERROR log line: err.name/status/code/type plus err.message truncated to 300
 // chars (never the API key or request headers, which aren't read here at
 // all). Collapsed to one line so a multi-line SDK error message can't split
 // the log entry.
@@ -105,18 +104,18 @@ function formatOpenAiErrorDetails(err) {
 }
 
 // Retries ONLY the primary call+parse pair (createOpenAiBatch +
-// parseOpenAiBatchResponse) for the ordinary batch and the morning pack --
+// parseOpenAiBatchResponse) for the ordinary batch --
 // never the repair/regenerate call (owner decision: repair keeps its
 // existing single-attempt, up-to-2-rounds behavior untouched). A parse/
 // schema failure is treated the same as a transport failure: both re-issue
 // the OpenAI call, since a malformed response is exactly as likely to be a
 // one-off glitch as a dropped connection. Logs one OPENAI_ATTEMPT line per
 // attempt (console.log on success, console.error on failure) -- deliberately
-// NOT prefixed AI_BATCH_ERROR/PACK_ERROR, since a successful attempt isn't an
-// error and grep'ing those two prefixes for "did this batch/pack fail" must
+// NOT prefixed AI_BATCH_ERROR, since a successful attempt isn't an
+// error and grep'ing that prefix for "did this batch fail" must
 // not match a mid-retry success line. On final exhaustion throws an Error
 // tagged with `.retryReason` ('openai_error' or 'parse_or_schema_error') so
-// the caller can still report the same two distinct AI_BATCH_RESULT/PACK
+// the caller can still report the same two distinct AI_BATCH_RESULT
 // reasons it always has.
 async function callOpenAiBatchWithRetry(client, context, languageCode, { count, schemaName, scope }) {
   let lastErr = null;
@@ -216,20 +215,6 @@ function resolveTargetLanguageCode(signals) {
 
 function pickRandomStyle() {
   return STYLE_IDS[Math.floor(Math.random() * STYLE_IDS.length)];
-}
-
-// Returns `count` distinct style_ids (Fisher-Yates shuffle of the full 27-value
-// STYLE_IDS, then take the first `count`) -- used wherever a batch needs several
-// different backgrounds guaranteed with no repeats.
-// count must not exceed STYLE_IDS.length (27); BATCH_SIZE (12) leaves comfortable
-// headroom.
-function pickUniqueStyles(count) {
-  const shuffled = [...STYLE_IDS];
-  for (let i = shuffled.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-  }
-  return shuffled.slice(0, count);
 }
 
 function pickFirstUnusedStyle(usedStyles) {
@@ -334,10 +319,10 @@ function tracePlannedSlots(trace, window, slots) {
       planned_source: plannedSourceForSlot(slot),
       bank_category: slot.bank_category || null,
       // facts: surfaced here (not just sent to OpenAI) so the derived facts
-      // that never reach the model as raw numbers -- e.g. the morning pack's
-      // weather_lifehack bands (rain_chance/uv_level/morning_temp_band/
-      // day_temp_band, see slotPlanner.js's planMorningPack) -- are still
-      // observable in the [batch-trace]/[pack-trace] log line and in tests,
+      // that never reach the model as raw numbers -- e.g. the weather_lifehack
+      // bands (rain_chance/uv_level/morning_temp_band/day_temp_band, see
+      // slotPlanner.js's buildForecastWeatherLifehack) -- are still
+      // observable in the [batch-trace] log line and in tests,
       // without needing to intercept the OpenAI request payload.
       facts: slot.facts || {},
     }));
@@ -383,27 +368,6 @@ function traceResultsFromCollected(collected, slots) {
       text: null,
       reason: 'missing',
     };
-  });
-}
-
-// Reassigns any duplicate style_id within a batch to one not yet used in that
-// same batch, walked in order -- keeps each phrase's own style_id whenever it's
-// still free within the batch, only touches actual repeats. 27 style_ids vs
-// BATCH_SIZE (12) leaves comfortable headroom, so an unused one is always
-// available. This is the hard guarantee; buildSystemPrompt's "don't repeat
-// style_id" instruction above is only a soft ask to the model, not relied on
-// alone.
-function dedupeStyleIds(items) {
-  const used = new Set();
-  return items.map((item) => {
-    if (!used.has(item.style_id)) {
-      used.add(item.style_id);
-      return item;
-    }
-    const available = STYLE_IDS.filter((id) => !used.has(id));
-    const replacement = available[Math.floor(Math.random() * available.length)];
-    used.add(replacement);
-    return { ...item, style_id: replacement };
   });
 }
 
@@ -684,7 +648,7 @@ function logMissingSlotPhrase(slot, validationContext) {
 // One line per slot dropped for good after both regenerate attempts (owner
 // decision: 2 attempts, not 1) -- type + the best-known rejection reason, so
 // a real content-quality problem shows up in the logs instead of just
-// silently shrinking the batch/pack. rejectionDetail is the matching entry
+// silently shrinking the batch. rejectionDetail is the matching entry
 // from collectUsablePhrases' rejectedDetails ({reason, detail, text}, see its
 // own comment), or undefined for a slot OpenAI never even produced text for
 // across either attempt.
@@ -697,7 +661,7 @@ function logSlotDroppedAfterRepair(slot, rejectionDetail) {
 // Walks every planned slot and logs the ones absent from assembly.phrases
 // (the final, post-repair accepted list) -- see logSlotDroppedAfterRepair.
 // rejectionDetailBySlotId: the caller's persisted map across all rounds (see
-// generateBatch/generateMorningPack's own recordRejectionDetails), not just
+// generateBatch's own recordRejectionDetails), not just
 // the final assembly's own rejectedDetails -- a slot's real reason often
 // lives in an earlier round (see that comment for why).
 function logSlotsDroppedAfterRepair(slots, assembly, rejectionDetailBySlotId) {
@@ -982,11 +946,11 @@ function traceFinalAssembly(trace, assembly, slots, repairedSlotIds = new Set())
 // object only -- never serialized into the HTTP response itself (routes/
 // batch.js only ever reads `.phrases`/`.source`/`.context`/`.trace` off the
 // old shape, so this is purely additive) -- added so routes/batch.js can
-// compute the morning-pack target_date without recomputing
+// avoid recomputing
 // resolveLocalDateContext a second time. Omitted (undefined) by every
 // pre-existing call site that doesn't pass it, which is harmless.
 // generationStartMs (last param, optional): epoch-ms captured at the very
-// start of generateBatch/generateMorningPack, observation-only -- when
+// start of generateBatch, observation-only -- when
 // present, records trace.meta.generation_ms (total wall-clock time for this
 // generation attempt, including any repair round) right before returning.
 // Never affects what's returned to the client (routes/batch.js's HTTP

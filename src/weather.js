@@ -85,8 +85,7 @@ function isPrivateOrLocalIp(ip) {
 }
 
 // Shared IP -> geolocation lookup (ipwho.is), resolved ONCE per request and
-// reused for both the ordinary weather and the morning pack forecast -- see
-// routes/batch.js. Returns the raw ipwho.is object (success/country_code/city/
+// reused for the weather lookup -- see routes/batch.js. Returns the raw ipwho.is object (success/country_code/city/
 // latitude/longitude), or null if the IP is private/local or the lookup failed.
 async function resolveGeolocation(ip) {
   if (isPrivateOrLocalIp(ip)) {

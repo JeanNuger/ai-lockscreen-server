@@ -1134,7 +1134,7 @@ function temperatureBand(temperatureC) {
   return 'hot';
 }
 
-// Ordering of temperatureBand's output, coldest-first -- lets the pack's
+// Ordering of temperatureBand's output, coldest-first -- lets the
 // weather_lifehack candidate compare morning_temp_band against day_temp_band
 // (e.g. "cold morning, mild day" -> layered-clothing advice) without
 // re-deriving Celsius thresholds a second time.
@@ -1164,9 +1164,8 @@ function weatherConditionLean(description) {
 // Facts + constraints for a weather_lifehack slot built from a DAY forecast
 // (the forecast for the user's local date -- see weather.js: temperatureC = the
 // day's max, temperatureMinC = the day's min, precipitationProbabilityMax,
-// uvIndexMax). Shared by the morning pack and the ordinary morning batch so the
-// bands (day_temp_band, morning_temp_band, rain_chance, uv_level) can never
-// drift apart. Returns null when there is nothing grounded to say.
+// uvIndexMax). Used by the ordinary morning batch for the bands (day_temp_band,
+// morning_temp_band, rain_chance, uv_level). Returns null when there is nothing grounded to say.
 function buildForecastWeatherLifehack(forecast) {
   if (!forecast || typeof forecast.temperatureC !== 'number') {
     return null;
@@ -1263,9 +1262,8 @@ function collectCandidates(input = {}) {
     }));
   }
 
-  // The ordinary morning batch (what the phone actually receives) uses the same
-  // forecast-for-the-local-date facts and bands as the morning pack when the
-  // weather comes from weather.js (weather.forecast === true).
+  // The ordinary morning batch uses forecast-for-the-local-date facts and bands
+  // when the weather comes from weather.js (weather.forecast === true).
   const forecastWeather = window === 'morning' && weather && weather.forecast === true
     ? buildForecastWeatherLifehack(weather)
     : null;
