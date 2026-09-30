@@ -63,11 +63,7 @@ async function withRoute(generateBatchImpl, callback) {
         resolveGeolocation: async () => null,
         resolveWeather: async () => null,
         resolveWeatherByCoords: async () => null,
-        resolveWeatherForecastByCoords: async () => null,
       };
-    }
-    if (request === '../morningPack') {
-      return { computeTargetDate: () => null, getExistingMorningPack: () => null, getOrGenerateMorningPack: async () => null };
     }
     if (request === '../adminMessages') return { consumePendingMessages: () => [] };
     return originalLoad.call(this, request, parent, isMain);

@@ -448,46 +448,10 @@ async function resolveWeatherByCoords(lat, lon, meta) {
   return forecastFor(lat, lon, meta, meta && meta.localDate);
 }
 
-// --- Morning pack forecast (target_date may be a future day) -------------------
-
-/**
- * @param {string} ip
- * @param {string} targetDate - YYYY-MM-DD in the device's timezone
- * @param {object|null} [precomputedGeo] - see resolveWeather
- * @param {{timeZone?: string}} [options]
- */
-async function resolveWeatherForecast(ip, targetDate, precomputedGeo, options) {
-  if (isPrivateOrLocalIp(ip) || typeof targetDate !== 'string' || !targetDate) {
-    return null;
-  }
-  const geo = precomputedGeo !== undefined ? precomputedGeo : await resolveGeolocation(ip);
-  if (!geo) {
-    return null;
-  }
-  const meta = geoMeta(geo, options);
-  if (typeof geo.latitude !== 'number' || typeof geo.longitude !== 'number') {
-    return { countryCode: meta.countryCode, city: meta.city, weatherFailure: 'no_coordinates' };
-  }
-  return forecastFor(geo.latitude, geo.longitude, meta, targetDate);
-}
-
-// City-based counterpart of resolveWeatherForecast.
-// meta: { countryCode, city, timeZone? }
-async function resolveWeatherForecastByCoords(lat, lon, targetDate, meta) {
-  const countryCode = (meta && meta.countryCode) || null;
-  const city = (meta && meta.city) || null;
-  if (typeof lat !== 'number' || typeof lon !== 'number' || typeof targetDate !== 'string' || !targetDate) {
-    return { countryCode, city, weatherFailure: 'no_coordinates' };
-  }
-  return forecastFor(lat, lon, meta, targetDate);
-}
-
 module.exports = {
   resolveWeather,
-  resolveWeatherForecast,
   resolveGeolocation,
   resolveWeatherByCoords,
-  resolveWeatherForecastByCoords,
   isPrivateOrLocalIp,
   _test: {
     parseMetTimeseries,

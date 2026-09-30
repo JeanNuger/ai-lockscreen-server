@@ -120,7 +120,6 @@ async function withMockedBatchRoute({ geo, weather, deviceTimezone }, callback) 
   delete require.cache[require.resolve('../src/routes/batch')];
 
   let capturedBatchArgs = null;
-  let capturedPackArgs = null;
 
   Module._load = function patchedLoad(request, parent, isMain) {
     if (request === '../contentGenerator') {
@@ -143,14 +142,6 @@ async function withMockedBatchRoute({ geo, weather, deviceTimezone }, callback) 
         resolveWeather: async () => weather,
       };
     }
-    if (request === '../morningPack') {
-      return {
-        getOrGenerateMorningPack: async (args) => {
-          capturedPackArgs = args;
-          return null;
-        },
-      };
-    }
     if (request === '../adminMessages') {
       return { consumePendingMessages: () => [] };
     }
@@ -171,7 +162,7 @@ async function withMockedBatchRoute({ geo, weather, deviceTimezone }, callback) 
       db.prepare('INSERT OR IGNORE INTO devices (device_id, timezone) VALUES (?, ?)')
         .run('incident19-device', deviceTimezone);
     }
-    return await callback(server, () => ({ batch: capturedBatchArgs, pack: capturedPackArgs }));
+    return await callback(server, () => ({ batch: capturedBatchArgs }));
   } finally {
     if (server) {
       await new Promise((resolve) => server.close(resolve));
@@ -192,11 +183,11 @@ async function testLocationMismatchDropsWeatherAndRecordsTrace() {
   }, async (server, getCaptured) => {
     const { json } = await requestJson(
       server,
-      '/api/v1/batch?device_id=incident19-device&window=morning&timezone=Asia%2FAlmaty&supports_morning_pack=1'
+      '/api/v1/batch?device_id=incident19-device&window=morning&timezone=Asia%2FAlmaty'
     );
-    assert.strictEqual(json.batch_id !== undefined, true, 'response should still succeed normally');
+    assert(Array.isArray(json.phrases), 'response should still succeed normally');
 
-    const { batch, pack } = getCaptured();
+    const { batch } = getCaptured();
     assert(batch, 'generateBatch must have been called');
     assert.strictEqual(
       typeof batch.weather.temperatureC,
@@ -208,9 +199,8 @@ async function testLocationMismatchDropsWeatherAndRecordsTrace() {
       'KZ',
       'country used for content purposes must be the TIMEZONE country (KZ), not the IP country (DE)'
     );
-    assert.strictEqual(pack.geo, null, 'the morning pack must also be told to skip its own IP-based weather forecast on a mismatch');
 
-    const row = db.prepare('SELECT trace_json FROM content_batches WHERE id = ?').get(json.batch_id);
+    const row = db.prepare('SELECT trace_json FROM content_batches WHERE device_id = ? ORDER BY id DESC').get('incident19-device');
     assert(row && row.trace_json, 'a trace row must have been stored');
     const trace = JSON.parse(row.trace_json);
     assert.deepStrictEqual(
@@ -231,16 +221,15 @@ async function testMatchingLocationIsUnaffected() {
   }, async (server, getCaptured) => {
     const { json } = await requestJson(
       server,
-      '/api/v1/batch?device_id=incident19-device&window=morning&timezone=Asia%2FAlmaty&supports_morning_pack=1'
+      '/api/v1/batch?device_id=incident19-device&window=morning&timezone=Asia%2FAlmaty'
     );
-    assert.strictEqual(json.batch_id !== undefined, true);
+    assert(Array.isArray(json.phrases));
 
-    const { batch, pack } = getCaptured();
+    const { batch } = getCaptured();
     assert.strictEqual(batch.weather.temperatureC, -2, 'matching case: real IP-based weather must still be used');
     assert.strictEqual(batch.weather.countryCode, 'KZ');
-    assert.notStrictEqual(pack.geo, null, 'matching case: the pack must still get real geo for its own forecast');
 
-    const row = db.prepare('SELECT trace_json FROM content_batches WHERE id = ?').get(json.batch_id);
+    const row = db.prepare('SELECT trace_json FROM content_batches WHERE device_id = ? ORDER BY id DESC').get('incident19-device');
     const trace = JSON.parse(row.trace_json);
     assert.strictEqual(
       Object.prototype.hasOwnProperty.call(trace, 'location_mismatch'),

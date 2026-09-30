@@ -156,7 +156,7 @@ async function withMockedBatchRoute({ deviceRow }, callback) {
   const originalLoad = Module._load;
   delete require.cache[require.resolve('../src/routes/batch')];
 
-  const calls = { resolveGeolocation: 0, resolveWeather: 0, resolveWeatherByCoords: [], resolveWeatherForecastByCoords: [] };
+  const calls = { resolveGeolocation: 0, resolveWeather: 0, resolveWeatherByCoords: [] };
 
   Module._load = function patchedLoad(request, parent, isMain) {
     if (request === '../contentGenerator') {
@@ -185,14 +185,7 @@ async function withMockedBatchRoute({ deviceRow }, callback) {
           calls.resolveWeatherByCoords.push({ lat, lon, meta });
           return { countryCode: meta.countryCode, city: meta.city, temperatureC: -5, description: 'snow' };
         },
-        resolveWeatherForecastByCoords: async (lat, lon, targetDate, meta) => {
-          calls.resolveWeatherForecastByCoords.push({ lat, lon, targetDate, meta });
-          return { countryCode: meta.countryCode, city: meta.city, temperatureC: -3, description: 'snow' };
-        },
       };
-    }
-    if (request === '../morningPack') {
-      return { getOrGenerateMorningPack: async () => null };
     }
     if (request === '../adminMessages') {
       return { consumePendingMessages: () => [] };

@@ -352,13 +352,6 @@ const GENERIC_FILLER_COUNT_KEY = Symbol('genericFillerCount');
 // fixed position" category without reintroducing this same bug.
 const MORNING_FIXED_TYPES = ['greeting_name', 'weather_lifehack', 'daily_horoscope', 'holiday_today', 'history_today', 'daily_numerology', 'word_learning'];
 
-// Morning-pack feature: the pack's own required slot order (product spec)
-// now matches MORNING_FIXED_TYPES above exactly (product decision -- the two
-// sequences used to differ, see git history). Kept as a distinct constant
-// rather than having planMorningPack reuse MORNING_FIXED_TYPES directly,
-// since the two are conceptually separate contracts (ordinary batch fixed
-// positions vs. the pack's own slot order) that happen to currently agree.
-const MORNING_PACK_ORDER = ['greeting_name', 'weather_lifehack', 'daily_horoscope', 'holiday_today', 'history_today', 'daily_numerology', 'word_learning'];
 const MORNING_ONLY_TYPES = new Set(['weather_lifehack', 'holiday_today', 'history_today', 'word_learning', 'daily_horoscope', 'daily_numerology']);
 const GUARANTEED_TYPES_BY_WINDOW = {
   morning: [],
@@ -1951,7 +1944,7 @@ function applyNameAbsentTopicIfNeeded(candidate) {
 // before -- see planSlots' caller). A position whose type has no matching
 // candidate AND is not in MODEL_ONLY_TYPES/MODEL_ONLY_FALLBACK_TYPES is
 // skipped (array simply comes out shorter than 12 for that day).
-function buildFixedOrderSlots(order, candidates, input, rng, memoryIndex, excludeTypes = null) {
+function buildFixedOrderSlots(order, candidates, input, rng, memoryIndex) {
   const usedIds = new Set();
   const result = [];
   let wordLearningCandidate = null;
@@ -1969,20 +1962,11 @@ function buildFixedOrderSlots(order, candidates, input, rng, memoryIndex, exclud
       const pool = candidates.filter((c) => !usedIds.has(c.id));
       candidate = selectBestCandidateForType(pool, type, rng, memoryIndex);
       // Only fall back to a model-only candidate when there's genuinely no
-      // data for this type today -- NOT when it's absent from `candidates`
-      // because the morning-pack feature deliberately excluded it
-      // (options.excludeTypes, see planSlots) so the pack can own it
-      // exclusively. Without this guard, a MODEL_ONLY_FALLBACK_TYPES type
-      // (e.g. word_learning) would reappear in the ordinary batch as
-      // model-only content even while supports_morning_pack=1 is asking for
-      // it to come only from the pack.
-      if (!candidate && MODEL_ONLY_FALLBACK_TYPES.has(type) && !(excludeTypes && excludeTypes.has(type))) {
+      // data for this type today.
+      if (!candidate && MODEL_ONLY_FALLBACK_TYPES.has(type)) {
         candidate = createModelOnlyCandidate(type, type === 'word_learning' ? WORD_LEARNING_MODEL_ONLY_TOPIC : undefined);
       }
-      // Same excludeTypes guard as above -- a SPARE_FACT_FALLBACK_TYPES type
-      // deliberately excluded for the morning-pack feature must stay
-      // skipped here too, not get replaced with spare_fact.
-      if (!candidate && SPARE_FACT_FALLBACK_TYPES.has(type) && !(excludeTypes && excludeTypes.has(type))) {
+      if (!candidate && SPARE_FACT_FALLBACK_TYPES.has(type)) {
         candidate = createSpareFactCandidate(type);
         console.warn(`SLOT_SPARE window=${input.window} replaced_type=${type}`);
       }
@@ -2062,15 +2046,6 @@ function addSlotIds(candidates, window) {
 
 function planSlots(input = {}, options = {}) {
   const rawCandidates = options.candidates || collectCandidates(input);
-  // excludeTypes (morning-pack feature, backward-compatible additive option):
-  // when the calling device supports the morning pack, the 7 pack types
-  // (MORNING_FIXED_TYPES) are delivered exclusively via the pack and must
-  // never also be offered as ordinary batch candidates, in ANY window --
-  // see contentGenerator.js's generateBatch, which only ever passes this for
-  // a supports_morning_pack=1 request. Left undefined (every existing
-  // caller/test), this is a no-op filter -- ordinary behavior is completely
-  // unchanged.
-  const excludeTypes = options.excludeTypes ? new Set(options.excludeTypes) : null;
   const typeMemoryIndex = buildTypeMemoryIndex(
     options.recentContentMemory,
     input.dateContext && input.dateContext.date,
@@ -2078,7 +2053,6 @@ function planSlots(input = {}, options = {}) {
   );
   const candidates = rawCandidates.filter((candidate) => isCandidateAllowedInWindow(candidate, input.window)
     && isCadencedCandidateAllowed(candidate, input, typeMemoryIndex)
-    && (!excludeTypes || !excludeTypes.has(candidate.type))
     // No meaningful "today" activity yet first thing in the morning -- see
     // isActivityBasedSignalCandidate's comment above.
     && !(input.window === 'morning' && isActivityBasedSignalCandidate(candidate)));
@@ -2102,7 +2076,7 @@ function planSlots(input = {}, options = {}) {
   // longer is).
   const fixedOrder = FIXED_ORDER_BY_WINDOW[input.window];
   if (fixedOrder) {
-    const fixedSlots = addSlotIds(buildFixedOrderSlots(fixedOrder, candidates, input, rng, memoryIndex, excludeTypes).slice(0, BATCH_SIZE), input.window);
+    const fixedSlots = addSlotIds(buildFixedOrderSlots(fixedOrder, candidates, input, rng, memoryIndex).slice(0, BATCH_SIZE), input.window);
     return {
       candidates,
       slots: fixedSlots,
@@ -2218,108 +2192,12 @@ function planSlots(input = {}, options = {}) {
   };
 }
 
-// Builds the (at most 7) candidates for the morning pack -- the same strict
-// sequence as MORNING_FIXED_TYPES, generated for a specific `targetDate`/
-// `targetDateContext` rather than "today". Deliberately NOT built on top of
-// collectCandidates/planSlots' competitive lottery -- there is no selection
-// here at all, just "does a genuine, grounded candidate exist for this type
-// on target_date, in the required order, skip it if not" (rule: a type with
-// no real grounding is dropped, never filled with a synthetic/creative
-// candidate -- the pack must never contain fallback-pool content).
-// Reuses the exact same fact-computation helpers the ordinary morning
-// candidates use (createCandidate/bankItemToCandidate/personalMorningFacts/
-// temperatureBand/weatherConditionLean) so the pack's grounding logic can
-// never drift from the ordinary morning batch's.
-function planMorningPack(input = {}) {
-  const { device = {}, targetDateContext, weatherForecast, bankItems = [] } = input;
-  const slotsByType = new Map();
-
-  const nameFacts = {};
-  if (device.name) nameFacts.name = device.name;
-  slotsByType.set('greeting_name', createCandidate({
-    id: 'pack_greeting_name',
-    type: 'greeting_name',
-    priority: 100,
-    facts: nameFacts,
-    source: 'editorial',
-    constraints: ['warm', 'one_per_batch', 'no_fixed_template', 'name_if_known', 'light_send_off_for_the_day'],
-  }));
-
-  const packWeather = buildForecastWeatherLifehack(weatherForecast);
-  if (packWeather) {
-    slotsByType.set('weather_lifehack', createCandidate({
-      id: 'pack_weather_forecast',
-      type: 'weather_lifehack',
-      priority: 62,
-      facts: packWeather.facts,
-      source: 'weather',
-      constraints: packWeather.constraints,
-    }));
-  }
-
-  const bankByType = new Map();
-  for (let i = 0; i < bankItems.length; i++) {
-    const candidate = bankItemToCandidate(bankItems[i], i);
-    if (!candidate) continue;
-    const existing = bankByType.get(candidate.type);
-    if (!existing || candidate.priority > existing.priority) {
-      bankByType.set(candidate.type, candidate);
-    }
-  }
-  // Same one-topic-once-per-batch rule as collectCandidates' bank loop above
-  // -- the pack can independently pick a holiday_today AND a history_today
-  // bank item, and those two categories describing the same real-world event
-  // on a given date is exactly as possible as the holiday/country_fact
-  // collision from the production trace. Order matters here (first kept
-  // wins): holiday_today before history_today before word_learning, matching
-  // MORNING_PACK_ORDER's own priority for these types.
-  const packBankEntries = ['holiday_today', 'history_today', 'word_learning']
-    .filter((type) => bankByType.has(type))
-    .map((type) => {
-      const candidate = bankByType.get(type);
-      return {
-        candidate,
-        text: candidate.facts && typeof candidate.facts.text === 'string' ? candidate.facts.text : null,
-      };
-    });
-  for (const candidate of dedupeByTopic(packBankEntries)) {
-    slotsByType.set(candidate.type, candidate);
-  }
-
-  const personalFacts = personalMorningFacts(device, targetDateContext);
-  if (personalFacts) {
-    slotsByType.set('daily_horoscope', createCandidate({
-      id: 'pack_daily_horoscope',
-      type: 'daily_horoscope',
-      priority: 58,
-      facts: personalFacts.horoscope,
-      source: 'profile',
-      constraints: ['symbolic_entertainment_only', 'no_predictions', 'no_medical_financial_legal_claims', 'no_fear', 'short_reflective_tone'],
-    }));
-    slotsByType.set('daily_numerology', createCandidate({
-      id: 'pack_daily_numerology',
-      type: 'daily_numerology',
-      priority: 57,
-      facts: personalFacts.numerology,
-      source: 'profile',
-      constraints: ['symbolic_entertainment_only', 'emphasize_personal_day_number', 'no_scientific_claim', 'no_predictions', 'short_reflective_tone'],
-    }));
-  }
-
-  const ordered = MORNING_PACK_ORDER
-    .map((type) => slotsByType.get(type))
-    .filter(Boolean);
-  return addSlotIds(ordered, 'morning');
-}
-
 module.exports = {
   CONTENT_TYPES,
   FACTUAL_TYPES,
   collectCandidates,
   planSlots,
-  planMorningPack,
   MORNING_FIXED_TYPES,
-  MORNING_PACK_ORDER,
   FIXED_ORDER_BY_WINDOW,
   MODEL_ONLY_TYPES,
   PAIRED_TYPES,

@@ -5,11 +5,8 @@ const { generateDailyBank } = require('../dailyContentBank');
 // (see src/dailyContentBank.js). Hit once per day at 19:45 UTC (00:45
 // Asia/Almaty, i.e. Render Cron Job schedule "45 19 * * *"), ahead of the
 // first 05:00 Almaty-local batch window, by an external scheduler (Render
-// Cron Job or similar) that can pass a secret query param -- same
-// secret-gated / 404-on-mismatch pattern as the earlier internal test route,
-// but with its own dedicated secret (INTERNAL_CRON_SECRET) rather than reusing
-// INTERNAL_TEST_SECRET, since this one is meant to be long-lived, not
-// deleted after a single manual test.
+// Cron Job or similar) that can pass a secret query param (INTERNAL_CRON_SECRET;
+// 404 on mismatch, so the route's existence is not revealed).
 //
 // POST rather than GET: this triggers a side effect (OpenAI call + DB writes)
 // each time it's hit, which fits POST semantics better than a GET that's

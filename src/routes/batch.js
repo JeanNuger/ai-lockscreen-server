@@ -5,21 +5,11 @@ const { generateBatch, resolveLocalDateContext, addDaysToDateString } = require(
 const { consumePendingMessages } = require('../adminMessages');
 const { parseDeviceSignals } = require('../deviceSignals');
 const { computePhoneTrends, recordPhoneSignalSample } = require('../phoneAnalytics');
-const { resolveWeather, resolveGeolocation, resolveWeatherByCoords, resolveWeatherForecastByCoords } = require('../weather');
-const morningPack = require('../morningPack');
+const { resolveWeather, resolveGeolocation, resolveWeatherByCoords } = require('../weather');
 const { countryForTimezone } = require('../timezoneCountry');
 
 const router = express.Router();
 const inFlightBatchRequests = new Map();
-const getOrGenerateMorningPack = morningPack.getOrGenerateMorningPack;
-const getExistingMorningPack = morningPack.getExistingMorningPack || (() => null);
-const computeTargetDate = morningPack.computeTargetDate || ((window, dateContext) => {
-  if (!dateContext || typeof dateContext.date !== 'string') {
-    return null;
-  }
-  return window === 'night' ? (dateContext.tomorrow_date || dateContext.date) : dateContext.date;
-});
-
 const getDeviceStatement = db.prepare('SELECT * FROM devices WHERE device_id = ?');
 // Minimal stub row for devices that call /batch before ever calling /register —
 // content_batches.device_id has a FOREIGN KEY into devices, so a batch can't be
@@ -33,7 +23,7 @@ const updateDeviceTimezoneStatement = db.prepare(
 );
 const insertBatchStatement = db.prepare(`
   INSERT INTO content_batches (device_id, window, local_date, supports_morning_pack, phrases, source, context)
-  VALUES (?, ?, ?, ?, ?, ?, ?)
+  VALUES (?, ?, ?, 0, ?, ?, ?)
 `);
 const updateBatchTraceStatement = db.prepare(`
   UPDATE content_batches SET trace_json = ? WHERE id = ?
@@ -44,7 +34,7 @@ const selectReusableBatchStatement = db.prepare(`
   WHERE device_id = ?
     AND window = ?
     AND local_date = ?
-    AND supports_morning_pack = ?
+    AND supports_morning_pack = 0
   ORDER BY id DESC
 `);
 
@@ -237,11 +227,11 @@ function isReusableNormalBatch(row) {
 // instead of quietly serving an empty batch from cache. Rows are ordered
 // DESC by id, so this returns the most recent real ('openai', non-fallback)
 // batch, or null if there isn't one yet.
-function selectReusableBatch(deviceId, window, localDate, supportsMorningPack) {
+function selectReusableBatch(deviceId, window, localDate) {
   if (!deviceId || !window || !localDate) {
     return null;
   }
-  const rows = selectReusableBatchStatement.all(deviceId, window, localDate, supportsMorningPack ? 1 : 0);
+  const rows = selectReusableBatchStatement.all(deviceId, window, localDate);
   return rows.find((row) => isReusableNormalBatch(row)) || null;
 }
 
@@ -269,8 +259,8 @@ function nightReuseKeyDate(window, dateContext) {
   return dateContext.date;
 }
 
-function batchCacheKey(deviceId, window, localDate, supportsMorningPack) {
-  return [deviceId, window, localDate, supportsMorningPack ? 'pack' : 'plain'].join('|');
+function batchCacheKey(deviceId, window, localDate) {
+  return [deviceId, window, localDate].join('|');
 }
 
 function buildCacheHitTrace(row, window, localDate, requestMs) {
@@ -285,28 +275,16 @@ function buildCacheHitTrace(row, window, localDate, requestMs) {
   });
 }
 
-function buildResponseBody({ phrases, supportsMorningPack, batchId, morningPack, device }) {
-  const responseBody = { phrases };
-  if (supportsMorningPack) {
-    responseBody.batch_id = batchId;
-    responseBody.morning_pack = morningPack;
-  }
-  return appendProfileRequired(responseBody, device);
+function buildResponseBody({ phrases, device }) {
+  return appendProfileRequired({ phrases }, device);
 }
 
-function responseFromCachedBatch(row, { device, window, localDate, supportsMorningPack, targetDate, requestStartMs }) {
+function responseFromCachedBatch(row, { device, window, localDate, requestStartMs }) {
   const adminPhrases = consumePendingMessages(device.device_id);
   const phrases = [...parseBatchPhrases(row), ...adminPhrases];
   const traceJson = buildCacheHitTrace(row, window, localDate, Date.now() - requestStartMs);
   logBatchTrace(traceJson);
-  const morningPack = supportsMorningPack ? getExistingMorningPack(device.device_id, targetDate) : null;
-  return buildResponseBody({
-    phrases,
-    supportsMorningPack,
-    batchId: row.id,
-    morningPack,
-    device,
-  });
+  return buildResponseBody({ phrases, device });
 }
 
 // GET /api/v1/batch?device_id=...&window=morning|day|evening|night
@@ -324,18 +302,10 @@ function responseFromCachedBatch(row, { device, window, localDate, supportsMorni
 // devices) are appended to the normal AI/fallback batch, not substituted for
 // it — per product decision, an admin message is one extra phrase mixed into
 // the regular rotation, not a takeover of the whole batch.
-//
-// Morning pack (optional, backward-compatible extension): a client that
-// sends supports_morning_pack=1 additionally gets a `batch_id` and a
-// `morning_pack` field in the response — see PRODUCT_REBUILD_PLAN.md and
-// src/morningPack.js/src/contentGenerator.js's generateMorningPack for the
-// full design. Without that param, the response is byte-identical to before
-// this feature existed — no batch_id, no morning_pack key at all.
 router.get('/batch', async (req, res, next) => {
   // Observation-only: total wall-clock time for the whole request, logged
   // into [batch-trace]'s meta.request_ms below -- covers everything (device
-  // lookup, weather/geo resolution, concurrent batch+pack generation, DB
-  // writes), not just generateBatch's own work (see contentGenerator.js's
+  // lookup, weather/geo resolution, generation, DB writes), not just generateBatch's own work (see contentGenerator.js's
   // separate meta.generation_ms for that).
   const requestStartMs = Date.now();
   try {
@@ -359,17 +329,6 @@ router.get('/batch', async (req, res, next) => {
       device.timezone = requestTimezone;
     }
 
-    const supportsMorningPack = req.query.supports_morning_pack === '1';
-    const packDateHeld = supportsMorningPack ? cleanLocalDate(req.query.pack_date_held) : null;
-
-    // Computed UP FRONT, before either generateBatch or the pack's own
-    // generation starts — resolveLocalDateContext only needs device.timezone
-    // (already resolved above) + the optional client-forced local_date, not
-    // anything generateBatch computes, so the pack's target_date can be
-    // known without waiting on generateBatch's result. This is what makes
-    // the Promise.all below possible: previously the pack was generated
-    // AFTER generateBatch finished, sequentially, reading dateContext off
-    // its return value.
     const { dateContext } = resolveLocalDateContext(device.timezone, requestLocalDate);
     // localDate here is the REUSE-KEY date, not necessarily today's plain
     // calendar date -- see nightReuseKeyDate's own comment for why the
@@ -377,22 +336,17 @@ router.get('/batch', async (req, res, next) => {
     // reuse/cache lookup, the cache key, the stored content_batches.local_date
     // column, and the cache-hit trace's local_date field below -- never
     // passed to generateBatch itself (that still gets the raw
-    // requestLocalDate/device-local "today", unaffected) and never used for
-    // the morning pack's own targetDate (computeTargetDate has its own,
-    // different "next upcoming 05:00" rule for night, see morningPack.js).
+    // requestLocalDate/device-local "today", unaffected).
     const localDate = nightReuseKeyDate(window, dateContext);
-    const targetDate = supportsMorningPack ? computeTargetDate(window, dateContext) : null;
-    const cacheKey = batchCacheKey(device_id, window, localDate, supportsMorningPack);
+    const cacheKey = batchCacheKey(device_id, window, localDate);
 
-    const cachedBatch = selectReusableBatch(device_id, window, localDate, supportsMorningPack);
+    const cachedBatch = selectReusableBatch(device_id, window, localDate);
     if (cachedBatch) {
       recordPhoneSignalSample(device, window, signals);
       return res.status(200).json(responseFromCachedBatch(cachedBatch, {
         device,
         window,
         localDate,
-        supportsMorningPack,
-        targetDate,
         requestStartMs,
       }));
     }
@@ -404,8 +358,6 @@ router.get('/batch', async (req, res, next) => {
         device,
         window,
         localDate,
-        supportsMorningPack,
-        targetDate,
         requestStartMs,
       }));
     }
@@ -474,60 +426,9 @@ router.get('/batch', async (req, res, next) => {
 
       const phoneTrends = computePhoneTrends(device, window, signals);
 
-      // Batch generation and pack generation now run CONCURRENTLY rather than
-      // sequentially — previously the pack's own OpenAI call(s) started only
-      // after generateBatch's had fully finished, in the same request, which
-      // could chain up to 4 OpenAI calls back-to-back (2 each with repair) and
-      // risk a client-side timeout. A pack failure/timeout must never delay or
-      // break the ordinary batch response: the pack promise's own rejection is
-      // caught and turned into a resolved `null` outcome right here, so
-      // Promise.all only ever waits on two promises that both always resolve.
-      const batchPromise = generateBatch(device, window, signals, weather, phoneTrends, {
+      const { phrases, source, context, trace } = await generateBatch(device, window, signals, weather, phoneTrends, {
         localDate: requestLocalDate,
-        // The 7 morning-pack types are excluded from ordinary batch planning in
-        // every window once the client supports the pack — they're delivered
-        // exclusively via morning_pack below (see planSlots' excludeTypes and
-        // MORNING_FIXED_TYPES). No-op (undefined) when the flag is absent, so
-        // the ordinary response stays byte-identical for old clients.
-        excludeMorningPackTypes: supportsMorningPack,
       });
-
-      const packPromise = supportsMorningPack
-        ? getOrGenerateMorningPack({
-          device,
-          window,
-          dateContext,
-          signals,
-          weather,
-          ip: req.ip,
-          packDateHeld,
-          // On a location mismatch, force the pack's own weather-forecast
-          // lookup to be skipped too (resolveWeatherForecast short-circuits to
-          // null when handed a null geo explicitly) -- same "no IP-based
-          // weather at all" rule as the ordinary batch's weather_lifehack
-          // above, so the morning pack's weather_lifehack candidate is also
-          // never created for a mismatched request (see planMorningPack).
-          // hasCity: geo was never resolved at all in that branch (null
-          // already) -- weatherForecast below supplies the pack's forecast
-          // instead, from the city's own coordinates.
-          geo: hasCity ? null : (locationMismatch ? null : geo),
-          weatherForecast: hasCity
-            ? await resolveWeatherForecastByCoords(device.city_lat, device.city_lon, targetDate, {
-              countryCode: device.city_country_code,
-              city: device.city_name,
-              timeZone: device.timezone,
-            })
-            : undefined,
-        }).catch((err) => {
-          // Defense in depth on top of getOrGenerateMorningPack's own
-          // try/catch — a pack failure must NEVER break the ordinary batch
-          // response computed concurrently below.
-          console.error(`MORNING_PACK_ROUTE_ERROR error=${err.name || 'Error'}`);
-          return null;
-        })
-        : Promise.resolve(null);
-
-      const [{ phrases, source, context, trace }, morningPack] = await Promise.all([batchPromise, packPromise]);
 
       const adminPhrases = consumePendingMessages(device_id);
       const combinedPhrases = [...phrases, ...adminPhrases];
@@ -536,7 +437,6 @@ router.get('/batch', async (req, res, next) => {
         device_id,
         window,
         localDate,
-        supportsMorningPack ? 1 : 0,
         JSON.stringify(combinedPhrases),
         source,
         context || null
@@ -555,13 +455,7 @@ router.get('/batch', async (req, res, next) => {
           source,
           trace_json: traceJson,
         },
-        responseBody: buildResponseBody({
-          phrases: combinedPhrases,
-          supportsMorningPack,
-          batchId: insertResult.lastInsertRowid,
-          morningPack,
-          device,
-        }),
+        responseBody: buildResponseBody({ phrases: combinedPhrases, device }),
       };
     })();
 

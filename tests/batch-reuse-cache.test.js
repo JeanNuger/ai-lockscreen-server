@@ -62,13 +62,6 @@ async function withMockedBatchRoute(generateBatchImpl, callback) {
         resolveWeather: async () => ({ countryCode: 'KZ', temperatureC: 18, description: 'clear' }),
       };
     }
-    if (request === '../morningPack') {
-      return {
-        computeTargetDate: (window, dateContext) => (dateContext ? dateContext.date : null),
-        getExistingMorningPack: () => null,
-        getOrGenerateMorningPack: async () => null,
-      };
-    }
     if (request === '../adminMessages') {
       return { consumePendingMessages: () => [] };
     }
@@ -132,7 +125,7 @@ async function testSecondRequestReusesBatchAndTrace() {
         trace: { meta: {}, whole_batch_fallback: { flag: false } },
       };
     }, async (server) => {
-      const pathName = `/api/v1/batch?device_id=${deviceId}&window=morning&timezone=Asia%2FAlmaty&local_date=2026-09-26&supports_morning_pack=1`;
+      const pathName = `/api/v1/batch?device_id=${deviceId}&window=morning&timezone=Asia%2FAlmaty&local_date=2026-09-26`;
       const first = await requestJson(server, pathName);
       const second = await requestJson(server, pathName);
 
@@ -140,11 +133,11 @@ async function testSecondRequestReusesBatchAndTrace() {
       assert.strictEqual(second.statusCode, 200);
       assert.strictEqual(calls, 1, 'second request with the same key must not call generateBatch/OpenAI');
       assert.deepStrictEqual(second.json.phrases, first.json.phrases, 'cached response must reuse the same phrases');
-      assert.strictEqual(second.json.batch_id, first.json.batch_id, 'cached response must reuse the original batch id');
       assert.strictEqual(memoryCount(deviceId), 1, 'content memory must not be written again on cache hit');
       const cacheTrace = logs.find((line) => line.includes('"cache_hit":true'));
       assert(cacheTrace, 'cache hit must emit a [batch-trace] log line');
-      assert(cacheTrace.includes(`"reused_batch_id":${first.json.batch_id}`), 'cache trace must include reused_batch_id');
+      const storedId = db.prepare('SELECT id FROM content_batches WHERE device_id = ?').get(deviceId).id;
+      assert(cacheTrace.includes(`"reused_batch_id":${storedId}`), 'cache trace must include reused_batch_id');
     });
   } finally {
     console.log = originalLog;
@@ -341,13 +334,6 @@ async function testNightWindowReuseKeyCrossesMidnight() {
       return {
         resolveGeolocation: async () => ({ success: true, country_code: 'KZ' }),
         resolveWeather: async () => ({ countryCode: 'KZ', temperatureC: 18, description: 'clear' }),
-      };
-    }
-    if (request === '../morningPack') {
-      return {
-        computeTargetDate: (window, dateContext) => (dateContext ? dateContext.date : null),
-        getExistingMorningPack: () => null,
-        getOrGenerateMorningPack: async () => null,
       };
     }
     if (request === '../adminMessages') {

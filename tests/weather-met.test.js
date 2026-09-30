@@ -227,13 +227,6 @@ async function withRoute(fetchHandler, callback) {
         }),
       };
     }
-    if (request === '../morningPack') {
-      return {
-        computeTargetDate: (window, dateContext) => (dateContext ? dateContext.date : null),
-        getExistingMorningPack: () => null,
-        getOrGenerateMorningPack: async () => null,
-      };
-    }
     if (request === '../adminMessages') return { consumePendingMessages: () => [] };
     return originalLoad.call(this, request, parent, isMain);
   };
