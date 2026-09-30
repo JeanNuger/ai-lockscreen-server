@@ -50,18 +50,16 @@ function testExactRepeatRejected() {
   assert.strictEqual(otherDevice.accepted.length, 1, 'the archive is per device');
 }
 
-function testNearRepeatRejected() {
+// Repeats by meaning are no longer detected on the server (the model is told what the
+// device has already seen instead): only a byte-for-byte repeat after normalization
+// is rejected, a reworded version of the same text goes through.
+function testReworded_RepeatNotRejected() {
   addDevice('near');
   sentPhrases.recordSentPhrases('near', [{ text: 'Сегодня отличный день для прогулки', slot_type: 'everyday_lifehack' }]);
 
-  // 5 of 6 distinct words shared -> Jaccard 0.83
-  const near = collect('near', 'Сегодня отличный день для долгой прогулки', 'everyday_lifehack');
-  assert.strictEqual(near.accepted.length, 0);
-  assert.strictEqual(near.rejectedDetails[0].detail, 'repeat_near');
-
-  // 3 of 7 distinct words shared -> well below 0.8
-  const different = collect('near', 'Сегодня отличный повод позвонить старому другу', 'everyday_lifehack');
-  assert.strictEqual(different.accepted.length, 1);
+  const reworded = collect('near', 'Сегодня отличный день для долгой прогулки', 'everyday_lifehack');
+  assert.strictEqual(reworded.accepted.length, 1, 'a near duplicate is no longer rejected');
+  assert.strictEqual(reworded.rejectedSlotIds.length, 0);
 }
 
 function testExemptAndCheckedTypes() {
@@ -95,9 +93,9 @@ function testOldTextIsScrubbedButHashStays() {
 
   assert.strictEqual(collect('scrub', oldText, 'culture').rejectedDetails[0].detail, 'repeat_exact');
   assert.strictEqual(collect('scrub', 'Старая фраза про осенний парк и тишину сегодня', 'culture').accepted.length, 1,
-    'near repeats are only checked against text that is still stored');
-  assert.strictEqual(collect('scrub', 'Новая фраза про утренний кофе сегодня', 'culture').accepted.length, 0,
-    'near repeat of recent text is rejected');
+    'only exact repeats are rejected');
+  assert.strictEqual(collect('scrub', 'Новая фраза про утренний кофе сегодня', 'culture').accepted.length, 1,
+    "a near repeat of recent text is not rejected either (meaning is the model's job)");
 }
 
 function testShownBankFactIsNotOfferedAgain() {
@@ -105,16 +103,16 @@ function testShownBankFactIsNotOfferedAgain() {
   const bankDate = '2026-09-30';
   const insertBank = db.prepare('INSERT INTO daily_content_bank (bank_date, category, content_text) VALUES (?, ?, ?)');
   const factText = 'Осьминоги имеют три сердца.';
-  const factId = insertBank.run(bankDate, 'fact', factText).lastInsertRowid;
+  const factId = insertBank.run(bankDate, 'good_news', factText).lastInsertRowid;
   const holidayText = 'День примера отмечают 30 сентября.';
   insertBank.run(bankDate, 'holiday', holidayText);
 
   const select = () => selectBankItemsForDevice('facts', bankDate, bankDate, null, null, 5);
   const categories = (items) => items.map((item) => item.category).sort();
-  assert.deepStrictEqual(categories(select()), ['fact', 'holiday']);
+  assert.deepStrictEqual(categories(select()), ['good_news', 'holiday']);
 
   // Record exactly the way generateBatch does: the slot built from the real bank candidate.
-  const candidate = plannerTest.bankItemToCandidate({ id: factId, category: 'fact', content_text: factText });
+  const candidate = plannerTest.bankItemToCandidate({ id: factId, category: 'good_news', content_text: factText });
   const slot = { slot_id: 's1', type: candidate.type, source: candidate.source, facts: candidate.facts };
   sentPhrases.recordSentContent('facts', [slot], [{ slot_id: 's1', text: 'Три сердца у осьминога' }]);
   assert.deepStrictEqual(categories(select()), ['holiday'], 'the used fact is gone');
@@ -125,20 +123,20 @@ function testShownBankFactIsNotOfferedAgain() {
 
   // Other devices are unaffected.
   addDevice('facts-other');
-  assert.deepStrictEqual(categories(selectBankItemsForDevice('facts-other', bankDate, bankDate, null, null, 5)), ['fact', 'holiday']);
+  assert.deepStrictEqual(categories(selectBankItemsForDevice('facts-other', bankDate, bankDate, null, null, 5)), ['good_news', 'holiday']);
 
   // Evergreen category: still hidden after a year. Date-sensitive: back after 300 days.
   db.prepare("UPDATE device_shown_facts SET shown_at = datetime('now', '-400 days') WHERE device_id = 'facts'").run();
   assert.deepStrictEqual(categories(select()), ['holiday']);
 
   const shown = sentPhrases.loadShownFacts('facts');
-  assert.strictEqual(sentPhrases.isFactShown(shown, 'fact', factText), true, 'evergreen fact key is known');
+  assert.strictEqual(sentPhrases.isFactShown(shown, 'good_news', factText), true, 'evergreen fact key is known');
   sentPhrases.recordShownFacts('facts', [{ slot_id: 's1', source: 'daily_bank', facts: { text: holidayText } }], new Set(['s1']));
   assert.strictEqual(sentPhrases.isFactShown(sentPhrases.loadShownFacts('facts'), 'holiday', holidayText), true);
   db.prepare("UPDATE device_shown_facts SET shown_at = datetime('now', '-301 days') WHERE device_id = 'facts'").run();
   const later = sentPhrases.loadShownFacts('facts');
   assert.strictEqual(sentPhrases.isFactShown(later, 'holiday', holidayText), false, 'holiday facts return after 300 days');
-  assert.strictEqual(sentPhrases.isFactShown(later, 'fact', holidayText), true, 'other categories never return');
+  assert.strictEqual(sentPhrases.isFactShown(later, 'good_news', holidayText), true, 'other categories never return');
 }
 
 function testOldBatchDiagnosticsAreCleared() {
@@ -162,7 +160,7 @@ function testOldBatchDiagnosticsAreCleared() {
 }
 
 testExactRepeatRejected();
-testNearRepeatRejected();
+testReworded_RepeatNotRejected();
 testExemptAndCheckedTypes();
 testOldTextIsScrubbedButHashStays();
 testShownBankFactIsNotOfferedAgain();

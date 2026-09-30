@@ -267,11 +267,11 @@ async function main() {
   // the same topic_key" and "a different row id does NOT defeat that match"
   // -- need their own coverage; a passing antiRepeatPenalty test alone
   // wouldn't reveal it if topic_key were left unset (as it initially was).
-  const bankCandidateDay1 = plannerTest.bankItemToCandidate({ id: 101, category: 'quote', content_text: 'Same fact, different day.' });
-  const bankCandidateDay2 = plannerTest.bankItemToCandidate({ id: 999, category: 'quote', content_text: '  Same fact, different day.  ' });
+  const bankCandidateDay1 = plannerTest.bankItemToCandidate({ id: 101, category: 'good_news', content_text: 'Same fact, different day.' });
+  const bankCandidateDay2 = plannerTest.bankItemToCandidate({ id: 999, category: 'good_news', content_text: '  Same fact, different day.  ' });
   assert.notStrictEqual(bankCandidateDay1.id, bankCandidateDay2.id, 'bank content_key is expected to differ across bank rows (by design)');
   assert.strictEqual(bankCandidateDay1.topic_key, bankCandidateDay2.topic_key, 'bank topic_key must be deterministic for the same fact text regardless of row id');
-  const bankCandidateDifferentText = plannerTest.bankItemToCandidate({ id: 102, category: 'quote', content_text: 'A completely different fact.' });
+  const bankCandidateDifferentText = plannerTest.bankItemToCandidate({ id: 102, category: 'good_news', content_text: 'A completely different fact.' });
   assert.notStrictEqual(bankCandidateDay1.topic_key, bankCandidateDifferentText.topic_key, 'different fact text must produce a different topic_key');
 
   // normalizeTextForTopicKey itself: case, whitespace, punctuation
@@ -294,9 +294,9 @@ async function main() {
     'a genuinely different fact must still normalize to different text'
   );
 
-  const punctuationBankA = plannerTest.bankItemToCandidate({ id: 201, category: 'quote', content_text: 'The Moon is moving away from Earth.' });
-  const punctuationBankB = plannerTest.bankItemToCandidate({ id: 202, category: 'quote', content_text: 'The Moon is moving away from Earth!' });
-  const punctuationBankC = plannerTest.bankItemToCandidate({ id: 203, category: 'quote', content_text: '"The Moon," is moving, away from Earth"' });
+  const punctuationBankA = plannerTest.bankItemToCandidate({ id: 201, category: 'good_news', content_text: 'The Moon is moving away from Earth.' });
+  const punctuationBankB = plannerTest.bankItemToCandidate({ id: 202, category: 'good_news', content_text: 'The Moon is moving away from Earth!' });
+  const punctuationBankC = plannerTest.bankItemToCandidate({ id: 203, category: 'good_news', content_text: '"The Moon," is moving, away from Earth"' });
   assert.strictEqual(punctuationBankA.topic_key, punctuationBankB.topic_key, 'bank topic_key must ignore terminal punctuation differences (. vs !)');
   assert.strictEqual(punctuationBankA.topic_key, punctuationBankC.topic_key, 'bank topic_key must ignore quote/comma punctuation differences');
 
@@ -478,7 +478,7 @@ async function main() {
 
   const candidates = collectCandidates(baseInput);
   assert(candidates.some((candidate) => candidate.source === 'daily_bank' && candidate.type === 'history_today'), 'on_this_day bank item must become history_today candidate');
-  assert(candidates.some((candidate) => candidate.source === 'daily_bank' && candidate.type === 'science_fact'), 'a science-category bank item must become a science_fact candidate (fixed-order rebuild: science_tech split into science_fact/technology_fact)');
+  assert(!candidates.some((candidate) => candidate.source === 'daily_bank' && candidate.type === 'science_fact'), 'a science-category bank item must no longer become a candidate: science is written by the model');
 
   const noPhoneTrendCandidates = collectCandidates({
     ...baseInput,
@@ -566,10 +566,21 @@ async function main() {
     'same seed must be reproducible'
   );
 
+  // Fixed-order windows are deterministic except where several bank candidates of
+  // the same type compete (here: three good_news items in the evening).
+  const seedInput = {
+    ...baseInput,
+    window: 'evening',
+    bankItems: [
+      { category: 'good_news', content_text: 'Scientists restored a coral reef off Australia.', tags: ['global'] },
+      { category: 'good_news', content_text: 'A city in Norway opened its first solar bus line.', tags: ['global'] },
+      { category: 'good_news', content_text: 'Kenya planted a record number of trees this week.', tags: ['global'] },
+    ],
+  };
   let changedWithDifferentSeed = false;
-  const seedA = JSON.stringify(planSlots(baseInput, { seed: 'seed-a' }).slots);
-  for (const seed of ['seed-b', 'seed-c', 'seed-d']) {
-    if (JSON.stringify(planSlots(baseInput, { seed }).slots) !== seedA) {
+  const seedA = JSON.stringify(planSlots(seedInput, { seed: 'seed-a' }).slots);
+  for (const seed of ['seed-b', 'seed-c', 'seed-d', 'seed-e', 'seed-f']) {
+    if (JSON.stringify(planSlots(seedInput, { seed }).slots) !== seedA) {
       changedWithDifferentSeed = true;
       break;
     }

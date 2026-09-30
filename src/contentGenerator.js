@@ -19,6 +19,7 @@ const {
   findRepeat,
   recordSentContent,
 } = require('./sentPhrases');
+const { loadSeenBlock } = require('./seenMemory');
 const { planSlots, MORNING_FIXED_TYPES, PAIRED_TYPES } = require('./slotPlanner');
 const {
   validateLockScreenText,
@@ -489,7 +490,7 @@ function collectUsablePhrases(phrases, languageCode, validationContext = {}, exp
       reject('duplicate', phrase.slot_id, text);
       continue;
     }
-    // Repeat of something already sent to this device (see sentPhrases.js):
+    // Exact repeat of a text already sent to this device (see sentPhrases.js):
     // rejected like any other bad text, so the slot goes through the normal
     // repair rounds and is dropped if it still repeats.
     const archive = validationContext ? validationContext.sentArchive : null;
@@ -1090,7 +1091,22 @@ async function createOpenAiBatch(client, context, languageCode, count = BATCH_SI
     params.reasoning_effort = OPENAI_REASONING_EFFORT;
   }
   const options = timeoutMs === undefined ? undefined : { timeout: timeoutMs, maxRetries: 0 };
-  return client.chat.completions.create(params, options);
+  const response = await client.chat.completions.create(params, options);
+  logOpenAiUsage(schemaName, response);
+  return response;
+}
+
+// One line per OpenAI call (batch, and each repair round): how many tokens went
+// in and out, so the cost of the "already seen" block stays visible.
+// Never throws: a response without `usage` (or a mock) just logs nothing.
+function logOpenAiUsage(scope, response) {
+  const usage = response && response.usage;
+  if (!usage) {
+    return;
+  }
+  const details = usage.prompt_tokens_details;
+  const cached = details && Number.isFinite(details.cached_tokens) ? details.cached_tokens : 0;
+  console.log(`OPENAI_USAGE scope=${scope} model=${OPENAI_BATCH_MODEL} prompt_tokens=${usage.prompt_tokens} completion_tokens=${usage.completion_tokens} total_tokens=${usage.total_tokens} cached_tokens=${cached}`);
 }
 
 // rejectedDetails (optional, from assembly.rejectedDetails) carries the
@@ -1383,7 +1399,7 @@ function windowContextFor(window) {
   return WINDOW_CONTEXT[window] || { id: window };
 }
 
-function buildContextPrompt(device, window, signals, weather, languageCode, slots, dateContext) {
+function buildContextPrompt(device, window, signals, weather, languageCode, slots, dateContext, seen = null) {
   const profile = {};
   if (device.name) profile.name = device.name;
   if (device.gender) profile.gender = device.gender;
@@ -1472,6 +1488,11 @@ function buildContextPrompt(device, window, signals, weather, languageCode, slot
       : [],
   };
   if (Object.keys(profile).length === 0) delete ctx.profile;
+  // Last on purpose: the variable, per-device part goes at the end of the
+  // payload. It travels in the base payload, so repair calls carry it too.
+  if (seen && ((seen.phrases && seen.phrases.length > 0) || seen.learned_words)) {
+    ctx.already_seen = seen;
+  }
 
   return JSON.stringify(ctx);
 }
@@ -1514,7 +1535,9 @@ VOICE
 - No numbers from phone signals. No exact temperatures.
 
 FACTS
-- Use only facts given in the slot. Never invent names, dates, numbers or events.
+- If a slot has facts, use only those facts. Never invent names, dates, numbers or events.
+- If a slot has no facts, only a type and a topic, write a real, verifiable fact yourself. Never make one up.
+- "already_seen" lists what this user has already read and the words they have already learned. Do not repeat those facts, jokes, ideas or words, even in different words. For every topic pick something new.
 - Dry numbers only if the number itself is surprising.
 
 SLOT TYPES
@@ -1541,7 +1564,7 @@ WRITING STYLE (no sample phrases are given on purpose; never copy wording from a
 - Concrete and specific: a real fact, a doable tip or a precise observation. Nothing that could fit any day or any person.
 - Weather: everyday wording about what to wear or take, no exact numbers, no orders.
 - Humor: light, about familiar everyday situations; no translated jokes, no joke setups about yourself.
-- Facts: the most surprising concrete detail; no dry statistics or forecasts.
+- Facts: the most surprising concrete detail; no dry statistics or forecasts. Prefer little-known, surprising facts and fresh angles; avoid the most famous textbook facts.
 - Greetings and wishes: warm and personal, not greeting-card phrases; use a name only if it is in the provided profile.
 - Avoid: empty motivation, clichés, obvious health advice, formal commands.
 
@@ -1614,7 +1637,8 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
     signals,
   }, { recentContentMemory });
 
-  const context = buildContextPrompt(device, window, signals, weather, languageCode, slots, dateContext);
+  const seen = loadSeenBlock(device.device_id);
+  const context = buildContextPrompt(device, window, signals, weather, languageCode, slots, dateContext, seen);
   const trace = buildInitialTrace(device, window, languageCode, dateContext);
   tracePlannedSlots(trace, window, slots);
   const validationContext = {
@@ -1811,7 +1835,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
   const usedCategories = extractUsedCategoriesFromSlots(slots);
   recordShownCategories(device.device_id, deviceLocalDate, usedCategories);
   recordShownContentMemory(device.device_id, slots, assembly.generatedSlotIds);
-  recordLearnedWords(device.device_id, slots, assembly.generatedSlotIds);
+  recordLearnedWords(device.device_id, slots, assembly.generatedSlotIds, assembly.phrases);
   recordRecalledWords(device.device_id, slots, assembly.generatedSlotIds);
   recordSentContent(device.device_id, slots, assembly.phrases);
 
@@ -1831,6 +1855,7 @@ module.exports = {
     resolveLocalDateContext,
     buildContextPrompt,
     buildSystemPrompt,
+    logOpenAiUsage,
     SUPPORTED_LANGUAGES,
     LOCK_SCREEN_TEXT_MAX_LENGTH,
     buildBatchResponseFormat,

@@ -201,20 +201,15 @@ async function main() {
     assert(promptJson.includes('needle-token'), 'the selected recall word itself must still reach the prompt as grounded facts.word');
   }
 
-  // --- idiom Daily Bank item now produces word_learning ---
+  // --- evergreen bank categories (idiom, quote, ...) no longer become slots ---
   {
-    const idiomCandidate = plannerTest.bankItemToCandidate({
-      id: 501,
-      category: 'idiom',
-      content_text: "In Japanese, 'tsundoku' means buying books you never read.",
-      tags: ['global'],
-    });
-    assert.strictEqual(idiomCandidate.type, 'word_learning', 'idiom bank items must become word_learning candidates');
-    assert.strictEqual(
-      idiomCandidate.facts.word,
-      "In Japanese, 'tsundoku' means buying books you never read.",
-      'facts.word must carry the full self-contained bank content_text'
-    );
+    for (const category of ['idiom', 'quote', 'humor', 'science', 'fact']) {
+      assert.strictEqual(
+        plannerTest.bankItemToCandidate({ id: 501, category, content_text: 'Some evergreen text.', tags: ['global'] }),
+        null,
+        `${category} bank items must not become candidates any more`
+      );
+    }
   }
 
   // --- REAL end-to-end recall path: device_learning_memory -> getRecallCandidate
@@ -298,8 +293,12 @@ async function main() {
 
       const payloadText = JSON.stringify(payload);
       assert(!payloadText.includes('learning_memory_id'), 'learning_memory_id must never reach the OpenAI payload');
-      assert(!payloadText.includes('UNRELATED_TOO_OLD_WORD'), 'ineligible learning history must not leak into the prompt');
-      assert(!payloadText.includes('UNRELATED_TOO_YOUNG_WORD'), 'ineligible learning history must not leak into the prompt');
+      // Learned words now DO reach the prompt, but only in the "already seen" block
+      // (so the model does not repeat them), never as a recall slot's facts.
+      const slotsText = JSON.stringify(payload.slots);
+      assert(!slotsText.includes('UNRELATED_TOO_OLD_WORD'), 'ineligible learning history must not become a slot fact');
+      assert(!slotsText.includes('UNRELATED_TOO_YOUNG_WORD'), 'ineligible learning history must not become a slot fact');
+      assert(payload.already_seen.learned_words.includes('UNRELATED_TOO_OLD_WORD'), 'learned words go into already_seen');
 
       const updatedRow = db.prepare('SELECT recalled_at FROM device_learning_memory WHERE id = ?').get(targetMemoryId);
       assert(updatedRow.recalled_at, 'the exact recalled memory row must have recalled_at set after a real generateBatch call');
@@ -316,13 +315,8 @@ async function main() {
     }
   }
 
-  // --- end-to-end: Daily Bank idiom item -> word_learning -> generated -> Learning Memory; single OpenAI call; no raw history leak ---
+  // --- end-to-end: model-picked word_learning (no bank word) -> generated -> Learning Memory; single OpenAI call; no raw history leak ---
   {
-    const bankDate = getBankDateString();
-    db.prepare(`
-      INSERT INTO daily_content_bank (bank_date, category, content_text, tags)
-      VALUES (?, ?, ?, ?)
-    `).run(bankDate, 'idiom', 'The word of the day is glasswing.', JSON.stringify(['global']));
     db.prepare('INSERT INTO devices (device_id, name, timezone, created_at) VALUES (?, ?, ?, ?)')
       .run('learning-e2e-device', 'Test', 'Asia/Almaty', '2026-09-01 00:00:00');
 
@@ -387,17 +381,20 @@ async function main() {
       const payload = JSON.parse(capturedRequest.messages[1].content);
       const payloadText = JSON.stringify(payload);
       assert(!payloadText.includes('learning_memory_id'), 'learning_memory_id must never reach the OpenAI payload');
-      assert(!payloadText.includes('UNSELECTED_HISTORY_WORD_ONE'), 'ineligible/unselected learning history must not leak into the prompt');
-      assert(!payloadText.includes('UNSELECTED_HISTORY_WORD_TWO'), 'ineligible/unselected learning history must not leak into the prompt');
+      const slotsText = JSON.stringify(payload.slots);
+      assert(!slotsText.includes('UNSELECTED_HISTORY_WORD_ONE'), 'ineligible/unselected learning history must not become a slot fact');
+      assert(!slotsText.includes('UNSELECTED_HISTORY_WORD_TWO'), 'ineligible/unselected learning history must not become a slot fact');
 
       const wordLearningSlotSent = payload.slots.find((slot) => slot.type === 'word_learning');
-      assert(wordLearningSlotSent, 'the idiom bank item must be offered to OpenAI as a word_learning slot');
-      assert.strictEqual(wordLearningSlotSent.facts.word, 'The word of the day is glasswing.');
+      assert(wordLearningSlotSent, 'a word_learning slot must be offered to OpenAI');
+      assert.strictEqual(wordLearningSlotSent.facts.word, undefined, 'the server no longer supplies the word: the model picks it');
+      assert(wordLearningSlotSent.topic.includes('Pick a rare but real word'), 'the slot carries only the topic description');
+      const wordLine = payload.slots.indexOf(wordLearningSlotSent) + 1;
 
       const storedWord = db.prepare('SELECT word_text FROM device_learning_memory WHERE device_id = ? AND word_key != ? AND word_key != ?')
         .get('learning-e2e-device', 'unselected-1', 'unselected-2');
       assert(storedWord, 'a successfully generated word_learning slot must be recorded into Learning Memory');
-      assert.strictEqual(storedWord.word_text, 'The word of the day is glasswing.');
+      assert.strictEqual(storedWord.word_text, `Concrete learning payload line ${wordLine}`, 'the generated phrase is what gets remembered as the learned word');
     } finally {
       Module._load = originalLoad;
       delete process.env.OPENAI_API_KEY;

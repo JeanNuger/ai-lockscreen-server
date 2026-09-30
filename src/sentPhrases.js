@@ -7,14 +7,14 @@ const db = require('./db');
 //  - sent_phrases: every sent phrase is stored with a hash of its normalized
 //    text (forever) and the normalized text itself (only the last
 //    TEXT_RETENTION_DAYS days; older rows get text_norm = NULL when new phrases
-//    are written). Exact repeats are found by hash over the whole archive, near
-//    repeats by word-set similarity over the rows that still have text.
+//    are written). Only EXACT repeats are caught here, by hash over the whole
+//    archive. Repeats by meaning are not detected on the server: the model gets
+//    the recently seen texts in its prompt instead (see seenMemory.js).
 //  - device_shown_facts: Daily Bank facts already used for a device.
 
 const TEXT_RETENTION_DAYS = 35;
 const BATCH_DIAGNOSTICS_RETENTION_DAYS = 30;
 const BATCH_DIAGNOSTICS_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
-const NEAR_DUPLICATE_THRESHOLD = 0.8;
 const EXEMPT_SLOT_TYPES = new Set(['greeting_name', 'goodnight_care']);
 const DATE_SENSITIVE_FACT_CATEGORIES = new Set(['holiday', 'on_this_day', 'born_today']);
 const DATE_SENSITIVE_FACT_WINDOW_DAYS = 300;
@@ -36,33 +36,8 @@ function hashNormalized(normalized) {
   return parseInt(crypto.createHash('sha1').update(normalized).digest('hex').slice(0, 13), 16);
 }
 
-function tokenSet(normalized) {
-  return new Set(normalized.split(' ').filter(Boolean));
-}
-
-function jaccard(a, b) {
-  if (a.size === 0 || b.size === 0) {
-    return 0;
-  }
-  let intersection = 0;
-  const [small, large] = a.size <= b.size ? [a, b] : [b, a];
-  for (const token of small) {
-    if (large.has(token)) {
-      intersection += 1;
-    }
-  }
-  return intersection / (a.size + b.size - intersection);
-}
-
 const selectAllHashesStatement = db.prepare(`
   SELECT text_norm_hash FROM sent_phrases WHERE device_id = ?
-`).pluck();
-
-const selectRecentTextStatement = db.prepare(`
-  SELECT text_norm FROM sent_phrases
-  WHERE device_id = ?
-    AND text_norm IS NOT NULL
-    AND sent_at >= datetime('now', ?)
 `).pluck();
 
 const insertSentPhraseStatement = db.prepare(`
@@ -90,16 +65,14 @@ function loadSentArchive(deviceId) {
   }
   try {
     const hashes = new Set(selectAllHashesStatement.all(deviceId));
-    const recent = selectRecentTextStatement.all(deviceId, `-${TEXT_RETENTION_DAYS} days`)
-      .map((normalized) => tokenSet(normalized));
-    return { deviceId, hashes, recent };
+    return { deviceId, hashes };
   } catch (err) {
     console.warn(`SENT_PHRASES_LOAD_ERROR device_id=${deviceId} error=${err.name || 'Error'}`);
     return null;
   }
 }
 
-// Returns 'exact', 'near' or null. greeting_name / goodnight_care are never
+// Returns 'exact' or null. greeting_name / goodnight_care are never
 // checked (they legitimately repeat); every other type, including
 // weather_lifehack, is.
 function findRepeat(archive, text, slotType = null) {
@@ -110,16 +83,7 @@ function findRepeat(archive, text, slotType = null) {
   if (!normalized) {
     return null;
   }
-  if (archive.hashes.has(hashNormalized(normalized))) {
-    return 'exact';
-  }
-  const tokens = tokenSet(normalized);
-  for (const other of archive.recent) {
-    if (jaccard(tokens, other) >= NEAR_DUPLICATE_THRESHOLD) {
-      return 'near';
-    }
-  }
-  return null;
+  return archive.hashes.has(hashNormalized(normalized)) ? 'exact' : null;
 }
 
 // items: [{ text, slot_type }]. Also drops the text of rows older than
@@ -250,7 +214,6 @@ function recordSentContent(deviceId, slots, phrases) {
 module.exports = {
   TEXT_RETENTION_DAYS,
   BATCH_DIAGNOSTICS_RETENTION_DAYS,
-  NEAR_DUPLICATE_THRESHOLD,
   DATE_SENSITIVE_FACT_WINDOW_DAYS,
   loadSentArchive,
   findRepeat,
@@ -263,7 +226,6 @@ module.exports = {
   _test: {
     normalizeSentText,
     hashNormalized,
-    jaccard,
     factKey,
     resetDiagnosticsPruneThrottle() {
       lastDiagnosticsPruneMs = 0;

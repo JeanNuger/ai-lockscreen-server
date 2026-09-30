@@ -286,7 +286,7 @@ function testCultureHasTopic() {
   const planned = planSlots(richInput('morning', 'culture-topic-device'), { seed: 'culture-topic-seed' });
   const cultureSlot = planned.slots.find((s) => s.type === 'culture');
   assert(cultureSlot, 'culture must be present with rich data');
-  assert.strictEqual(cultureSlot.topic, 'A short real quote with its author.', 'culture must carry its topic hint');
+  assert.strictEqual(cultureSlot.topic, 'A short real quote with its author, or a cultural fact.', 'culture must carry its topic hint');
 }
 
 // Owner requirement, step 3: "всегда 12 фраз" -- with a completely empty

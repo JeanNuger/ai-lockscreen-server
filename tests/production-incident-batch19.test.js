@@ -361,8 +361,8 @@ function testDuplicateTopicDetection() {
     weather: null,
     bankItems: [
       { category: 'holiday', content_text: holidayText, tags: ['global'] },
-      { category: 'country_fact', content_text: countryFactText, tags: ['global'] },
-      { category: 'science', content_text: octopusFact, tags: ['global'] },
+      { category: 'good_news', content_text: countryFactText, tags: ['global'] },
+      { category: 'good_news', content_text: octopusFact, tags: ['global'] },
     ],
   });
   const bankDerived = candidates.filter((c) => c.source === 'daily_bank');
@@ -379,7 +379,7 @@ function testDuplicateTopicDetection() {
     dateContext: { date: '2026-09-26', weekday: 'Saturday', time: '12:00' },
     weather: null,
     bankItems: [
-      { category: 'science', content_text: octopusFact, tags: ['global'] },
+      { category: 'good_news', content_text: octopusFact, tags: ['global'] },
       { category: 'on_this_day', content_text: bridgeFact, tags: ['global'] },
     ],
   });

@@ -5,26 +5,16 @@ const { loadShownFacts, isFactShown } = require('./sentPhrases');
 // Fixed category set for daily_content_bank rows. Step 2 (personalization,
 // not this task) will filter/select by these when building a device's batch,
 // so the set is small and stable rather than whatever labels the model feels
-// like inventing per call. As of Phase 5, the category IS the semantic
-// classifier SlotPlanner maps directly off of (see mapBankItemType) -- the
-// model, not server-side keyword/regex inference, owns this classification.
+// like inventing per call. The bank holds ONLY topics tied to a date or to
+// current events (holiday, on_this_day, born_today, good_news); every
+// evergreen topic (humor, science, technology, statistics, quotes, country
+// facts, economics, words) is written by the model itself in the batch call,
+// which is told what the device has already seen (see seenMemory.js).
 const BANK_CATEGORIES = [
   'holiday',
   'on_this_day',
-  'humor',
-  'idiom',
-  'statistic',
-  'quote',
-  'science',
-  'technology',
-  'economics',
-  'fact',
-  'country_fact',
-  'good_news',
-  // Fixed-order rebuild, step 3: date-sensitive like holiday/on_this_day
-  // (see DATE_SENSITIVE_CATEGORIES/GUARANTEED_SELECTION_CATEGORIES below) --
-  // real people actually born on the given date, not a generic fact.
   'born_today',
+  'good_news',
 ];
 
 // How many bank items to ask the model for. Not a hard contract with the
@@ -100,7 +90,7 @@ const DEFAULT_SELECTION_COUNT = 5;
 // shuffled, count-limited non-guaranteed round below), which would make
 // evening's born_today position fall back to spare_fact far more often than
 // "the bank genuinely has no one born today" alone would justify.
-const GUARANTEED_SELECTION_CATEGORIES = ['holiday', 'on_this_day', 'idiom', 'born_today'];
+const GUARANTEED_SELECTION_CATEGORIES = ['holiday', 'on_this_day', 'born_today'];
 
 // Shared product-day date for the global bank. This is deliberately one fixed
 // timezone, not per-user, so the app still generates one reusable bank per day.
@@ -207,13 +197,11 @@ For date-sensitive categories only ("holiday", "on_this_day", and "born_today"),
 For "holiday" specifically: for EACH of these countries, search for that country's own official or widely observed public holidays, national days, or major cultural/religious observances falling on or very near each listed date, and tag every such item with that country's ISO code: ${countryCodes.join(', ')}. If a country genuinely has no such holiday on a given date, skip it there -- never invent one. Also include, for EVERY listed date, at least one genuine international observance day (a UN/UNESCO/WHO day or similarly widely-recognized global observance falling on that date), tagged "global". Only real, search-verified holidays and observances, never commercial/marketing "days of X" with no real official or cultural standing.
 Include at least one on_this_day item for every listed date.
 For "born_today": for EACH of these dates, include 1-2 real, well-known people actually born on that date, verified by web search, tag "global". Never invent a person or a birth date.
-For all other categories, set bank_date to ${bankDate}; these are reusable shared items for the generation day.
-Cover a genuine mix across ALL the listed categories, not just one or two -- include notable quotes, interesting statistics, an interesting idiom or expression with its meaning, a fact about one specific country, a genuinely positive and recent news development, and light humor only if it localizes cleanly.
-Choose "category" precisely -- it is used directly to decide what this item is, not just a label: "science" is for a science fact (physics, biology, space, chemistry, etc.); "technology" is for a technology/computing fact; "economics" is for a money/economics fact; "fact" is only for a genuinely miscellaneous interesting fact that does not belong in science, technology, or economics; "country_fact" is a fact specifically about ONE particular country (not a generic global fact), and must always carry that country's ISO code in tags; "good_news" is a genuinely positive, real, verifiable development from roughly the last few days -- never invented, never old news presented as new. Do not put a science/technology/economics fact under "fact".
+For "good_news", set bank_date to ${bankDate}; include a few genuinely positive, verifiable developments from roughly the last few days. The bank holds only these four categories.
 Keep the bank international and reusable for users in many countries: do not make it US-centric or Russia-centric.
-Prioritize accuracy from web search for date-specific items (holiday, on_this_day, born_today, good_news) -- holiday/on_this_day/born_today must match their own bank_date; good_news must be a real, recent, verifiable development; do not invent fake historical events, holidays, birth dates, or news.
+Prioritize accuracy from web search -- holiday/on_this_day/born_today must match their own bank_date; good_news must be a real, recent, verifiable development; do not invent fake historical events, holidays, birth dates, or news.
 Keep every content_text glanceable and self-contained (no "as mentioned above", no follow-up questions).
-For global/international items, add "global" to tags. For country-specific items -- including every "country_fact" item, which must always have one -- add the ISO country code tag such as "KZ", "FR", or "JP". Avoid country-specific politics.
+For global/international items, add "global" to tags. For country-specific items add the ISO country code tag such as "KZ", "FR", or "JP". Avoid country-specific politics.
 Do not generate self-help, motivational coaching, psychology tips, productivity advice, or generic wishes.
 Respond with the JSON array only, nothing else.`;
 }
@@ -270,10 +258,9 @@ function parseBankItems(rawText, defaultBankDate, preparedDates = [defaultBankDa
 }
 
 // Warns (never throws, never fabricates) when the model's response is
-// missing content the product actually depends on: holiday/on_this_day for
-// each prepared date (see buildBankPrompt's own request for exactly this),
-// and at least one idiom for the main generation day (word_learning's only
-// live source -- see mapBankItemType in slotPlanner.js). Purely diagnostic:
+// missing content the product actually depends on: holiday/on_this_day/
+// born_today for each prepared date (see buildBankPrompt's own request for
+// exactly this). Purely diagnostic:
 // generateDailyBank() still saves whatever valid items it has either way;
 // selectBankItemsForDevice/slotPlanner already handle a missing category by
 // omitting that slot.
@@ -285,10 +272,6 @@ function logMissingRequiredCategories(items, bankDate, preparedDates) {
         console.warn(`generateDailyBank: missing required category "${category}" for ${date}`);
       }
     }
-  }
-  const hasIdiom = items.some((item) => item.category === 'idiom' && item.bank_date === bankDate);
-  if (!hasIdiom) {
-    console.warn(`generateDailyBank: missing required category "idiom" for ${bankDate}`);
   }
 }
 
@@ -616,6 +599,7 @@ module.exports = {
     replaceBankItemsForDate,
     replaceBankItemsForDates,
     parseBankItems,
+    buildBankPrompt,
     getPreparedBankDates,
     resolveDateSensitiveBankDate,
     DATE_SENSITIVE_CATEGORIES,

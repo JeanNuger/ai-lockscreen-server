@@ -65,13 +65,13 @@ async function main() {
   // --- a valid category is kept, untouched ---
   {
     const raw = JSON.stringify([
-      { category: 'science', content_text: 'A real science fact.', tags: ['global'] },
+      { category: 'good_news', content_text: 'A real good news item.', tags: ['global'] },
     ]);
     const { warnCalls } = withCapturedConsole(() => {
       const items = parseBankItems(raw, bankDate, preparedDates);
       assert.strictEqual(items.length, 1, 'a valid category must be kept');
-      assert.strictEqual(items[0].category, 'science');
-      assert.strictEqual(items[0].content_text, 'A real science fact.');
+      assert.strictEqual(items[0].category, 'good_news');
+      assert.strictEqual(items[0].content_text, 'A real good news item.');
     });
     assert.strictEqual(warnCalls.length, 0, 'a fully valid response must not warn about dropped categories');
   }
@@ -81,7 +81,7 @@ async function main() {
     const raw = JSON.stringify([
       { category: 'holiday', content_text: 'Holiday item.', bank_date: '2026-09-23', tags: ['global'] },
       { category: 'mythology', content_text: 'Mythology item, must be dropped.', tags: ['global'] },
-      { category: 'fact', content_text: 'A real fact item.', tags: ['global'] },
+      { category: 'born_today', content_text: 'A real born_today item.', tags: ['global'] },
     ]);
     let items;
     withCapturedConsole(() => { items = parseBankItems(raw, bankDate, preparedDates); });
@@ -107,7 +107,7 @@ async function main() {
   // the model supplied a different (valid, prepared) date ---
   {
     const raw = JSON.stringify([
-      { category: 'quote', content_text: 'A quote item with a mismatched bank_date.', bank_date: '2026-09-23', tags: ['global'] },
+      { category: 'good_news', content_text: 'A good_news item with a mismatched bank_date.', bank_date: '2026-09-23', tags: ['global'] },
     ]);
     let items;
     withCapturedConsole(() => { items = parseBankItems(raw, bankDate, preparedDates); });
@@ -115,11 +115,11 @@ async function main() {
   }
 
   // --- logMissingRequiredCategories warns for each missing holiday/on_this_day
-  // per prepared date, and for a missing idiom on the main date ---
+  // per prepared date, ---
   {
     const items = [
       { category: 'holiday', bank_date: '2026-09-22', content_text: 'x' },
-      // on_this_day missing for every date; holiday missing for 09-21/09-23; idiom missing entirely
+      // on_this_day missing for every date; holiday missing for 09-21/09-23; born_today missing entirely
     ];
     const { warnCalls } = withCapturedConsole(() => {
       logMissingRequiredCategories(items, bankDate, preparedDates);
@@ -129,7 +129,8 @@ async function main() {
     assert(warnCalls.some((l) => l.includes('on_this_day') && l.includes('2026-09-21')));
     assert(warnCalls.some((l) => l.includes('on_this_day') && l.includes('2026-09-22')));
     assert(warnCalls.some((l) => l.includes('on_this_day') && l.includes('2026-09-23')));
-    assert(warnCalls.some((l) => l.includes('idiom') && l.includes(bankDate)));
+    assert(warnCalls.some((l) => l.includes('born_today') && l.includes('2026-09-22')));
+    assert(!warnCalls.some((l) => l.includes('idiom')), 'idiom is no longer a required category');
     // holiday IS present for 2026-09-22 -- must not warn about it
     assert(!warnCalls.some((l) => l.includes('holiday') && l.includes('2026-09-22')));
   }
@@ -147,7 +148,6 @@ async function main() {
       { category: 'born_today', bank_date: '2026-09-21', content_text: 'x' },
       { category: 'born_today', bank_date: '2026-09-22', content_text: 'x' },
       { category: 'born_today', bank_date: '2026-09-23', content_text: 'x' },
-      { category: 'idiom', bank_date: bankDate, content_text: 'x' },
     ];
     const { warnCalls } = withCapturedConsole(() => {
       logMissingRequiredCategories(items, bankDate, preparedDates);
@@ -187,8 +187,8 @@ async function main() {
 
     const mockItems = [
       ...junkCategories.map((category, i) => ({ category, content_text: `Junk ${category} item ${i}.`, tags: ['global'] })),
-      { category: 'fact', content_text: 'Real fact item.', tags: ['global'] },
-      { category: 'quote', content_text: 'Real quote item.', tags: ['global'] },
+      { category: 'good_news', content_text: 'Real good news item.', tags: ['global'] },
+      { category: 'born_today', content_text: 'Real born_today item.', tags: ['global'] },
     ];
 
     const originalLoad = Module._load;
@@ -230,8 +230,8 @@ async function main() {
       for (const junk of junkCategories) {
         assert(!stored.some((row) => row.category === junk), `"${junk}" must never be persisted to daily_content_bank`);
       }
-      assert(stored.some((row) => row.category === 'fact'), 'the valid fact item must be persisted');
-      assert(stored.some((row) => row.category === 'quote'), 'the valid quote item must be persisted');
+      assert(stored.some((row) => row.category === 'good_news'), 'the valid good_news item must be persisted');
+      assert(stored.some((row) => row.category === 'born_today'), 'the valid born_today item must be persisted');
 
       for (const junk of junkCategories) {
         assert(warns.some((line) => line.includes(junk)), `a warning naming "${junk}" must have been logged`);

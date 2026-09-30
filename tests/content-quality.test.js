@@ -281,7 +281,7 @@ async function main() {
 
   assert.strictEqual(bankTest.normalizeCountryCode('kz'), 'KZ');
   assert(bankTest.isBankItemAllowedForCountry({
-    category: 'fact',
+    category: 'good_news',
     content_text: 'A global astronomy item for today.',
     tags: JSON.stringify(['global', 'science']),
   }, 'KZ'), 'global bank item must stay allowed for KZ');

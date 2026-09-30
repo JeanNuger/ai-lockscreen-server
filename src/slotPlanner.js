@@ -145,17 +145,20 @@ function lengthHintForType(type) {
 const TOPIC_HINT_BY_TYPE = {
   history_today: 'The year and what happened, vividly. Must start with "On this day in <year>," in the user\'s language.',
   goodnight_care: 'A calm, warm goodnight line. Must include the user\'s name if it is in the profile.',
-  money_economics: 'Money explained simply, one practical idea.',
-  culture: 'A short real quote with its author.',
+  money_economics: 'Money or economics explained simply: one surprising fact or one practical idea.',
+  culture: 'A short real quote with its author, or a cultural fact.',
+  smart_humor_observation: 'Your own light, clever observation or joke about a familiar everyday situation.',
+  unusual_fact: 'One little-known, surprising fact on any topic.',
+  country_fact: 'A surprising fact about a country: the user\'s own (now.country) if known, otherwise any country in the world.',
   days_countdown: 'How many days are left until the weekend or the nearest well-known holiday, based on now.date.',
   word_recall_same_batch: 'Ask the reader if they remember the meaning of the word from the word_learning slot in this same batch, then give it briefly. If no word_learning slot/word is given, ask generally about a word they may have learned recently.',
   quiz_question: 'A short, fun trivia question with one clear correct answer. You also write that answer, matching this exact question, in the quiz_answer slot in this same batch. Do not reveal the answer here.',
   quiz_answer: 'The correct answer to the quiz_question slot in this same batch — must match that question exactly. State it briefly and confidently.',
-  science_fact: 'One surprising science fact.',
+  science_fact: 'One surprising, little-known science fact.',
   number_of_the_day: 'One surprising real number with a short explanation of what it means.',
   word_origin: 'Where a common word of the user\'s language comes from.',
   animal_fact: 'One surprising fact about animals.',
-  technology_fact: 'One interesting technology fact.',
+  technology_fact: 'One surprising, little-known technology fact.',
   mind_fact: 'One interesting fact about the brain or human psychology.',
   short_thought: 'One short wise thought. Not a quote, not a motivational cliché.',
   gender_tip: 'One practical tip for a man or a woman, matching facts.gender if given; no stereotypes. If facts.gender is not given, a neutral practical tip for anyone.',
@@ -409,6 +412,11 @@ const FIXED_ORDER_BY_WINDOW = {
 // or science_fact/technology_fact (genuinely Daily-Bank-grounded, handled
 // like any other existing type via selectBestCandidateForType).
 const MODEL_ONLY_TYPES = new Set([
+  // Evergreen topics that used to come from the Daily Bank: no facts from the
+  // server any more, the model writes them from the topic description and the
+  // "already_seen" block (see seenMemory.js).
+  'smart_humor_observation', 'science_fact', 'technology_fact', 'country_fact',
+  'money_economics', 'unusual_fact', 'culture', 'word_learning',
   'days_countdown', 'quiz_question', 'quiz_answer', 'number_of_the_day',
   'word_origin', 'animal_fact', 'mind_fact', 'short_thought', 'space_fact',
   'quick_dinner_idea', 'how_things_work', 'evening_idea',
@@ -512,37 +520,19 @@ function createCandidate(candidate) {
   };
 }
 
+// The Daily Bank now carries only date/news-bound topics, so this is the whole
+// mapping. Everything evergreen (humor, science, technology, statistics,
+// quotes, country facts, economics, words) is a model-only slot (see
+// MODEL_ONLY_TYPES) with no bank facts at all.
+const BANK_TYPE_BY_CATEGORY = {
+  holiday: 'holiday_today',
+  on_this_day: 'history_today',
+  born_today: 'born_today',
+  good_news: 'good_news',
+};
+
 function mapBankItemType(item) {
-  if (!item || typeof item.category !== 'string') {
-    return 'unusual_fact';
-  }
-  if (item.category === 'holiday') return 'holiday_today';
-  if (item.category === 'on_this_day') return 'history_today';
-  if (item.category === 'humor') return 'smart_humor_observation';
-  // idiom bank items are already a self-contained "word/expression + meaning"
-  // piece of content -- the server-selected word_learning grounding, not a
-  // separate content source. foreign_word_or_expression currently has no
-  // other bank category feeding it (accepted trade-off, see HANDOFF_2 Phase 4).
-  if (item.category === 'idiom') return 'word_learning';
-  if (item.category === 'statistic') return 'unusual_fact';
-  if (item.category === 'quote') return 'culture';
-  // Split out of the old shared science_tech mapping (fixed-order rebuild,
-  // step 1): science/technology now need to occupy two DISTINCT, independently
-  // positioned slots in the day window's fixed order (positions 2 and 9), so
-  // they can no longer share one content type.
-  if (item.category === 'science') return 'science_fact';
-  if (item.category === 'technology') return 'technology_fact';
-  if (item.category === 'economics') return 'money_economics';
-  if (item.category === 'fact') return 'unusual_fact';
-  // country_fact/good_news added in the same direct-mapping style, no
-  // keyword inference (see HANDOFF_2 content-diversity follow-up).
-  if (item.category === 'country_fact') return 'country_fact';
-  if (item.category === 'good_news') return 'good_news';
-  // Fixed-order rebuild, step 3: born_today is now date-sensitive
-  // Daily-Bank content (see dailyContentBank.js's DATE_SENSITIVE_CATEGORIES/
-  // GUARANTEED_SELECTION_CATEGORIES), same treatment as holiday/on_this_day.
-  if (item.category === 'born_today') return 'born_today';
-  return 'unusual_fact';
+  return (item && BANK_TYPE_BY_CATEGORY[item.category]) || null;
 }
 
 // Deterministic, cheap (no embeddings/fuzzy matching) text normalization for
@@ -574,6 +564,11 @@ function bankItemToCandidate(item, index = 0) {
     return null;
   }
   const type = mapBankItemType(item);
+  if (!type) {
+    // Not a date/news-bound category (e.g. a leftover row from before the bank
+    // was cut down to four categories): never becomes a slot.
+    return null;
+  }
   // content_key uses item.id (daily_content_bank's own row id) when available,
   // which is unique to that one row -- daily_content_bank rows are always
   // freshly INSERTed per bank_date (see dailyContentBank.js), so item.id never
@@ -589,16 +584,8 @@ function bankItemToCandidate(item, index = 0) {
     id: item && item.id ? `bank_${item.id}` : stableCandidateId(`bank_${type}`, text),
     topic_key: stableCandidateId(`bank_topic_${type}`, normalizedText),
     type,
-    priority: type === 'holiday_today' || type === 'history_today'
-      ? 70
-      : type === 'word_learning'
-        ? 78
-        : 48,
-    // word_learning's facts.word must carry the server-selected word/expression
-    // itself (Server = WHAT, OpenAI = HOW) -- the idiom bank item's
-    // content_text already IS that self-contained word+meaning, so it is
-    // reused as-is rather than parsed down to a bare token (Phase 4 decision).
-    facts: type === 'word_learning' ? { word: text } : { text },
+    priority: type === 'holiday_today' || type === 'history_today' ? 70 : 48,
+    facts: { text },
     source: 'daily_bank',
     constraints: ['use_only_given_fact', 'date_stable', 'not_encyclopedia_card'],
     bank_category: item.category,
@@ -1785,7 +1772,7 @@ function createModelOnlyCandidate(type, topicOverride) {
 // TOPIC_HINT_BY_TYPE entry at all and relies on buildSystemPrompt's static
 // line, but that line assumes a real word was already chosen; with no
 // Daily Bank idiom item today, the model must pick the word itself instead.
-const WORD_LEARNING_MODEL_ONLY_TOPIC = 'The model picks a rare but real word of the user\'s language itself.';
+const WORD_LEARNING_MODEL_ONLY_TOPIC = 'Pick a rare but real word or expression of the user\'s language yourself, and give its meaning. Not one from already_seen.';
 
 // Morning position 10 (word_recall_same_batch): the SAME word taught at
 // position 7 (word_learning) in this same batch -- not the cross-day
@@ -1955,7 +1942,7 @@ function buildFixedOrderSlots(order, candidates, input, rng, memoryIndex) {
     } else if (type === 'city_fact') {
       candidate = buildCityFactCandidate(input.weather, input.signals);
     } else if (MODEL_ONLY_TYPES.has(type)) {
-      candidate = createModelOnlyCandidate(type);
+      candidate = createModelOnlyCandidate(type, type === 'word_learning' ? WORD_LEARNING_MODEL_ONLY_TOPIC : undefined);
     } else {
       const pool = candidates.filter((c) => !usedIds.has(c.id));
       candidate = selectBestCandidateForType(pool, type, rng, memoryIndex);

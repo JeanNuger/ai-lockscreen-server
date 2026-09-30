@@ -133,7 +133,7 @@ const bankRowsForDatesStatement = db.prepare(`
   ORDER BY bank_date ASC, id ASC
 `);
 
-const REQUIRED_BANK_CATEGORIES = ['holiday', 'on_this_day', 'idiom'];
+const REQUIRED_BANK_CATEGORIES = ['holiday', 'on_this_day', 'born_today'];
 
 function categoryCounts(rows) {
   const categories = {};

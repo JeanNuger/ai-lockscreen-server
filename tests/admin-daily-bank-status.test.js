@@ -23,7 +23,7 @@ function main() {
     assert.deepStrictEqual(response.categories, {});
     assert.deepStrictEqual(response.required_categories.holiday, { present: false, count: 0 });
     assert.deepStrictEqual(response.required_categories.on_this_day, { present: false, count: 0 });
-    assert.deepStrictEqual(response.required_categories.idiom, { present: false, count: 0 });
+    assert.deepStrictEqual(response.required_categories.born_today, { present: false, count: 0 });
     assert.deepStrictEqual(response.sample_items, []);
   }
 
@@ -58,7 +58,7 @@ function main() {
     assert.deepStrictEqual(response.categories, { science: 2, holiday: 1 }, 'categories must be grouped with correct counts');
     assert.deepStrictEqual(response.required_categories.holiday, { present: true, count: 1 });
     assert.deepStrictEqual(response.required_categories.on_this_day, { present: false, count: 0 });
-    assert.deepStrictEqual(response.required_categories.idiom, { present: false, count: 0 });
+    assert.deepStrictEqual(response.required_categories.born_today, { present: false, count: 0 });
     assert.strictEqual(response.prepared_dates.length, 3);
     assert.strictEqual(response.prepared[preparedDates[0]].required_categories.on_this_day.present, true);
     assert.strictEqual(response.prepared[today].categories.science, 2);
@@ -101,8 +101,8 @@ function main() {
     const rows = [
       { category: 'holiday', content_text: 'Requested holiday.' },
       { category: 'on_this_day', content_text: 'Requested history.' },
-      { category: 'idiom', content_text: 'Requested idiom.' },
-      { category: 'idiom', content_text: 'Second idiom.' },
+      { category: 'born_today', content_text: 'Requested born_today.' },
+      { category: 'born_today', content_text: 'Second born_today.' },
     ];
     const response = buildDailyBankStatusResponse('2026-09-26', today, rows, {
       preparedDates,
@@ -114,11 +114,11 @@ function main() {
       },
     });
     assert.strictEqual(response.requested_date, requestedDate);
-    assert.strictEqual(response.categories.idiom, 2);
+    assert.strictEqual(response.categories.born_today, 2);
     assert.deepStrictEqual(response.required_categories, {
       holiday: { present: true, count: 1 },
       on_this_day: { present: true, count: 1 },
-      idiom: { present: true, count: 2 },
+      born_today: { present: true, count: 2 },
     });
     assert.strictEqual(response.prepared[today].required_categories.on_this_day.present, false);
     assert.strictEqual(response.prepared['2026-09-26'].required_categories.on_this_day.present, true);

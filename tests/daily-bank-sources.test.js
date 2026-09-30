@@ -26,26 +26,13 @@ const {
   generateBatch,
 } = require('../src/contentGenerator');
 
-const EXPECTED_CATEGORIES = [
-  'holiday', 'on_this_day', 'humor', 'idiom', 'statistic',
-  'quote', 'science', 'technology', 'economics', 'fact',
-  'country_fact', 'good_news', 'born_today',
-];
+const EXPECTED_CATEGORIES = ['holiday', 'on_this_day', 'born_today', 'good_news'];
 
 const EXPECTED_MAPPING = {
   holiday: 'holiday_today',
   on_this_day: 'history_today',
-  humor: 'smart_humor_observation',
-  idiom: 'word_learning',
-  statistic: 'unusual_fact',
-  quote: 'culture',
-  science: 'science_fact',
-  technology: 'technology_fact',
-  economics: 'money_economics',
-  fact: 'unusual_fact',
-  country_fact: 'country_fact',
-  good_news: 'good_news',
   born_today: 'born_today',
+  good_news: 'good_news',
 };
 
 function insertBankRow(bankDate, category, contentText, tags = ['global']) {
@@ -56,42 +43,27 @@ function insertBankRow(bankDate, category, contentText, tags = ['global']) {
 }
 
 async function main() {
-  // --- A: BANK_CATEGORIES contains exactly the final 10 categories ---
+  // --- A: BANK_CATEGORIES contains exactly the 4 date/news-bound categories ---
   assert.deepStrictEqual(
     [...BANK_CATEGORIES].sort(),
     [...EXPECTED_CATEGORIES].sort(),
-    'BANK_CATEGORIES must contain exactly the Phase 5 category set'
+    'BANK_CATEGORIES must contain exactly the 4 date/news-bound categories'
   );
   assert(!BANK_CATEGORIES.includes('advice'), 'advice must remain absent from BANK_CATEGORIES');
   assert(!BANK_CATEGORIES.includes('psychology'), 'psychology must remain absent from BANK_CATEGORIES');
   assert(!BANK_CATEGORIES.includes('wish'), 'wish must remain absent from BANK_CATEGORIES');
 
-  // --- B: all 10 categories map directly (deterministically) to the expected type ---
+  // --- B: all 4 categories map directly (deterministically) to the expected type ---
   for (const [category, expectedType] of Object.entries(EXPECTED_MAPPING)) {
     const type = plannerTest.mapBankItemType({ category, content_text: 'placeholder content text.', tags: ['global'] });
     assert.strictEqual(type, expectedType, `category "${category}" must map directly to type "${expectedType}"`);
   }
 
-  // --- old regex/keyword inference is gone: "fact" must ignore keywords that
-  // used to trigger science/technology/economics/culture inference ---
-  const keywordBaitCases = [
-    'A fact about science and biology that is not actually a science category item.',
-    'A fact mentioning AI, software, and computers.',
-    'A fact about the economy, market, and inflation.',
-    'A fact about music, film, and culture.',
-  ];
-  for (const content_text of keywordBaitCases) {
-    const type = plannerTest.mapBankItemType({ category: 'fact', content_text, tags: ['science', 'technology', 'economy', 'culture'] });
-    assert.strictEqual(type, 'unusual_fact', `"fact" category must always map to unusual_fact regardless of keywords: "${content_text}"`);
-  }
-
-  // --- country_fact: reuses existing country-tag filtering, no per-country
-  // generation call -- the exact same isBankItemAllowedForCountry mechanism
-  // that already gates every other category ---
-  {
-    const kzFact = { category: 'country_fact', content_text: 'Kazakhstan is the largest landlocked country in the world.', tags: ['KZ'] };
-    assert(bankTest.isBankItemAllowedForCountry(kzFact, 'KZ'), 'a KZ-tagged country_fact must be allowed for a KZ device');
-    assert(!bankTest.isBankItemAllowedForCountry(kzFact, 'FR'), 'a KZ-tagged country_fact must be rejected for a device in a different country');
+  // --- every evergreen category is gone from the bank: it maps to no type at all ---
+  for (const category of ['humor', 'idiom', 'statistic', 'quote', 'science', 'technology', 'economics', 'fact', 'country_fact']) {
+    assert.strictEqual(plannerTest.mapBankItemType({ category, content_text: 'x' }), null, `"${category}" must no longer map to a slot type`);
+    assert.strictEqual(plannerTest.bankItemToCandidate({ id: 1, category, content_text: 'x' }), null, `"${category}" must not become a candidate`);
+    assert(!bankTest.isBankItemAllowedForCountry({ category, content_text: 'x', tags: ['global'] }, 'KZ'), `"${category}" rows left in the DB must be ignored`);
   }
 
   // --- good_news can come from today's live Daily Bank only ---
@@ -126,8 +98,8 @@ async function main() {
     // "useful_knowledge" item into a real type either -- both still degrade
     // to the safe default (unusual_fact is not a bank category the new
     // city_fact type is ever sourced from).
-    assert.strictEqual(plannerTest.mapBankItemType({ category: 'city_fact', content_text: 'x' }), 'unusual_fact');
-    assert.strictEqual(plannerTest.mapBankItemType({ category: 'useful_knowledge', content_text: 'x' }), 'unusual_fact');
+    assert.strictEqual(plannerTest.mapBankItemType({ category: 'city_fact', content_text: 'x' }), null);
+    assert.strictEqual(plannerTest.mapBankItemType({ category: 'useful_knowledge', content_text: 'x' }), null);
   }
 
   // --- repo has no unexpected runtime dependency on the still-removed type ---
@@ -143,22 +115,16 @@ async function main() {
     }
   }
 
-  // --- live category content is selected as-is; missing categories are not fabricated ---
+  // --- a leftover row of a removed category (from before the bank was cut to 4) is never offered ---
   {
     const bankDate = getBankDateString();
-    insertBankRow(bankDate, 'science', 'LIVE_SCIENCE_ITEM_UNIQUE_TEXT');
+    insertBankRow(bankDate, 'science', 'LEFTOVER_SCIENCE_ITEM_UNIQUE_TEXT');
     const selected = selectBankItemsForDevice('device-live-preference', bankDate, '2026-09-19', null, null, 20);
-    const scienceItems = selected.filter((item) => item.category === 'science');
-    assert.strictEqual(scienceItems.length, 1, 'exactly one science item must be selected');
-    assert.strictEqual(
-      scienceItems[0].content_text,
-      'LIVE_SCIENCE_ITEM_UNIQUE_TEXT',
-      'live science content must be selected without fallback substitution'
-    );
+    assert(!selected.some((item) => item.category === 'science'), 'a leftover science row must not be selected');
     assert.deepStrictEqual(
       new Set(selected.map((item) => item.category)),
-      new Set(['good_news', 'science']),
-      'selection must contain only live categories present in the DB for that day'
+      new Set(['good_news']),
+      'selection must contain only live categories from the 4-category set'
     );
   }
 

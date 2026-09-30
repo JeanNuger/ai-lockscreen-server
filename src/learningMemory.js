@@ -53,18 +53,23 @@ function getRecallCandidate(deviceId) {
 // word_learning slot missing a valid facts.word is a contract violation (the
 // server, not OpenAI, must choose the specific word) -- skipped without
 // failing the batch, with a warning so it stays observable.
-function recordLearnedWords(deviceId, slots = [], generatedSlotIds = []) {
+function recordLearnedWords(deviceId, slots = [], generatedSlotIds = [], phrases = []) {
   if (!deviceId || !Array.isArray(slots) || !Array.isArray(generatedSlotIds)) {
     return 0;
   }
 
   const generated = new Set(generatedSlotIds);
+  // The model now picks the word itself (no bank word in facts), so the
+  // generated phrase is what the device actually learned.
+  const textBySlot = new Map((Array.isArray(phrases) ? phrases : [])
+    .filter((phrase) => phrase && typeof phrase.text === 'string')
+    .map((phrase) => [phrase.slot_id, phrase.text]));
   const rows = [];
   for (const slot of slots) {
     if (!slot || slot.type !== 'word_learning' || !generated.has(slot.slot_id)) {
       continue;
     }
-    const wordText = normalizeKey(slot.facts && slot.facts.word);
+    const wordText = normalizeKey(slot.facts && slot.facts.word) || normalizeKey(textBySlot.get(slot.slot_id));
     if (!wordText) {
       console.warn(`LEARNING_MEMORY_MISSING_WORD device_id=${deviceId} slot_id=${slot.slot_id}`);
       continue;
