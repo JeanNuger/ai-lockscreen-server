@@ -2,3 +2,11 @@ node_modules/
 .env
 /data/
 *.log
+
+# local scratch / design assets (never commit)
+*.zip
+/финальные 36 фонов/
+*_diff.txt
+TASK_*.md
+grain_wash_*.json
+/=
