@@ -170,6 +170,38 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_morning_packs_device_date
     ON morning_packs(device_id, local_date);
+
+  -- sent_phrases: permanent archive of every phrase sent to a device, so the same
+  -- (or almost the same) text is never sent twice (see src/sentPhrases.js).
+  -- text_norm_hash is kept forever (exact-repeat check); text_norm (normalized
+  -- text, for near-duplicate matching) is kept only for the last 35 days and
+  -- set to NULL afterwards.
+  CREATE TABLE IF NOT EXISTS sent_phrases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    text_norm_hash INTEGER NOT NULL,
+    text_norm TEXT,
+    slot_type TEXT,
+    sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (device_id) REFERENCES devices(device_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_sent_phrases_device_hash
+    ON sent_phrases(device_id, text_norm_hash);
+  CREATE INDEX IF NOT EXISTS idx_sent_phrases_device_sent_at
+    ON sent_phrases(device_id, sent_at);
+  CREATE INDEX IF NOT EXISTS idx_sent_phrases_with_text
+    ON sent_phrases(sent_at) WHERE text_norm IS NOT NULL;
+
+  -- device_shown_facts: Daily Bank facts already used for a device, keyed by a
+  -- hash of the fact text (topic_key), so the same fact is not offered again.
+  CREATE TABLE IF NOT EXISTS device_shown_facts (
+    device_id TEXT NOT NULL,
+    topic_key TEXT NOT NULL,
+    shown_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (device_id, topic_key),
+    FOREIGN KEY (device_id) REFERENCES devices(device_id)
+  );
 `);
 
 // One-off migration: devices.name is new as of 2026-09-12. This project has no

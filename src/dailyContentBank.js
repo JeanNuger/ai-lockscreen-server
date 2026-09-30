@@ -1,5 +1,6 @@
 const db = require('./db');
 const { countryForTimezone } = require('./timezoneCountry');
+const { loadShownFacts, isFactShown } = require('./sentPhrases');
 
 // Fixed category set for daily_content_bank rows. Step 2 (personalization,
 // not this task) will filter/select by these when building a device's batch,
@@ -502,7 +503,10 @@ function selectBankItemsForDevice(
   const liveBankRows = sharedRows
     .concat(dateSensitiveRows)
     .filter((row) => isBankItemAllowedForCountry(row, countryCode));
-  const bankRows = liveBankRows;
+  // Hard filter: a fact already used for this device is never offered again
+  // (date-sensitive categories may come back after a year -- see sentPhrases.js).
+  const shownFacts = loadShownFacts(deviceId);
+  const bankRows = liveBankRows.filter((row) => !isFactShown(shownFacts, row.category, row.content_text));
   if (bankRows.length === 0) {
     return [];
   }

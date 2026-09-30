@@ -14,6 +14,11 @@ const {
   recordLearnedWords,
   recordRecalledWords,
 } = require('./learningMemory');
+const {
+  loadSentArchive,
+  findRepeat,
+  recordSentContent,
+} = require('./sentPhrases');
 const { planSlots, planMorningPack, MORNING_FIXED_TYPES, PAIRED_TYPES } = require('./slotPlanner');
 const {
   validateLockScreenText,
@@ -514,6 +519,16 @@ function collectUsablePhrases(phrases, languageCode, validationContext = {}, exp
     const normalized = normalizeTextForDedupe(text);
     if (seenTexts.has(normalized)) {
       reject('duplicate', phrase.slot_id, text);
+      continue;
+    }
+    // Repeat of something already sent to this device (see sentPhrases.js):
+    // rejected like any other bad text, so the slot goes through the normal
+    // repair rounds and is dropped if it still repeats.
+    const archive = validationContext ? validationContext.sentArchive : null;
+    const repeatKind = archive ? findRepeat(archive, text, slotType) : null;
+    if (repeatKind) {
+      console.warn(`SENT_PHRASE_REPEAT device_id=${archive.deviceId} slot=${phrase.slot_id} type=${slotType || 'unknown'} kind=${repeatKind}`);
+      reject('repeat', phrase.slot_id, text, `repeat_${repeatKind}`);
       continue;
     }
     seenTexts.add(normalized);
@@ -1616,6 +1631,7 @@ now.window sets the mood: morning — start of the day; day — light, curious; 
 
 REPAIR MODE
 If the payload has "repair": "rewrite_only_these_rejected_slots", each slot has original_text, rejection_reason and max_length_chars. Fix exactly that problem, keep the meaning. For too_long, shorten without cutting the thought.
+Do not repeat original_text.
 
 OUTPUT
 Only JSON matching the schema: one phrase per slot, in slot order, with its slot_id.`;
@@ -1726,6 +1742,7 @@ async function generateMorningPack(device, targetDate, signals, weather, weather
     signals,
     weather,
     contextFlags: { traffic: false },
+    sentArchive: loadSentArchive(device.device_id),
   };
 
   let client;
@@ -1895,6 +1912,7 @@ async function generateMorningPack(device, targetDate, signals, weather, weather
   recordShownContentMemory(device.device_id, keptSlots, openaiSlotIds);
   recordLearnedWords(device.device_id, keptSlots, openaiSlotIds);
   recordRecalledWords(device.device_id, keptSlots, openaiSlotIds);
+  recordSentContent(device.device_id, packSlots, styled);
 
   const phrases = styled.map((item) => ({
     slot_id: item.slot_id,
@@ -1979,6 +1997,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
     signals,
     weather,
     contextFlags: { traffic: false },
+    sentArchive: loadSentArchive(device.device_id),
   };
 
   if (!apiKey) {
@@ -2169,6 +2188,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
   recordShownContentMemory(device.device_id, slots, assembly.generatedSlotIds);
   recordLearnedWords(device.device_id, slots, assembly.generatedSlotIds);
   recordRecalledWords(device.device_id, slots, assembly.generatedSlotIds);
+  recordSentContent(device.device_id, slots, assembly.phrases);
 
   return buildLoggedOpenAiResult(assembly, context, trace, slots, repairedSlotIds, dateContext, generationStartMs);
 }
