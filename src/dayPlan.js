@@ -1,7 +1,9 @@
 const { STYLE_IDS: ALL_STYLE_IDS } = require('./constants');
 // The app ships only the Aurora (A) and Grain wash (G) backgrounds: a style_id of a removed family (O) is
 // unknown to the phone and would turn the phrase into a background-only frame.
-const STYLE_IDS = ALL_STYLE_IDS.filter((id) => /^[AG]\d$/.test(id));
+// A9 (smoky) and G4 (graphite) are retired too (task 26): 16 backgrounds, enough for 12 different ones in a window.
+const RETIRED_STYLE_IDS = new Set(['A9', 'G4']);
+const STYLE_IDS = ALL_STYLE_IDS.filter((id) => /^[AG]\d$/.test(id) && !RETIRED_STYLE_IDS.has(id));
 const { validateLockScreenText } = require('./textFilter');
 const { loadSentArchive, findRepeat, recordSentContent, loadShownFacts, isFactShown } = require('./sentPhrases');
 const { loadSeenPhrases, loadLearnedWords, deviceReportsShown } = require('./seenMemory');
