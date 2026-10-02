@@ -1,4 +1,7 @@
-const { STYLE_IDS } = require('./constants');
+const { STYLE_IDS: ALL_STYLE_IDS } = require('./constants');
+// The app ships only the Aurora (A) and Grain wash (G) backgrounds: a style_id of a removed family (O) is
+// unknown to the phone and would turn the phrase into a background-only frame.
+const STYLE_IDS = ALL_STYLE_IDS.filter((id) => /^[AG]\d$/.test(id));
 const { validateLockScreenText } = require('./textFilter');
 const { loadSentArchive, findRepeat, recordSentContent, loadShownFacts, isFactShown } = require('./sentPhrases');
 const { loadSeenPhrases, loadLearnedWords, deviceReportsShown } = require('./seenMemory');
