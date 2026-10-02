@@ -86,13 +86,13 @@ function testHolidaySlotSkippedWhenNothingAvailable() {
 
 // --- 4: buildBankPrompt asks for per-country holiday coverage + a global requirement ---
 function testBankPromptAsksForCountriesAndGlobalDay() {
-  const preparedDates = getPreparedBankDates(BANK_DATE);
   const countryCodes = ['KZ', 'RU', 'FR'];
-  const prompt = buildBankPrompt(BANK_DATE, preparedDates, countryCodes);
+  const prompt = buildBankPrompt(BANK_DATE, countryCodes, []);
   for (const code of countryCodes) {
     assert(prompt.includes(code), `prompt must mention country code "${code}"`);
   }
-  assert(/international observance/i.test(prompt), 'prompt must require at least one international observance day');
+  assert(/international day of the UN or UNESCO/i.test(prompt), 'prompt must require an international UN/UNESCO day');
+  assert(/holiday of Kazakhstan/i.test(prompt), 'prompt must require a Kazakhstan holiday');
   assert(/global/i.test(prompt), 'prompt must reference the "global" tag for international items');
   assert(/never invent|never invented/i.test(prompt), 'prompt must forbid inventing holidays');
   assert(/commercial|marketing/i.test(prompt), 'prompt must exclude commercial/marketing "days of X"');

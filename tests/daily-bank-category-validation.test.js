@@ -1,14 +1,9 @@
-// Regression coverage for the category-validation fix: parseBankItems() must
-// DROP any item whose category is not in BANK_CATEGORIES (with a warning),
-// never silently coerce it to 'fact' -- that used to let content sit in
-// daily_content_bank forever invisible to selectBankItemsForDevice (see
-// isBankItemAllowedForCountry's own category check). Also covers the new
-// missing-required-category warnings and the post-save summary log. Zero
-// real OpenAI calls in this file (OPENAI_API_KEY is set only for the mocked
-// generateDailyBank() case below).
+// Bank v3 parsing and saving: parseBankItems() DROPS any item whose category is not in BANK_CATEGORIES
+// (with a warning), never silently coerces it; strips search citations; keeps the country as a tag; sets
+// aside "NONE:" notes; the missing-required-category warnings; the post-save summary; and an end-to-end
+// generateDailyBank() with a mocked OpenAI response (no real calls).
 const assert = require('assert');
 const fs = require('fs');
-const Module = require('module');
 const os = require('os');
 const path = require('path');
 
@@ -17,7 +12,7 @@ process.env.DATABASE_PATH = path.join(tempDir, 'app.db');
 delete process.env.OPENAI_API_KEY;
 
 const db = require('../src/db');
-const { BANK_CATEGORIES, generateDailyBank, _test: bankTest } = require('../src/dailyContentBank');
+const { BANK_CATEGORIES, generateDailyBank, getBankDateString, _test: bankTest } = require('../src/dailyContentBank');
 
 const { parseBankItems, logMissingRequiredCategories, logBankSummary } = bankTest;
 
@@ -37,226 +32,209 @@ function withCapturedConsole(fn) {
   return { warnCalls, logCalls };
 }
 
+async function withCapturedConsoleAsync(fn) {
+  const warnCalls = [];
+  const logCalls = [];
+  const originalWarn = console.warn;
+  const originalLog = console.log;
+  const originalError = console.error;
+  console.warn = (...args) => warnCalls.push(args.join(' '));
+  console.log = (...args) => logCalls.push(args.join(' '));
+  console.error = () => {};
+  let value;
+  try {
+    value = await fn();
+  } finally {
+    console.warn = originalWarn;
+    console.log = originalLog;
+    console.error = originalError;
+  }
+  return { value, warnCalls, logCalls };
+}
+
 function rowsForDate(bankDate) {
-  return db.prepare('SELECT bank_date, category, content_text FROM daily_content_bank WHERE bank_date = ? ORDER BY id ASC')
+  return db.prepare('SELECT bank_date, category, content_text, tags FROM daily_content_bank WHERE bank_date = ? ORDER BY id ASC')
     .all(bankDate);
 }
 
 async function main() {
   const bankDate = '2026-09-22';
-  const preparedDates = ['2026-09-21', '2026-09-22', '2026-09-23'];
 
-  // --- an unknown category is dropped, not coerced to 'fact' ---
+  // --- an unknown category is dropped, not coerced ---
   {
     const raw = JSON.stringify([
-      { category: 'art', content_text: 'A fact about art that must be dropped.', tags: ['global'] },
-      { category: 'film', content_text: 'A fact about film that must be dropped.', tags: ['global'] },
-      { category: 'english', content_text: 'A fact about English that must be dropped.', tags: ['global'] },
+      { category: 'art', country: 'global', text: 'A fact about art that must be dropped.' },
+      { category: 'film', country: 'global', text: 'A fact about film that must be dropped.' },
+      { category: 'fact', country: 'global', text: 'A fact about fact that must be dropped.' },
     ]);
     const { warnCalls } = withCapturedConsole(() => {
-      const items = parseBankItems(raw, bankDate, preparedDates);
-      assert.strictEqual(items.length, 0, 'every item with an unknown category must be dropped, none coerced to fact');
+      const { rows } = parseBankItems(raw, bankDate);
+      assert.strictEqual(rows.length, 0, 'every item with an unknown category must be dropped');
     });
-    assert(warnCalls.some((line) => line.includes('art')), 'a warning naming "art" must be logged');
-    assert(warnCalls.some((line) => line.includes('film')), 'a warning naming "film" must be logged');
-    assert(warnCalls.some((line) => line.includes('english')), 'a warning naming "english" must be logged');
+    for (const name of ['art', 'film', 'fact']) {
+      assert(warnCalls.some((line) => line.includes(`"${name}"`)), `a warning naming "${name}" must be logged`);
+    }
   }
 
-  // --- a valid category is kept, untouched ---
+  // --- a valid category is kept; country becomes the tag; every row gets the bank date ---
   {
     const raw = JSON.stringify([
-      { category: 'good_news', content_text: 'A real good news item.', tags: ['global'] },
+      { category: 'good_news', country: 'global', text: 'A real good news item.' },
+      { category: 'holiday', country: 'kz', text: 'A Kazakhstan holiday.' },
+      { category: 'science', country: '', text: 'A science fact.' },
     ]);
-    const { warnCalls } = withCapturedConsole(() => {
-      const items = parseBankItems(raw, bankDate, preparedDates);
-      assert.strictEqual(items.length, 1, 'a valid category must be kept');
-      assert.strictEqual(items[0].category, 'good_news');
-      assert.strictEqual(items[0].content_text, 'A real good news item.');
-    });
-    assert.strictEqual(warnCalls.length, 0, 'a fully valid response must not warn about dropped categories');
+    let parsed;
+    const { warnCalls } = withCapturedConsole(() => { parsed = parseBankItems(raw, bankDate); });
+    assert.strictEqual(warnCalls.length, 0, 'a fully valid response must not warn');
+    assert.deepStrictEqual(parsed.rows.map((r) => [r.category, r.tags, r.bank_date]), [
+      ['good_news', ['global'], bankDate],
+      ['holiday', ['KZ'], bankDate],
+      ['science', [], bankDate],
+    ]);
   }
 
-  // --- a mix of valid and invalid categories: only the valid ones survive ---
+  // --- search citations are stripped, placeholders and duplicates dropped, NONE notes set aside ---
   {
     const raw = JSON.stringify([
-      { category: 'holiday', content_text: 'Holiday item.', bank_date: '2026-09-23', tags: ['global'] },
-      { category: 'mythology', content_text: 'Mythology item, must be dropped.', tags: ['global'] },
-      { category: 'born_today', content_text: 'A real born_today item.', tags: ['global'] },
+      { category: 'tech', country: 'global', text: 'GPS needs four satellites. ([site](https://example.com/a?utm_source=openai))' },
+      { category: 'tech', country: 'global', text: 'GPS needs four satellites.' },
+      { category: 'space', country: 'global', text: '(no verifiable space facts)' },
+      { category: 'holiday', country: 'KZ', text: 'NONE: No official Kazakhstan holiday falls on that date.' },
+      { category: 'holiday', country: 'global', text: 'NONE: No UN day falls on that date.' },
     ]);
-    let items;
-    withCapturedConsole(() => { items = parseBankItems(raw, bankDate, preparedDates); });
-    assert.strictEqual(items.length, 2, 'only the two valid-category items must survive');
-    assert(items.every((item) => item.category !== 'mythology'), 'mythology must never appear in parsed output');
+    const parsed = parseBankItems(raw, bankDate);
+    assert.deepStrictEqual(parsed.rows.map((r) => r.content_text), ['GPS needs four satellites.']);
+    assert.deepStrictEqual(parsed.noneNotes.map((n) => n.country), ['KZ', 'global']);
+    assert.strictEqual(bankTest.stripCitations('Text [a](http://b) end'), 'Text end');
   }
 
-  // --- holiday/on_this_day keep their own supplied bank_date (date-sensitive) ---
+  // --- the required holidays are reported when missing, and silent when present ---
   {
-    const raw = JSON.stringify([
-      { category: 'holiday', content_text: 'Holiday for tomorrow.', bank_date: '2026-09-23', tags: ['global'] },
-      { category: 'on_this_day', content_text: 'On this day for yesterday.', bank_date: '2026-09-21', tags: ['global'] },
-    ]);
-    let items;
-    withCapturedConsole(() => { items = parseBankItems(raw, bankDate, preparedDates); });
-    const holiday = items.find((item) => item.category === 'holiday');
-    const onThisDay = items.find((item) => item.category === 'on_this_day');
-    assert.strictEqual(holiday.bank_date, '2026-09-23', 'holiday must keep its supplied bank_date, not the default');
-    assert.strictEqual(onThisDay.bank_date, '2026-09-21', 'on_this_day must keep its supplied bank_date, not the default');
-  }
-
-  // --- a non-date-sensitive category always gets defaultBankDate, even if
-  // the model supplied a different (valid, prepared) date ---
-  {
-    const raw = JSON.stringify([
-      { category: 'good_news', content_text: 'A good_news item with a mismatched bank_date.', bank_date: '2026-09-23', tags: ['global'] },
-    ]);
-    let items;
-    withCapturedConsole(() => { items = parseBankItems(raw, bankDate, preparedDates); });
-    assert.strictEqual(items[0].bank_date, bankDate, 'non-date-sensitive categories must always use defaultBankDate');
-  }
-
-  // --- logMissingRequiredCategories warns for each missing holiday/on_this_day
-  // per prepared date, ---
-  {
-    const items = [
-      { category: 'holiday', bank_date: '2026-09-22', content_text: 'x' },
-      // on_this_day missing for every date; holiday missing for 09-21/09-23; born_today missing entirely
+    const present = [
+      { category: 'holiday', content_text: 'x', tags: ['KZ'] },
+      { category: 'holiday', content_text: 'x2', tags: ['global'] },
+      { category: 'on_this_day', content_text: 'x', tags: [] },
+      { category: 'born_today', content_text: 'x', tags: [] },
     ];
-    const { warnCalls } = withCapturedConsole(() => {
-      logMissingRequiredCategories(items, bankDate, preparedDates);
-    });
-    assert(warnCalls.some((l) => l.includes('holiday') && l.includes('2026-09-21')));
-    assert(warnCalls.some((l) => l.includes('holiday') && l.includes('2026-09-23')));
-    assert(warnCalls.some((l) => l.includes('on_this_day') && l.includes('2026-09-21')));
-    assert(warnCalls.some((l) => l.includes('on_this_day') && l.includes('2026-09-22')));
-    assert(warnCalls.some((l) => l.includes('on_this_day') && l.includes('2026-09-23')));
-    assert(warnCalls.some((l) => l.includes('born_today') && l.includes('2026-09-22')));
-    assert(!warnCalls.some((l) => l.includes('idiom')), 'idiom is no longer a required category');
-    // holiday IS present for 2026-09-22 -- must not warn about it
-    assert(!warnCalls.some((l) => l.includes('holiday') && l.includes('2026-09-22')));
-  }
+    const silent = withCapturedConsole(() => logMissingRequiredCategories(present, bankDate, []));
+    assert.strictEqual(silent.warnCalls.length, 0, 'no warnings when everything required is present');
 
-  // --- logMissingRequiredCategories stays silent when everything required is present ---
-  {
-    const items = [
-      { category: 'holiday', bank_date: '2026-09-21', content_text: 'x' },
-      { category: 'holiday', bank_date: '2026-09-22', content_text: 'x' },
-      { category: 'holiday', bank_date: '2026-09-23', content_text: 'x' },
-      { category: 'on_this_day', bank_date: '2026-09-21', content_text: 'x' },
-      { category: 'on_this_day', bank_date: '2026-09-22', content_text: 'x' },
-      { category: 'on_this_day', bank_date: '2026-09-23', content_text: 'x' },
-      // born_today added (fixed-order rebuild, step 3): now date-sensitive too.
-      { category: 'born_today', bank_date: '2026-09-21', content_text: 'x' },
-      { category: 'born_today', bank_date: '2026-09-22', content_text: 'x' },
-      { category: 'born_today', bank_date: '2026-09-23', content_text: 'x' },
-    ];
-    const { warnCalls } = withCapturedConsole(() => {
-      logMissingRequiredCategories(items, bankDate, preparedDates);
-    });
-    assert.strictEqual(warnCalls.length, 0, 'no warnings when every required category/date combination is present');
+    const missing = withCapturedConsole(() => logMissingRequiredCategories(
+      [{ category: 'holiday', content_text: 'x', tags: ['RU'] }],
+      bankDate,
+      [{ category: 'holiday', country: 'KZ', text: 'NONE: x' }]
+    ));
+    assert(missing.warnCalls.some((l) => l.includes('on_this_day')));
+    assert(missing.warnCalls.some((l) => l.includes('born_today')));
+    assert(missing.warnCalls.some((l) => l.includes('no Kazakhstan holiday') && l.includes('model reported none')));
+    assert(missing.warnCalls.some((l) => l.includes('no international day')));
   }
 
   // --- logBankSummary prints total + per-date/category breakdown ---
   {
     const items = [
-      { category: 'fact', bank_date: '2026-09-22', content_text: 'x' },
-      { category: 'fact', bank_date: '2026-09-22', content_text: 'x' },
+      { category: 'tech', bank_date: '2026-09-22', content_text: 'x' },
+      { category: 'tech', bank_date: '2026-09-22', content_text: 'x' },
       { category: 'science', bank_date: '2026-09-22', content_text: 'x' },
-      { category: 'holiday', bank_date: '2026-09-23', content_text: 'x' },
-      { category: 'on_this_day', bank_date: '2026-09-23', content_text: 'x' },
     ];
-    const { logCalls } = withCapturedConsole(() => {
-      logBankSummary(items);
-    });
-    assert(logCalls[0].includes('5 rows'), `first line must state the total row count, got: ${logCalls[0]}`);
-    const dateLine22 = logCalls.find((l) => l.startsWith('2026-09-22:'));
-    const dateLine23 = logCalls.find((l) => l.startsWith('2026-09-23:'));
-    assert(dateLine22 && dateLine22.includes('fact=2') && dateLine22.includes('science=1'), `2026-09-22 line malformed: ${dateLine22}`);
-    assert(dateLine23 && dateLine23.includes('holiday=1') && dateLine23.includes('on_this_day=1'), `2026-09-23 line malformed: ${dateLine23}`);
+    const { logCalls } = withCapturedConsole(() => logBankSummary(items));
+    assert(logCalls[0].includes('3 rows'), `first line must state the total row count, got: ${logCalls[0]}`);
+    const line = logCalls.find((l) => l.startsWith('2026-09-22:'));
+    assert(line && line.includes('tech=2') && line.includes('science=1'), `date line malformed: ${line}`);
   }
 
-  // --- end to end: generateDailyBank() with a mocked OpenAI response mixing
-  // valid categories with the exact junk taxonomy seen in production
-  // (art/film/english/geography/history/literature/music/mythology) must
-  // never save any of the junk categories, and BANK_CATEGORIES must not
-  // contain them either (sanity check on the fixture itself) ---
+  // --- end to end: generateDailyBank() with a mocked response mixing valid categories with junk ---
   {
     const junkCategories = ['art', 'film', 'english', 'geography', 'history', 'literature', 'music', 'mythology'];
     for (const junk of junkCategories) {
       assert(!BANK_CATEGORIES.includes(junk), `sanity: "${junk}" must not be a real BANK_CATEGORIES entry`);
     }
+    const todayBankDate = getBankDateString();
+    // an older day that must survive, and a stale one (older than the retention) that must be pruned
+    const insertRow = db.prepare('INSERT INTO daily_content_bank (bank_date, category, content_text, tags) VALUES (?, ?, ?, ?)');
+    insertRow.run('2026-01-01', 'science', 'Stale fact.', '[]');
+    const yesterday = new Date(Date.now() - 24 * 3600 * 1000).toISOString().slice(0, 10);
+    insertRow.run(yesterday, 'science', 'Yesterday fact that must not be repeated.', '[]');
 
     const mockItems = [
-      ...junkCategories.map((category, i) => ({ category, content_text: `Junk ${category} item ${i}.`, tags: ['global'] })),
-      { category: 'good_news', content_text: 'Real good news item.', tags: ['global'] },
-      { category: 'born_today', content_text: 'Real born_today item.', tags: ['global'] },
+      ...junkCategories.map((category, i) => ({ category, country: 'global', text: `Junk ${category} item ${i}.` })),
+      { category: 'good_news', country: 'global', text: 'Real good news item.' },
+      { category: 'born_today', country: 'RU', text: 'Real born_today item.' },
     ];
-
-    const originalLoad = Module._load;
-    Module._load = function patchedLoad(request, parent, isMain) {
-      if (request === 'openai') {
-        return class MockOpenAI {
-          constructor() {
-            this.responses = {
-              create: async () => ({ output_text: JSON.stringify(mockItems) }),
-            };
-          }
-        };
-      }
-      return originalLoad.call(this, request, parent, isMain);
-    };
+    const seenParams = [];
+    bankTest.setBankClientFactory(() => ({
+      responses: {
+        create: async (params) => {
+          seenParams.push(params);
+          return {
+            output_text: JSON.stringify(mockItems),
+            usage: { input_tokens: 100, output_tokens: 50, total_tokens: 150, output_tokens_details: { reasoning_tokens: 7 } },
+            output: [{ type: 'web_search_call' }, { type: 'web_search_call' }],
+          };
+        },
+      },
+    }));
     process.env.OPENAI_API_KEY = 'test-key-category-validation';
 
     try {
-      let result;
-      // withCapturedConsole is synchronous-only; capture around this async call manually.
-      const originalWarn = console.warn;
-      const originalLog = console.log;
-      const warns = [];
-      const logs = [];
-      console.warn = (...args) => warns.push(args.join(' '));
-      console.log = (...args) => logs.push(args.join(' '));
-      try {
-        result = await generateDailyBank();
-      } finally {
-        console.warn = originalWarn;
-        console.log = originalLog;
-      }
+      const { value: result, warnCalls: warns, logCalls: logs } = await withCapturedConsoleAsync(() => generateDailyBank());
 
       assert.strictEqual(result.error, null);
       assert.strictEqual(result.savedCount, 2, 'only the 2 valid-category items must be counted as saved');
-
-      const todayBankDate = require('../src/dailyContentBank').getBankDateString();
       const stored = rowsForDate(todayBankDate);
-      for (const junk of junkCategories) {
-        assert(!stored.some((row) => row.category === junk), `"${junk}" must never be persisted to daily_content_bank`);
-      }
-      assert(stored.some((row) => row.category === 'good_news'), 'the valid good_news item must be persisted');
-      assert(stored.some((row) => row.category === 'born_today'), 'the valid born_today item must be persisted');
-
+      assert.deepStrictEqual(stored.map((r) => r.category).sort(), ['born_today', 'good_news']);
+      assert.strictEqual(stored.find((r) => r.category === 'born_today').tags, '["RU"]');
       for (const junk of junkCategories) {
         assert(warns.some((line) => line.includes(junk)), `a warning naming "${junk}" must have been logged`);
       }
       assert(logs.some((line) => line.includes('2 rows')), 'the summary log must report exactly 2 saved rows');
+
+      // model, search tool, reasoning effort and the 30-day "do not repeat" list
+      assert.strictEqual(seenParams.length, 1, 'exactly one model call');
+      assert.strictEqual(seenParams[0].model, 'gpt-6.1-sol');
+      assert.deepStrictEqual(seenParams[0].tools, [{ type: 'web_search' }]);
+      assert.deepStrictEqual(seenParams[0].reasoning, { effort: 'low' });
+      assert(seenParams[0].input.includes('Yesterday fact that must not be repeated.'), 'the last 30 days of bank facts are in the prompt');
+      assert(!seenParams[0].input.includes('Stale fact.'), 'facts older than 30 days are not');
+      assert(logs.some((line) => line.startsWith('OPENAI_USAGE scope=daily_bank') && line.includes('reasoning_tokens=7') && line.includes('searches=2')));
+
+      // an older day stays, the stale one is pruned, a same-day rerun replaces instead of appending
+      assert.strictEqual(rowsForDate(yesterday).length, 1, "yesterday's bank must be kept");
+      assert.strictEqual(rowsForDate('2026-01-01').length, 0, 'a bank older than the retention is pruned');
+      const { value: second } = await withCapturedConsoleAsync(() => generateDailyBank());
+      assert.strictEqual(second.savedCount, 2);
+      assert.strictEqual(rowsForDate(todayBankDate).length, 2, 'a same-day rerun must replace, not append');
     } finally {
-      Module._load = originalLoad;
+      bankTest.setBankClientFactory(null);
       delete process.env.OPENAI_API_KEY;
     }
   }
+
+  // --- a failed call leaves the stored bank untouched ---
+  {
+    const todayBankDate = getBankDateString();
+    const before = rowsForDate(todayBankDate).length;
+    bankTest.setBankClientFactory(() => ({ responses: { create: async () => { throw new Error('boom'); } } }));
+    process.env.OPENAI_API_KEY = 'test-key-category-validation';
+    try {
+      const { value: result } = await withCapturedConsoleAsync(() => generateDailyBank());
+      assert.strictEqual(result.savedCount, 0);
+      assert.strictEqual(result.error, 'boom');
+      assert.strictEqual(rowsForDate(todayBankDate).length, before, 'a failed call must not touch the stored bank');
+    } finally {
+      bankTest.setBankClientFactory(null);
+      delete process.env.OPENAI_API_KEY;
+    }
+  }
+  console.log('daily-bank-category-validation tests passed');
 }
 
 main()
-  .then(() => {
+  .catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  })
+  .finally(() => {
     db.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
-    console.log('daily-bank-category-validation.test.js: all assertions passed');
-  })
-  .catch((err) => {
-    try {
-      db.close();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    } catch (_) {
-      // best effort cleanup
-    }
-    console.error(err);
-    process.exit(1);
   });

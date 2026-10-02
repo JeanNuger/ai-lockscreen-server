@@ -72,7 +72,6 @@ try {
     assert(offPrompt.includes('Aim for 25–60.'), 'current HARD LIMIT text');
     assert(!offPrompt.includes('max_chars'));
     assert(payloadSlots().every((slot) => slot.max_chars === undefined), 'no max_chars without the switch');
-    assert(buildBankPrompt('2026-10-02', ['2026-10-02'], ['KZ']).includes('up to 200 characters'));
   }
 
   // --- cheaper prompt: every slot has its own max_chars, below the hard 70 ---
@@ -102,8 +101,8 @@ try {
     // No sample phrases: the prompt never quotes an example line.
     assert(!/for example|e\.g\.|«|"Доброе утро/i.test(prompt.split('HARD LIMIT')[1].split('VOICE')[0]));
 
-    const bank = buildBankPrompt('2026-10-02', ['2026-10-02'], ['KZ']);
-    assert(bank.includes('a single short, self-contained sentence in English, at most 12 words'));
+    const bank = buildBankPrompt('2026-10-02', ['KZ'], []);
+    assert(bank.includes('ONE short self-contained sentence in English, at most 12 words'));
     assert(!bank.includes('up to 200 characters'));
   }
   console.log('cheaper-prompt tests passed');
