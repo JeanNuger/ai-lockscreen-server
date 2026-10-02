@@ -10,6 +10,11 @@ const db = require('./db');
 //
 // Added to every batch request and, because repair reuses the batch payload,
 // to every repair request too.
+//
+// "phrases" come from what the phone reports it really showed (shown_phrases,
+// POST /api/v1/shown) when the device has reported anything in the last SEEN_DAYS
+// days; a device that does not report (older app version) gets the delivered
+// texts from content_batches, as before.
 
 const SEEN_DAYS = 3;
 const SEEN_MAX_PHRASES = 150;
@@ -34,7 +39,54 @@ const selectLearnedWordsStatement = db.prepare(`
   LIMIT ?
 `).pluck();
 
+const selectShownTextsStatement = db.prepare(`
+  SELECT text FROM shown_phrases
+  WHERE device_id = ? AND shown_at >= ?
+  ORDER BY shown_at DESC, id DESC
+`).pluck();
+
+const hasShownSinceStatement = db.prepare(`
+  SELECT 1 FROM shown_phrases WHERE device_id = ? AND shown_at >= ? LIMIT 1
+`).pluck();
+
+const hasAnyShownStatement = db.prepare(`
+  SELECT 1 FROM shown_phrases WHERE device_id = ? LIMIT 1
+`).pluck();
+
+function isoDaysAgo(days) {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+// True if this device has reported at least one shown phrase in the last `days` days.
+function hasShownReportsSince(deviceId, days = SEEN_DAYS) {
+  return hasShownSinceStatement.get(deviceId, isoDaysAgo(days)) === 1;
+}
+
+// True if this device has EVER reported a shown phrase (i.e. runs an app version that reports).
+function deviceReportsShown(deviceId) {
+  return hasAnyShownStatement.get(deviceId) === 1;
+}
+
+function loadShownPhrases(deviceId, { days = SEEN_DAYS, limit = SEEN_MAX_PHRASES } = {}) {
+  const texts = [];
+  const seen = new Set();
+  for (const raw of selectShownTextsStatement.all(deviceId, isoDaysAgo(days))) {
+    const text = typeof raw === 'string' ? raw.trim() : '';
+    if (text && !seen.has(text)) {
+      seen.add(text);
+      texts.push(text);
+      if (texts.length >= limit) {
+        break;
+      }
+    }
+  }
+  return texts;
+}
+
 function loadSeenPhrases(deviceId, { days = SEEN_DAYS, limit = SEEN_MAX_PHRASES } = {}) {
+  if (hasShownReportsSince(deviceId, days)) {
+    return loadShownPhrases(deviceId, { days, limit });
+  }
   const texts = [];
   const seen = new Set();
   for (const row of selectRecentBatchesStatement.all(deviceId, `-${days} days`)) {
@@ -93,5 +145,8 @@ module.exports = {
   SEEN_INSTRUCTION,
   loadSeenBlock,
   loadSeenPhrases,
+  loadShownPhrases,
+  hasShownReportsSince,
+  deviceReportsShown,
   loadLearnedWords,
 };

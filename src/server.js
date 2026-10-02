@@ -5,6 +5,7 @@ const session = require('express-session');
 const registerRoute = require('./routes/register');
 const batchRoute = require('./routes/batch');
 const citiesRoute = require('./routes/cities');
+const shownRoute = require('./routes/shown');
 const adminRoute = require('./routes/admin');
 const internalGenerateBankRoute = require('./routes/internalGenerateBank');
 
@@ -77,6 +78,7 @@ app.get('/health', (req, res) => {
 app.use('/api/v1', registerRoute);
 app.use('/api/v1', batchRoute);
 app.use('/api/v1', citiesRoute);
+app.use('/api/v1', shownRoute);
 app.use('/admin', adminRoute);
 app.use('/', internalGenerateBankRoute);
 

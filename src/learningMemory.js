@@ -1,4 +1,5 @@
 const db = require('./db');
+const { deviceReportsShown } = require('./seenMemory');
 
 // The night "do you remember the word?" slot reminds ONLY the word taught by
 // this device's morning batch of the same local day (learned_local_date).
@@ -14,6 +15,12 @@ const selectRecallCandidateStatement = db.prepare(`
   ORDER BY id DESC
   LIMIT 1
 `);
+
+// Exact text match: word_text is the word_learning phrase as delivered, and the
+// phone reports the same text when it shows it.
+const wordWasShownStatement = db.prepare(`
+  SELECT 1 FROM shown_phrases WHERE device_id = ? AND text = ? LIMIT 1
+`).pluck();
 
 const insertLearnedWordStatement = db.prepare(`
   INSERT INTO device_learning_memory (device_id, word_key, word_text, learned_local_date)
@@ -38,7 +45,16 @@ function getRecallCandidate(deviceId, learnedLocalDate) {
     return null;
   }
   const row = selectRecallCandidateStatement.get(deviceId, learnedLocalDate);
-  return row || null;
+  if (!row) {
+    return null;
+  }
+  // A device that reports what it shows is reminded only of a word it really showed.
+  // A device that never reports (older app) is handled as before.
+  if (deviceReportsShown(deviceId)
+      && wordWasShownStatement.get(deviceId, String(row.word_text).trim()) !== 1) {
+    return null;
+  }
+  return row;
 }
 
 // Records words actually taught this batch. Only slots that were genuinely

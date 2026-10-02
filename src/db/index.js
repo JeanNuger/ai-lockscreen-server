@@ -194,6 +194,24 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_sent_phrases_with_text
     ON sent_phrases(sent_at) WHERE text_norm IS NOT NULL;
 
+  -- shown_phrases: phrases the phone reports it really showed on a lit screen
+  -- (POST /api/v1/shown, see src/routes/shown.js). Unlike sent_phrases (what the
+  -- server delivered), this is what the person could have read. shown_at is the
+  -- phone's time as UTC ISO text; a re-sent entry is ignored by the UNIQUE key.
+  CREATE TABLE IF NOT EXISTS shown_phrases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    shown_at TEXT NOT NULL,
+    local_date TEXT,
+    received_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (device_id, text, shown_at),
+    FOREIGN KEY (device_id) REFERENCES devices(device_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_shown_phrases_device_shown_at
+    ON shown_phrases(device_id, shown_at);
+
   -- device_shown_facts: Daily Bank facts already used for a device, keyed by a
   -- hash of the fact text (topic_key), so the same fact is not offered again.
   CREATE TABLE IF NOT EXISTS device_shown_facts (
