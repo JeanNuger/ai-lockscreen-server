@@ -189,10 +189,18 @@ function collectHolidayCountryCodes() {
   return result;
 }
 
+// CHEAPER_PROMPT=1 (see contentGenerator.js): every bank fact is one short sentence of at most 12
+// words, so the batch model has little to shorten and does not translate a long text word for word.
+function bankTextRule() {
+  return /^(1|true|yes)$/i.test(String(process.env.CHEAPER_PROMPT || ''))
+    ? 'a single short, self-contained sentence in English, at most 12 words'
+    : 'a short, self-contained piece of content in English, up to 200 characters';
+}
+
 function buildBankPrompt(bankDate, preparedDates = getPreparedBankDates(bankDate), countryCodes = collectHolidayCountryCodes()) {
   return `Search the web for what's notable around ${bankDate} and put together a varied global "content bank" for a phone lock screen app.
 Return STRICTLY a JSON array (no wrapper object, no explanations) of ${TARGET_BANK_SIZE} objects.
-Each object: {"bank_date": "YYYY-MM-DD", "category": one of [${BANK_CATEGORIES.join(', ')}], "content_text": "a short, self-contained piece of content in English, up to 200 characters", "tags": ["lowercase", "keyword", "tags"]}.
+Each object: {"bank_date": "YYYY-MM-DD", "category": one of [${BANK_CATEGORIES.join(', ')}], "content_text": "${bankTextRule()}", "tags": ["lowercase", "keyword", "tags"]}.
 For date-sensitive categories only ("holiday", "on_this_day", and "born_today"), include real items for EACH of these dates: ${preparedDates.join(', ')}. Set bank_date to the exact date the item belongs to.
 For "holiday" specifically: for EACH of these countries, search for that country's own official or widely observed public holidays, national days, or major cultural/religious observances falling on or very near each listed date, and tag every such item with that country's ISO code: ${countryCodes.join(', ')}. If a country genuinely has no such holiday on a given date, skip it there -- never invent one. Also include, for EVERY listed date, at least one genuine international observance day (a UN/UNESCO/WHO day or similarly widely-recognized global observance falling on that date), tagged "global". Only real, search-verified holidays and observances, never commercial/marketing "days of X" with no real official or cultural standing.
 Include at least one on_this_day item for every listed date.
