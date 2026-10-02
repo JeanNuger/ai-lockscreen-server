@@ -255,8 +255,9 @@ async function main() {
     }
     assert.deepStrictEqual(phrases.map((p) => p.window), [
       ...Array(12).fill('morning'), ...Array(12).fill('day'), ...Array(12).fill('evening'), ...Array(12).fill('night')]);
-    const styles = require('../src/constants').STYLE_IDS.filter((id) => /^[AG]\d$/.test(id));
-    assert.strictEqual(styles.length, 18);
+    const styles = require('../src/constants').STYLE_IDS.filter((id) => /^[AG]\d$/.test(id) && id !== 'A9' && id !== 'G4');
+    assert.strictEqual(styles.length, 16);
+    assert(phrases.every((p) => p.style_id !== 'A9' && p.style_id !== 'G4'), 'the retired backgrounds A9 and G4 are never sent');
     assert(phrases.every((p) => /^[AG]\d$/.test(p.style_id)), 'only the backgrounds the app has (A, G), never O');
     for (const p of phrases) {
       assert(styles.includes(p.style_id), `valid style_id on ${p.slot_id}`);
