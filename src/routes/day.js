@@ -117,7 +117,8 @@ router.get('/day', async (req, res, next) => {
     }
 
     let planDate = localDate;
-    if (localTime && localTime < NIGHT_ENDS) {
+    // Only when the phone did not name the date: a phone that sends local_date says exactly which day it wants.
+    if (localTime && localTime < NIGHT_ENDS && !requestLocalDate) {
       const previous = addDaysToDateString(localDate, -1);
       if (previous && selectDayPlanStatement.get(deviceId, previous)) {
         planDate = previous;
