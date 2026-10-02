@@ -185,18 +185,22 @@ function testEvergreenSlotsCarryNoBankFacts() {
   assert.strictEqual(evening.find((s) => s.type === 'born_today').facts.text, 'A well-known person was born.');
 }
 
-function testBankCollectsOnlyFourCategories() {
-  assert.deepStrictEqual([...BANK_CATEGORIES].sort(), ['born_today', 'good_news', 'holiday', 'on_this_day']);
-  const prompt = bankTest.buildBankPrompt('2026-09-30');
-  assert(prompt.includes('one of [holiday, on_this_day, born_today, good_news]'), 'the prompt lists exactly the 4 categories');
-  for (const removed of ['humor', 'science', 'technology', 'statistic', 'economics', 'quote', 'idiom', 'country_fact']) {
-    assert(!prompt.includes(removed), `${removed} must not be requested in the bank prompt`);
+function testBankCollectsTheV3Categories() {
+  // Bank v3: date-bound items plus fresh facts for the whole-day call; jokes, thoughts and wishes stay out.
+  assert.deepStrictEqual([...BANK_CATEGORIES].sort(), [
+    'animals', 'born_today', 'brain', 'city_astana', 'country_kz', 'good_news', 'holiday', 'how_it_works', 'money',
+    'nature', 'on_this_day', 'quote', 'science', 'space', 'tech', 'tradition', 'unusual', 'word_origin',
+  ]);
+  const prompt = bankTest.buildBankPrompt('2026-09-30', ['KZ'], []);
+  assert(prompt.includes(`one of [${BANK_CATEGORIES.join(', ')}]`), 'the prompt lists every bank category');
+  for (const notBank of ['humor', 'wish', 'horoscope']) {
+    assert(!new RegExp(`\b${notBank}\b`).test(prompt.split('FRESH VERIFIED FACTS')[1] || ''), `${notBank} must not be requested in the bank prompt`);
   }
-  const parsed = bankTest.parseBankItems(JSON.stringify([
-    { category: 'science', content_text: 'A science fact.', tags: ['global'] },
-    { category: 'good_news', content_text: 'A good thing happened.', tags: ['global'] },
-  ]), '2026-09-30', ['2026-09-30']);
-  assert.deepStrictEqual(parsed.map((item) => item.category), ['good_news'], 'other categories are dropped on parse');
+  const { rows } = bankTest.parseBankItems(JSON.stringify([
+    { category: 'humor', country: 'global', text: 'A joke.' },
+    { category: 'science', country: 'global', text: 'A science fact.' },
+  ]), '2026-09-30');
+  assert.deepStrictEqual(rows.map((item) => item.category), ['science'], 'unknown categories are dropped on parse');
 }
 
 async function testUsageIsLogged() {
@@ -230,7 +234,7 @@ async function main() {
   testSeenBlockIsCutTo150AndLimitedToThreeDays();
   await testSeenBlockReachesBatchAndRepairPrompts();
   testEvergreenSlotsCarryNoBankFacts();
-  testBankCollectsOnlyFourCategories();
+  testBankCollectsTheV3Categories();
   await testUsageIsLogged();
 }
 

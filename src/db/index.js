@@ -221,6 +221,36 @@ db.exec(`
     PRIMARY KEY (device_id, topic_key),
     FOREIGN KEY (device_id) REFERENCES devices(device_id)
   );
+
+  -- day_plans: the whole-day result of GET /api/v1/day (src/dayPlan.js, src/routes/day.js), one row per
+  -- device and local date. A repeat request for the same device and date is answered from here
+  -- without a model call. phrases is a JSON array of {slot_id, window, position, type, text, style_id,
+  -- requires_shown_text?}; trace_json holds tokens, timing, dropped slots.
+  CREATE TABLE IF NOT EXISTS day_plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    local_date TEXT NOT NULL,
+    phrases TEXT NOT NULL,
+    source TEXT NOT NULL,
+    trace_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (device_id, local_date),
+    FOREIGN KEY (device_id) REFERENCES devices(device_id)
+  );
+
+  -- phone_day_summaries: what the phone reports for one finished day (steps, unlocks, screen time),
+  -- sent with the next morning's /day request. Used for the single "yesterday" recap of the day plan and
+  -- as the baseline ("more than usual") for later days.
+  CREATE TABLE IF NOT EXISTS phone_day_summaries (
+    device_id TEXT NOT NULL,
+    local_date TEXT NOT NULL,        -- the day the numbers describe (yesterday)
+    steps INTEGER,
+    unlocks INTEGER,
+    screen_seconds INTEGER,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (device_id, local_date),
+    FOREIGN KEY (device_id) REFERENCES devices(device_id)
+  );
 `);
 
 // One-off migration: devices.name is new as of 2026-09-12. This project has no

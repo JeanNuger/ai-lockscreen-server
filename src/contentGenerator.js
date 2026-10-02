@@ -46,7 +46,30 @@ const OPENAI_BATCH_MODEL = process.env.OPENAI_BATCH_MODEL || 'gpt-5-mini';
 // 'medium' spent most of its output tokens (and most of its latency) on
 // reasoning tokens never seen by the user, for no measurable gain in phrase
 // quality over 'low'. Not passed to non-gpt-5 models (see createOpenAiBatch).
-const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || 'low';
+// Read at call time (not at load) so a test script can compare 'low' and 'minimal' in one
+// process: OPENAI_REASONING_EFFORT=low|minimal (anything else the API accepts passes through).
+function getReasoningEffort() {
+  return String(process.env.OPENAI_REASONING_EFFORT || 'low').trim().toLowerCase();
+}
+
+// CHEAPER_PROMPT=1 switches on the shorter-output prompt (per-slot max_chars, retell-don't-translate,
+// short quiz format) and the short-sentence daily bank prompt. Off by default: production keeps the
+// current prompts until the test comparison (scripts/prompt-test.js) has been reviewed.
+function useCheaperPrompt() {
+  return /^(1|true|yes)$/i.test(String(process.env.CHEAPER_PROMPT || ''));
+}
+
+// Per-slot character limit sent as "max_chars" with the cheaper prompt: a margin under the real
+// hard limit (LOCK_SCREEN_TEXT_MAX_LENGTH, 70), by how much room the slot type needs.
+const MAX_CHARS_BY_LENGTH_HINT = { short: 50, medium: 55, long: 60 };
+const MAX_CHARS_BY_TYPE = { quiz_question: 55, quiz_answer: 30 };
+
+function maxCharsForSlot(slot) {
+  if (MAX_CHARS_BY_TYPE[slot.type]) {
+    return MAX_CHARS_BY_TYPE[slot.type];
+  }
+  return MAX_CHARS_BY_LENGTH_HINT[slot.length_hint || 'medium'] || MAX_CHARS_BY_LENGTH_HINT.medium;
+}
 
 // Per-attempt timeout for one primary batch OpenAI call -- bounds a single
 // call so a hung request can't silently eat the Android client's own
@@ -1088,7 +1111,7 @@ async function createOpenAiBatch(client, context, languageCode, count = BATCH_SI
     ],
   };
   if (IS_REASONING_MODEL) {
-    params.reasoning_effort = OPENAI_REASONING_EFFORT;
+    params.reasoning_effort = getReasoningEffort();
   }
   const options = timeoutMs === undefined ? undefined : { timeout: timeoutMs, maxRetries: 0 };
   const response = await client.chat.completions.create(params, options);
@@ -1106,7 +1129,11 @@ function logOpenAiUsage(scope, response) {
   }
   const details = usage.prompt_tokens_details;
   const cached = details && Number.isFinite(details.cached_tokens) ? details.cached_tokens : 0;
-  console.log(`OPENAI_USAGE scope=${scope} model=${OPENAI_BATCH_MODEL} prompt_tokens=${usage.prompt_tokens} completion_tokens=${usage.completion_tokens} total_tokens=${usage.total_tokens} cached_tokens=${cached}`);
+  const completionDetails = usage.completion_tokens_details;
+  const reasoning = completionDetails && Number.isFinite(completionDetails.reasoning_tokens)
+    ? completionDetails.reasoning_tokens
+    : 0;
+  console.log(`OPENAI_USAGE scope=${scope} model=${OPENAI_BATCH_MODEL} prompt_tokens=${usage.prompt_tokens} completion_tokens=${usage.completion_tokens} reasoning_tokens=${reasoning} total_tokens=${usage.total_tokens} cached_tokens=${cached} reasoning_effort=${IS_REASONING_MODEL ? getReasoningEffort() : 'n/a'}`);
 }
 
 // rejectedDetails (optional, from assembly.rejectedDetails) carries the
@@ -1472,6 +1499,8 @@ function buildContextPrompt(device, window, signals, weather, languageCode, slot
         // is enforced separately regardless of this hint (see
         // buildSystemPrompt/validateFinalBatch).
         length_hint: slot.length_hint || 'medium',
+        // CHEAPER_PROMPT only: this slot's own character limit, with a margin under the hard 70.
+        max_chars: useCheaperPrompt() ? maxCharsForSlot(slot) : undefined,
         // Only present on the small, server-selected subset of slots
         // SlotPlanner picked as interest-aware (see selectInterestAwareSlots
         // in slotPlanner.js) -- omitted (not even an empty/false value) for
@@ -1514,6 +1543,22 @@ function buildContextPrompt(device, window, signals, weather, languageCode, slot
 // Shape of the output (exactly BATCH_SIZE {slot_id, text, style_id} objects)
 // is enforced via the Structured Outputs json_schema passed to the API call
 // in generateBatch, not described in this text -- see the call site for why.
+// The HARD LIMIT section of the system prompt. The cheaper variant gives every slot its own
+// max_chars, asks for a short retelling instead of a translation, and fixes a short quiz format,
+// so that the length is right on the first pass instead of costing a repair request.
+function hardLimitSection() {
+  if (useCheaperPrompt()) {
+    return `HARD LIMIT
+- Every slot has "max_chars": never exceed it, counting spaces. Aim for 40–60 characters. The absolute limit is ${LOCK_SCREEN_TEXT_MAX_LENGTH}; longer phrases are discarded.
+- Count before you answer. If a phrase is over its max_chars, drop details; never cut the end of the thought.
+- A slot's fact is raw material, not text to translate: retell it in a few short words of your own, keep one striking detail and drop the rest. Never translate a fact in full.
+- quiz_question: a question of at most about 55 characters. quiz_answer: the answer in one or two words, nothing else.`;
+  }
+  return `HARD LIMIT
+- Each phrase is at most ${LOCK_SCREEN_TEXT_MAX_LENGTH} characters, counting spaces. Longer phrases are discarded. Aim for 25–60.
+- If a fact is too long, keep only its most striking part.`;
+}
+
 function buildSystemPrompt() {
   return `You are the voice of a kind, clever AI that lives on the user's phone lock screen. Every time they glance at their phone, you show one short line. Your goal: make them curious about what you will say next. You entertain, inform, support, teach, and notice things for them — like a smart, warm friend, never like a motivational poster or a textbook.
 
@@ -1522,9 +1567,7 @@ LANGUAGE
 - Facts may arrive in English. Retell them naturally in the target language.
 - Never translate jokes, idioms or quotes literally. For a joke, write your own light joke on the same theme. For word_learning, if the idiom is foreign, use a real common expression of the target language with a similar meaning.
 
-HARD LIMIT
-- Each phrase is at most ${LOCK_SCREEN_TEXT_MAX_LENGTH} characters, counting spaces. Longer phrases are discarded. Aim for 25–60.
-- If a fact is too long, keep only its most striking part.
+${hardLimitSection()}
 
 VOICE
 - Address the user informally (ты / du / tu / tú).

@@ -12,6 +12,7 @@ const db = require('../src/db');
 const { BATCH_SIZE, STYLE_IDS } = require('../src/constants');
 const {
   BANK_CATEGORIES,
+  LEGACY_BANK_CATEGORIES,
   selectBankItemsForDevice,
   generateDailyBank,
   getBankDateString,
@@ -44,11 +45,16 @@ function insertBankRow(bankDate, category, contentText, tags = ['global']) {
 
 async function main() {
   // --- A: BANK_CATEGORIES contains exactly the 4 date/news-bound categories ---
+  // Bank v3 holds more categories for the whole-day call; the old /batch planner still only
+  // knows (and is only offered) these 4.
   assert.deepStrictEqual(
-    [...BANK_CATEGORIES].sort(),
+    [...LEGACY_BANK_CATEGORIES].sort(),
     [...EXPECTED_CATEGORIES].sort(),
-    'BANK_CATEGORIES must contain exactly the 4 date/news-bound categories'
+    'LEGACY_BANK_CATEGORIES must contain exactly the 4 date/news-bound categories'
   );
+  for (const category of EXPECTED_CATEGORIES) {
+    assert(BANK_CATEGORIES.includes(category), `BANK_CATEGORIES must still contain "${category}"`);
+  }
   assert(!BANK_CATEGORIES.includes('advice'), 'advice must remain absent from BANK_CATEGORIES');
   assert(!BANK_CATEGORIES.includes('psychology'), 'psychology must remain absent from BANK_CATEGORIES');
   assert(!BANK_CATEGORIES.includes('wish'), 'wish must remain absent from BANK_CATEGORIES');

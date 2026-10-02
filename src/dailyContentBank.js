@@ -2,28 +2,42 @@ const db = require('./db');
 const { countryForTimezone } = require('./timezoneCountry');
 const { loadShownFacts, isFactShown } = require('./sentPhrases');
 
-// Fixed category set for daily_content_bank rows. Step 2 (personalization,
-// not this task) will filter/select by these when building a device's batch,
-// so the set is small and stable rather than whatever labels the model feels
-// like inventing per call. The bank holds ONLY topics tied to a date or to
-// current events (holiday, on_this_day, born_today, good_news); every
-// evergreen topic (humor, science, technology, statistics, quotes, country
-// facts, economics, words) is written by the model itself in the batch call,
-// which is told what the device has already seen (see seenMemory.js).
+// Fixed category set for daily_content_bank rows (bank v3, whole-day scheme).
+// The bank is built once a day with web search and holds EVERY fact the whole-day
+// call (src/dayPlan.js) may use: date-bound items (holiday, on_this_day, born_today,
+// good_news) and fresh verified facts (science ... quote). Jokes, thoughts, wishes,
+// horoscope, tips and ideas are not in the bank: the model writes those itself.
 const BANK_CATEGORIES = [
   'holiday',
   'on_this_day',
   'born_today',
   'good_news',
+  'science',
+  'animals',
+  'space',
+  'nature',
+  'tech',
+  'unusual',
+  'country_kz',
+  'city_astana',
+  'money',
+  'brain',
+  'word_origin',
+  'tradition',
+  'how_it_works',
+  'quote',
 ];
+// The four categories the old /batch planner (slotPlanner.js) knows how to use. The old /batch
+// endpoint stays alive for the installed app, so it keeps selecting only these.
+const LEGACY_BANK_CATEGORIES = ['holiday', 'on_this_day', 'born_today', 'good_news'];
 
-// How many bank items to ask the model for. Not a hard contract with the
-// model -- generateDailyBank() below accepts whatever valid array it gets
-// back, even if shorter or longer than this. Raised 35 -> 50 (fixed-order
-// rebuild step 2): the "holiday" ask now covers up to 20 countries across 3
-// prepared dates instead of one shared item per date, so the old 35 target
-// undersold how much real content this one call is now expected to return.
-const TARGET_BANK_SIZE = 50;
+// Model of the daily bank call (Responses API + web_search) and its reasoning effort.
+// Read at call time so a test can override them.
+const BANK_MODEL_DEFAULT = 'gpt-6.1-sol';
+const BANK_EFFORT_DEFAULT = 'low';
+const BANK_RETENTION_DAYS = 45;
+const BANK_FACTS_HISTORY_DAYS = 30;
+const BANK_FACTS_HISTORY_MAX = 400;
 const BANK_TIMEZONE = 'Asia/Almaty';
 const DATE_SENSITIVE_CATEGORIES = new Set(['holiday', 'on_this_day', 'born_today']);
 
@@ -189,89 +203,127 @@ function collectHolidayCountryCodes() {
   return result;
 }
 
-function buildBankPrompt(bankDate, preparedDates = getPreparedBankDates(bankDate), countryCodes = collectHolidayCountryCodes()) {
-  return `Search the web for what's notable around ${bankDate} and put together a varied global "content bank" for a phone lock screen app.
-Return STRICTLY a JSON array (no wrapper object, no explanations) of ${TARGET_BANK_SIZE} objects.
-Each object: {"bank_date": "YYYY-MM-DD", "category": one of [${BANK_CATEGORIES.join(', ')}], "content_text": "a short, self-contained piece of content in English, up to 200 characters", "tags": ["lowercase", "keyword", "tags"]}.
-For date-sensitive categories only ("holiday", "on_this_day", and "born_today"), include real items for EACH of these dates: ${preparedDates.join(', ')}. Set bank_date to the exact date the item belongs to.
-For "holiday" specifically: for EACH of these countries, search for that country's own official or widely observed public holidays, national days, or major cultural/religious observances falling on or very near each listed date, and tag every such item with that country's ISO code: ${countryCodes.join(', ')}. If a country genuinely has no such holiday on a given date, skip it there -- never invent one. Also include, for EVERY listed date, at least one genuine international observance day (a UN/UNESCO/WHO day or similarly widely-recognized global observance falling on that date), tagged "global". Only real, search-verified holidays and observances, never commercial/marketing "days of X" with no real official or cultural standing.
-Include at least one on_this_day item for every listed date.
-For "born_today": for EACH of these dates, include 1-2 real, well-known people actually born on that date, verified by web search, tag "global". Never invent a person or a birth date.
-For "good_news", set bank_date to ${bankDate}; include a few genuinely positive, verifiable developments from roughly the last few days. The bank holds only these four categories.
-Keep the bank international and reusable for users in many countries: do not make it US-centric or Russia-centric.
-Prioritize accuracy from web search -- holiday/on_this_day/born_today must match their own bank_date; good_news must be a real, recent, verifiable development; do not invent fake historical events, holidays, birth dates, or news.
-Keep every content_text glanceable and self-contained (no "as mentioned above", no follow-up questions).
-For global/international items, add "global" to tags. For country-specific items add the ISO country code tag such as "KZ", "FR", or "JP". Avoid country-specific politics.
-Do not generate self-help, motivational coaching, psychology tips, productivity advice, or generic wishes.
-Respond with the JSON array only, nothing else.`;
+const selectRecentBankTextsStatement = db.prepare(`
+  SELECT content_text FROM daily_content_bank
+  WHERE bank_date >= ? AND bank_date < ?
+  ORDER BY bank_date DESC, id DESC
+  LIMIT ?
+`).pluck();
+
+const pruneOldBankStatement = db.prepare(`
+  DELETE FROM daily_content_bank WHERE bank_date < ?
+`);
+
+// Facts of the bank over the last BANK_FACTS_HISTORY_DAYS days (not including bankDate itself),
+// newest first: the "do not repeat" list of the bank prompt.
+function loadRecentBankFacts(bankDate, days = BANK_FACTS_HISTORY_DAYS, limit = BANK_FACTS_HISTORY_MAX) {
+  const from = addDaysToDateString(bankDate, -days);
+  if (!from) {
+    return [];
+  }
+  return selectRecentBankTextsStatement.all(from, bankDate, limit);
 }
 
-function parseBankItems(rawText, defaultBankDate, preparedDates = [defaultBankDate]) {
+function buildBankPrompt(bankDate, countryCodes = collectHolidayCountryCodes(), recentFacts = loadRecentBankFacts(bankDate)) {
+  const otherCountries = countryCodes.filter((code) => code !== 'KZ');
+  return `Search the web (today is ${bankDate}) and build a content bank for ${bankDate} for a phone lock-screen app.
+Return STRICTLY a JSON array (no wrapper, no markdown) of objects: {"category": one of [${BANK_CATEGORIES.join(', ')}], "country": ISO code or "global" or "", "text": "..."}.
+This is a one-shot automated job: never ask questions or propose stages, just do the work and return the final array. Use as many searches as needed to cover every category; never output placeholder or "no data" items. Every "text" is ONE short self-contained sentence in English, at most 12 words, with no invented numbers: every number, name and date must be confirmed by a search result. If you cannot verify it, leave it out. Do not put links or citations inside the text.
+
+DATE-BOUND (all for ${bankDate} exactly):
+- holiday (REQUIRED): (a) a holiday of Kazakhstan on ${bankDate} — professional, national or commemorative (country "KZ"); (b) an international day of the UN or UNESCO on ${bankDate} (country "global"). Keep searching for both (Kazakh sources, UN/UNESCO calendars). If after thorough search one truly does not exist, output an item with category holiday, country "KZ" or "global", and text starting "NONE:" saying so — but search first. Also, for each of these other countries, its own official or widely observed holiday on ${bankDate}, if any (never invent): ${otherCountries.join(', ')}.
+- on_this_day: 6 real events that happened on ${bankDate} in past years, start the text with the year. Different countries; at least one from Kazakhstan or Central Asia and at least one from Europe or Asia; not only the USA.
+- born_today: 6 real people born on ${bankDate}, give the year of birth. Different countries; at least one from Kazakhstan or Central Asia and at least one from Europe or Asia; not only the USA.
+- good_news: 4 genuinely positive, verifiable developments from the last few days.
+FRESH VERIFIED FACTS: little-known and surprising, NOT school-level (no "octopuses have three hearts", no "ice floats", no "Neptune was found by maths" — the kind every pupil knows). Prefer facts a smart adult would say "I didn't know that" about.
+- science 6, animals 6, space 5, nature 5, tech 5, unusual 5, money 4 (money explained simply), brain 4 (brain and psychology, well-established findings only), word_origin 4 (where a word came from, say which language), tradition 4 (unusual tradition of one country, name it), how_it_works 4 (how a familiar thing works), quote 4 (a real short quote with its author, at most 12 words besides the author).
+- country_kz 5: facts about Kazakhstan. city_astana 5: facts about Astana. Country "KZ".
+Avoid politics, commercial "days of X", self-help and generic wishes. Do not repeat anything from this list of the last ${BANK_FACTS_HISTORY_DAYS} days: ${JSON.stringify(recentFacts)}.
+Never return an empty array. Respond with the JSON array only.`;
+}
+
+// Markdown links the search tool sometimes leaves in the text: "([site](https://...))" or "[site](https://...)".
+function stripCitations(text) {
+  return String(text)
+    .replace(/\s*\(\[[^\]]*\]\([^)]*\)\)/g, '')
+    .replace(/\s*\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Parses the model's answer into rows for daily_content_bank. Every row belongs to `bankDate` (the
+// bank is built per day). The country goes into `tags` as ["KZ"] / ["global"], the shape the old
+// country filter (isBankItemAllowedForCountry) already reads. "NONE:" items (the model reporting that a
+// required holiday does not exist) are not stored: they are returned in `noneNotes` for the log.
+// An unknown category drops the row with a warning, never silently re-labelled.
+function parseBankItems(rawText, bankDate) {
   let parsed;
   try {
     parsed = JSON.parse(rawText);
   } catch (err) {
-    // The model sometimes wraps the array in a JSON object or fences despite
-    // instructions -- try to salvage a top-level array substring before
-    // giving up, rather than failing on the first formatting slip.
     const match = rawText && rawText.match(/\[[\s\S]*\]/);
     if (!match) {
       throw err;
     }
     parsed = JSON.parse(match[0]);
   }
-
-  const array = Array.isArray(parsed) ? parsed : Array.isArray(parsed.items) ? parsed.items : null;
+  const array = Array.isArray(parsed) ? parsed : Array.isArray(parsed && parsed.items) ? parsed.items : null;
   if (!array) {
     throw new Error('response did not contain a JSON array of bank items');
   }
 
-  return array
-    .filter((item) => item && typeof item.content_text === 'string' && item.content_text.trim().length > 0)
-    .filter((item) => {
-      // A category outside BANK_CATEGORIES used to be silently coerced to
-      // 'fact' -- that let the model (or anything else writing rows the same
-      // shape) invent categories that would never match any bank_category
-      // isBankItemAllowedForCountry/selectBankItemsForDevice actually serves,
-      // so they sat in the table looking saved while being permanently
-      // invisible downstream. Dropping the row outright (with a warning) is
-      // the honest behavior: we never silently store content under a
-      // category it didn't actually belong to.
-      if (BANK_CATEGORIES.includes(item.category)) {
-        return true;
-      }
+  const rows = [];
+  const noneNotes = [];
+  const seenTexts = new Set();
+  for (const item of array) {
+    const rawItemText = item && (typeof item.text === 'string' ? item.text : item.content_text);
+    if (typeof rawItemText !== 'string') {
+      continue;
+    }
+    const text = stripCitations(rawItemText);
+    if (!text || text.startsWith('(')) {
+      continue;
+    }
+    if (!BANK_CATEGORIES.includes(item.category)) {
       console.warn(`generateDailyBank: dropping bank item with unknown category "${item.category}"`);
-      return false;
-    })
-    .map((item) => {
-      const category = item.category;
-      const suppliedDate = typeof item.bank_date === 'string' && preparedDates.includes(item.bank_date)
-        ? item.bank_date
-        : defaultBankDate;
-      return {
-        bank_date: DATE_SENSITIVE_CATEGORIES.has(category) ? suppliedDate : defaultBankDate,
-        category,
-        content_text: item.content_text.trim(),
-        tags: Array.isArray(item.tags) ? item.tags.filter((t) => typeof t === 'string') : [],
-      };
+      continue;
+    }
+    const country = typeof item.country === 'string' ? item.country.trim() : '';
+    if (/^none:/i.test(text)) {
+      noneNotes.push({ category: item.category, country: country || null, text });
+      continue;
+    }
+    const key = text.toLowerCase();
+    if (seenTexts.has(key)) {
+      continue;
+    }
+    seenTexts.add(key);
+    const tag = /^[A-Za-z]{2}$/.test(country) ? country.toUpperCase() : country ? country.toLowerCase() : null;
+    rows.push({
+      bank_date: bankDate,
+      category: item.category,
+      content_text: text,
+      tags: tag ? [tag] : [],
     });
+  }
+  return { rows, noneNotes };
 }
 
-// Warns (never throws, never fabricates) when the model's response is
-// missing content the product actually depends on: holiday/on_this_day/
-// born_today for each prepared date (see buildBankPrompt's own request for
-// exactly this). Purely diagnostic:
-// generateDailyBank() still saves whatever valid items it has either way;
-// selectBankItemsForDevice/slotPlanner already handle a missing category by
-// omitting that slot.
-function logMissingRequiredCategories(items, bankDate, preparedDates) {
-  for (const date of preparedDates) {
-    for (const category of DATE_SENSITIVE_CATEGORIES) {
-      const present = items.some((item) => item.category === category && item.bank_date === date);
-      if (!present) {
-        console.warn(`generateDailyBank: missing required category "${category}" for ${date}`);
-      }
+// Warns (never throws, never fabricates) when the bank lacks what the whole-day call depends on:
+// the date-bound categories, and a Kazakhstan holiday / an international day (the model may have
+// reported them as "NONE:", see parseBankItems). Purely diagnostic: whatever valid rows exist are saved.
+function logMissingRequiredCategories(rows, bankDate, noneNotes = []) {
+  for (const category of DATE_SENSITIVE_CATEGORIES) {
+    if (!rows.some((row) => row.category === category)) {
+      console.warn(`generateDailyBank: missing required category "${category}" for ${bankDate}`);
     }
+  }
+  const holidayTags = (row) => parseTags(row.tags);
+  if (!rows.some((row) => row.category === 'holiday' && holidayTags(row).includes('KZ'))) {
+    console.warn(`generateDailyBank: no Kazakhstan holiday for ${bankDate}${noneNotes.some((n) => n.country === 'KZ') ? ' (model reported none)' : ''}`);
+  }
+  if (!rows.some((row) => row.category === 'holiday' && holidayTags(row).includes('global'))) {
+    console.warn(`generateDailyBank: no international day for ${bankDate}${noneNotes.some((n) => n.country === 'global') ? ' (model reported none)' : ''}`);
   }
 }
 
@@ -300,12 +352,35 @@ function logBankSummary(items) {
   }
 }
 
+let bankClientFactory = null;
+
+function createBankClient() {
+  if (bankClientFactory) {
+    return bankClientFactory();
+  }
+  const OpenAI = require('openai');
+  // The whole search run takes minutes (about 3.5 on the test), so the SDK's default 10 minute
+  // timeout stays and its own retries are off: a failed run simply leaves the old bank in place.
+  return new OpenAI({ apiKey: process.env.OPENAI_API_KEY, maxRetries: 0 });
+}
+
+function logBankUsage(model, effort, response, seconds) {
+  const usage = response && response.usage;
+  if (!usage) {
+    return;
+  }
+  const reasoning = usage.output_tokens_details && Number.isFinite(usage.output_tokens_details.reasoning_tokens)
+    ? usage.output_tokens_details.reasoning_tokens
+    : 0;
+  const searches = (response.output || []).filter((o) => o && o.type === 'web_search_call').length;
+  console.log(`OPENAI_USAGE scope=daily_bank model=${model} prompt_tokens=${usage.input_tokens} completion_tokens=${usage.output_tokens} reasoning_tokens=${reasoning} total_tokens=${usage.total_tokens} cached_tokens=0 reasoning_effort=${effort} searches=${searches} seconds=${seconds.toFixed(1)}`);
+}
+
 /**
- * Generates today's shared content bank via a web-search-enabled OpenAI call
- * and persists each item as its own daily_content_bank row under today's
- * Asia/Almaty product-day date. Never throws -- a failed or malformed call is logged and leaves the
- * bank empty/partial for today rather than crashing the caller (the cron
- * endpoint that calls this, see src/routes/internalGenerateBank.js).
+ * Generates today's shared content bank (bank v3) with one web-search call and stores it under
+ * today's Asia/Almaty product-day date, replacing that date's rows and keeping older days for
+ * BANK_RETENTION_DAYS. The "do not repeat" list is the facts of the last 30 days from this same
+ * table. Never throws: a failed or malformed call is logged and leaves the existing bank untouched.
  *
  * @returns {Promise<{ savedCount: number, error: string|null, dates?: string[] }>}
  */
@@ -316,39 +391,39 @@ async function generateDailyBank() {
   }
 
   const bankDate = getBankDateString();
-  const preparedDates = getPreparedBankDates(bankDate);
   const countryCodes = collectHolidayCountryCodes();
-  console.log(`generateDailyBank: holiday_country_codes=${countryCodes.join(',')} count=${countryCodes.length}`);
+  const model = process.env.BANK_MODEL || BANK_MODEL_DEFAULT;
+  const effort = process.env.BANK_REASONING_EFFORT || BANK_EFFORT_DEFAULT;
+  console.log(`generateDailyBank: bank_date=${bankDate} model=${model} holiday_country_codes=${countryCodes.join(',')}`);
 
   try {
-    const OpenAI = require('openai');
-    const client = new OpenAI({ apiKey });
-
-    // gpt-4o, not gpt-4o-search-preview -- confirmed by the earlier manual
-    // test that the Responses API's web_search tool works with gpt-4o but
-    // gpt-4o-search-preview is not a valid Responses API model.
-    const response = await client.responses.create({
-      model: 'gpt-4o',
+    const client = createBankClient();
+    const params = {
+      model,
       tools: [{ type: 'web_search' }],
-      input: buildBankPrompt(bankDate, preparedDates, countryCodes),
-    });
+      input: buildBankPrompt(bankDate, countryCodes),
+    };
+    if (/^(gpt-5|gpt-6|o\d)/i.test(model)) {
+      params.reasoning = { effort };
+    }
+    const startedMs = Date.now();
+    const response = await client.responses.create(params);
+    logBankUsage(model, effort, response, (Date.now() - startedMs) / 1000);
 
-    const items = parseBankItems(response.output_text, bankDate, preparedDates);
-    if (items.length === 0) {
+    const { rows, noneNotes } = parseBankItems(response.output_text, bankDate);
+    if (rows.length === 0) {
       return { savedCount: 0, error: 'model returned zero usable bank items' };
     }
 
-    logMissingRequiredCategories(items, bankDate, preparedDates);
+    logMissingRequiredCategories(rows, bankDate, noneNotes);
+    replaceBankItemsForDate(bankDate, rows);
+    const pruneBefore = addDaysToDateString(bankDate, -BANK_RETENTION_DAYS);
+    if (pruneBefore) {
+      pruneOldBankStatement.run(pruneBefore);
+    }
+    logBankSummary(rows);
 
-    // Replace, not append -- a same-day rerun (manual or accidental) must
-    // regenerate and replace the prepared date range, not duplicate it. Nothing before
-    // this line has touched the DB, so any failure above (network error,
-    // malformed JSON, zero valid items) already returned without altering
-    // the existing bank.
-    replaceBankItemsForDates(preparedDates, items);
-    logBankSummary(items);
-
-    return { savedCount: items.length, error: null, dates: preparedDates };
+    return { savedCount: rows.length, error: null, dates: [bankDate] };
   } catch (err) {
     console.error('generateDailyBank failed:', err.message);
     return { savedCount: 0, error: err.message };
@@ -386,8 +461,10 @@ function countryTagsFromBankItem(row) {
   );
 }
 
+// Only the legacy categories: the old /batch planner knows nothing about the others (they are used by
+// the whole-day call, see src/dayPlan.js).
 function isBankItemAllowedForCountry(row, countryCode) {
-  if (!BANK_CATEGORIES.includes(row.category)) {
+  if (!LEGACY_BANK_CATEGORIES.includes(row.category)) {
     return false;
   }
   const targetCountry = normalizeCountryCode(countryCode);
@@ -437,6 +514,18 @@ function resolveDateSensitiveBankDate(deviceLocalDate) {
   return availableDates
     .slice()
     .sort((a, b) => dateDistanceDays(a, deviceLocalDate) - dateDistanceDays(b, deviceLocalDate))[0];
+}
+
+// The bank rows the whole-day call (src/dayPlan.js) may use for a device whose local date is
+// `deviceLocalDate`: every category of the bank day nearest to that date (the bank is built once a
+// day in Asia/Almaty, a device in another timezone may be a day behind or ahead). Returns
+// { bankDate, rows: [{ id, category, content_text, tags }] }, rows empty when there is no bank yet.
+function selectBankRowsForDay(deviceLocalDate) {
+  const bankDate = resolveDateSensitiveBankDate(deviceLocalDate);
+  if (!bankDate) {
+    return { bankDate: null, rows: [] };
+  }
+  return { bankDate, rows: selectBankRowsForDateStatement.all(bankDate) };
 }
 
 // Random-but-varied-by-category selection for one device's batch context.
@@ -590,9 +679,20 @@ module.exports = {
   getBankDateString,
   getPreparedBankDates,
   BANK_CATEGORIES,
+  LEGACY_BANK_CATEGORIES,
   buildBankPrompt,
   collectHolidayCountryCodes,
+  loadRecentBankFacts,
+  selectBankRowsForDay,
+  resolveDateSensitiveBankDate,
+  parseTags,
+  normalizeCountryCode,
+  resolveDeviceCountryCode,
   _test: {
+    setBankClientFactory(factory) {
+      bankClientFactory = factory;
+    },
+    stripCitations,
     countryTagsFromBankItem,
     isBankItemAllowedForCountry,
     normalizeCountryCode,
