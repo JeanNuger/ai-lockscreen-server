@@ -140,6 +140,7 @@ db.exec(`
     word_text TEXT NOT NULL,
     learned_at TEXT NOT NULL DEFAULT (datetime('now')),
     recalled_at TEXT,
+    learned_local_date TEXT,
     FOREIGN KEY (device_id) REFERENCES devices(device_id)
   );
 
@@ -247,6 +248,16 @@ if (!deviceColumnNames.includes('city_geoname_id')) {
   db.exec('ALTER TABLE devices ADD COLUMN city_country_code TEXT');
   db.exec('ALTER TABLE devices ADD COLUMN city_lat REAL');
   db.exec('ALTER TABLE devices ADD COLUMN city_lon REAL');
+}
+
+// device_learning_memory.learned_local_date: the device's own local calendar date
+// of the morning batch that taught the word. The night "do you remember the
+// word?" slot only recalls a word whose learned_local_date is today's, so rows
+// from before this column (NULL) can never be recalled. Same guarded-ALTER
+// migration pattern as above.
+const learningMemoryColumnNames = db.prepare('PRAGMA table_info(device_learning_memory)').all().map((col) => col.name);
+if (!learningMemoryColumnNames.includes('learned_local_date')) {
+  db.exec('ALTER TABLE device_learning_memory ADD COLUMN learned_local_date TEXT');
 }
 
 module.exports = db;

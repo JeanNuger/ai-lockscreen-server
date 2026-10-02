@@ -1625,7 +1625,13 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
     countryCode
   );
   const recentContentMemory = getRecentContentMemory(device.device_id);
-  const recallCandidate = getRecallCandidate(device.device_id);
+  // Night recalls the word of this device's morning batch of the same local day. Before
+  // 05:00 the night still belongs to the previous day's morning (same rule as the batch
+  // reuse key, see routes/batch.js nightReuseKeyDate).
+  const recallDate = window === 'night' && dateContext
+    ? (dateContext.time < '05:00' ? addDaysToDateString(dateContext.date, -1) : dateContext.date)
+    : null;
+  const recallCandidate = recallDate ? getRecallCandidate(device.device_id, recallDate) : null;
   const { slots } = planSlots({
     device,
     window,
@@ -1835,7 +1841,7 @@ async function generateBatch(device, window, signals, weather, phoneTrends = {},
   const usedCategories = extractUsedCategoriesFromSlots(slots);
   recordShownCategories(device.device_id, deviceLocalDate, usedCategories);
   recordShownContentMemory(device.device_id, slots, assembly.generatedSlotIds);
-  recordLearnedWords(device.device_id, slots, assembly.generatedSlotIds, assembly.phrases);
+  recordLearnedWords(device.device_id, slots, assembly.generatedSlotIds, assembly.phrases, deviceLocalDate);
   recordRecalledWords(device.device_id, slots, assembly.generatedSlotIds);
   recordSentContent(device.device_id, slots, assembly.phrases);
 

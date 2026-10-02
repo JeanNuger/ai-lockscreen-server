@@ -1,25 +1,23 @@
 const db = require('./db');
 
-// Recall eligibility window (inclusive both ends): a word can be recalled
-// starting exactly 2 days after it was taught, through exactly 14 days after.
-// See HANDOFF_2 Phase 4.
-const MIN_RECALL_AGE_DAYS = 2;
-const MAX_RECALL_AGE_DAYS = 14;
-
+// The night "do you remember the word?" slot reminds ONLY the word taught by
+// this device's morning batch of the same local day (learned_local_date).
+// Older words are never recalled: an earlier version picked the oldest
+// unrecalled row from the previous 2-14 days, which surfaced idioms from the
+// retired bank. No word taught today means no recall slot.
 const selectRecallCandidateStatement = db.prepare(`
   SELECT id, word_key, word_text, learned_at
   FROM device_learning_memory
   WHERE device_id = ?
     AND recalled_at IS NULL
-    AND learned_at <= datetime('now', ?)
-    AND learned_at >= datetime('now', ?)
-  ORDER BY learned_at ASC, id ASC
+    AND learned_local_date = ?
+  ORDER BY id DESC
   LIMIT 1
 `);
 
 const insertLearnedWordStatement = db.prepare(`
-  INSERT INTO device_learning_memory (device_id, word_key, word_text)
-  VALUES (?, ?, ?)
+  INSERT INTO device_learning_memory (device_id, word_key, word_text, learned_local_date)
+  VALUES (?, ?, ?, ?)
 `);
 
 const markRecalledStatement = db.prepare(`
@@ -32,18 +30,14 @@ function normalizeKey(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
-// Returns the oldest eligible, not-yet-recalled learned word for this device,
-// or null if none exists -- deterministic (ORDER BY learned_at ASC, id ASC),
-// no random selection.
-function getRecallCandidate(deviceId) {
-  if (!deviceId) {
+// Returns the not-yet-recalled word this device was taught on `learnedLocalDate`
+// (its local calendar date, YYYY-MM-DD), or null if there is none. Never falls
+// back to an older word.
+function getRecallCandidate(deviceId, learnedLocalDate) {
+  if (!deviceId || typeof learnedLocalDate !== 'string' || !learnedLocalDate) {
     return null;
   }
-  const row = selectRecallCandidateStatement.get(
-    deviceId,
-    `-${MIN_RECALL_AGE_DAYS} days`,
-    `-${MAX_RECALL_AGE_DAYS} days`
-  );
+  const row = selectRecallCandidateStatement.get(deviceId, learnedLocalDate);
   return row || null;
 }
 
@@ -53,7 +47,7 @@ function getRecallCandidate(deviceId) {
 // word_learning slot missing a valid facts.word is a contract violation (the
 // server, not OpenAI, must choose the specific word) -- skipped without
 // failing the batch, with a warning so it stays observable.
-function recordLearnedWords(deviceId, slots = [], generatedSlotIds = [], phrases = []) {
+function recordLearnedWords(deviceId, slots = [], generatedSlotIds = [], phrases = [], localDate = null) {
   if (!deviceId || !Array.isArray(slots) || !Array.isArray(generatedSlotIds)) {
     return 0;
   }
@@ -86,7 +80,7 @@ function recordLearnedWords(deviceId, slots = [], generatedSlotIds = [], phrases
 
   const insertMany = db.transaction((items) => {
     for (const item of items) {
-      insertLearnedWordStatement.run(deviceId, item.word_key, item.word_text);
+      insertLearnedWordStatement.run(deviceId, item.word_key, item.word_text, localDate || null);
     }
   });
   insertMany(rows);
@@ -120,8 +114,6 @@ function recordRecalledWords(deviceId, slots = [], generatedSlotIds = []) {
 }
 
 module.exports = {
-  MIN_RECALL_AGE_DAYS,
-  MAX_RECALL_AGE_DAYS,
   getRecallCandidate,
   recordLearnedWords,
   recordRecalledWords,

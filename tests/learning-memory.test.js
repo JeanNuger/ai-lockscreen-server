@@ -11,8 +11,6 @@ delete process.env.OPENAI_API_KEY;
 const db = require('../src/db');
 const { BATCH_SIZE, STYLE_IDS } = require('../src/constants');
 const {
-  MIN_RECALL_AGE_DAYS,
-  MAX_RECALL_AGE_DAYS,
   getRecallCandidate,
   recordLearnedWords,
   recordRecalledWords,
@@ -27,16 +25,26 @@ const {
 } = require('../src/contentGenerator');
 const { getBankDateString } = require('../src/dailyContentBank');
 
-const insertLearnedWordAtStatement = db.prepare(`
-  INSERT INTO device_learning_memory (device_id, word_key, word_text, learned_at)
-  VALUES (?, ?, ?, datetime('now', ?))
-`);
+const TODAY = '2026-10-01';
 
-function insertLearnedWordDaysAgo(deviceId, wordKey, wordText, daysAgo) {
+// localDate = the device's local date of the morning batch that taught the word
+// (null = a row from before that column existed).
+function insertLearnedWord(deviceId, wordKey, wordText, localDate) {
   db.prepare('INSERT OR IGNORE INTO devices (device_id) VALUES (?)').run(deviceId);
-  insertLearnedWordAtStatement.run(deviceId, wordKey, wordText, `-${daysAgo} days`);
+  db.prepare(`
+    INSERT INTO device_learning_memory (device_id, word_key, word_text, learned_local_date)
+    VALUES (?, ?, ?, ?)
+  `).run(deviceId, wordKey, wordText, localDate);
   return db.prepare('SELECT id FROM device_learning_memory WHERE device_id = ? AND word_key = ?')
     .get(deviceId, wordKey).id;
+}
+
+// The date generateBatch will recall for, computed the same way from the real clock:
+// before 05:00 local the night still belongs to the previous day.
+function expectedRecallDate(timeZone) {
+  const time = new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+    .format(new Date());
+  return time < '05:00' ? '2026-09-30' : TODAY;
 }
 
 function wordLearningSlot(slotId, word, contentKey = slotId) {
@@ -49,9 +57,9 @@ function learningRecallSlot(slotId, memoryId, word = 'irrelevant') {
 
 async function main() {
   // --- per-device isolation ---
-  insertLearnedWordDaysAgo('device-a', 'word-a', 'device A word', 5);
-  assert(getRecallCandidate('device-a'), 'device-a must see its own eligible word');
-  assert.strictEqual(getRecallCandidate('device-b'), null, 'device-b must not see device-a learning memory');
+  insertLearnedWord('device-a', 'word-a', 'device A word', TODAY);
+  assert(getRecallCandidate('device-a', TODAY), 'device-a must see its own word of today');
+  assert.strictEqual(getRecallCandidate('device-b', TODAY), null, 'device-b must not see device-a learning memory');
 
   // --- successful word_learning recording ---
   {
@@ -89,52 +97,46 @@ async function main() {
     assert.strictEqual(count, 0);
   }
 
-  // --- recall eligibility window ---
-  assert.strictEqual(MIN_RECALL_AGE_DAYS, 2);
-  assert.strictEqual(MAX_RECALL_AGE_DAYS, 14);
-
+  // --- night recalls today's morning word ---
   {
-    insertLearnedWordDaysAgo('device-window', 'too-young', 'too young', 1);
-    assert.strictEqual(getRecallCandidate('device-window'), null, 'a word learned less than 2 days ago must not be eligible');
+    insertLearnedWord('device-today', 'sinkretizm', 'Синкретизм — слияние разных начал', TODAY);
+    const candidate = getRecallCandidate('device-today', TODAY);
+    assert(candidate, "today's morning word must be recalled");
+    assert.strictEqual(candidate.word_text, 'Синкретизм — слияние разных начал');
+    assert.strictEqual(getRecallCandidate('device-today', TODAY).id, candidate.id, 'stable, no randomness');
   }
 
+  // --- an old word is never recalled, however old, and even when it is the only one ---
   {
-    insertLearnedWordDaysAgo('device-window-2d', 'exactly-2', 'exactly two days', 2);
-    const candidate = getRecallCandidate('device-window-2d');
-    assert(candidate, 'a word learned exactly 2 days ago must be eligible');
-    assert.strictEqual(candidate.word_key, 'exactly-2');
+    insertLearnedWord('device-old', 'break-the-ice', '"Break the ice" - to initiate conversation', '2026-09-20');
+    insertLearnedWord('device-old', 'legacy-null-date', 'legacy row without a date', null);
+    assert.strictEqual(getRecallCandidate('device-old', TODAY), null, 'an old word must never be recalled');
+    assert.strictEqual(getRecallCandidate('device-old', '2026-09-30'), null, 'yesterday must not match either');
+
+    // Today's word wins over older ones that were sitting in the queue first.
+    insertLearnedWord('device-old', 'fresh', 'fresh word of today', TODAY);
+    const candidate = getRecallCandidate('device-old', TODAY);
+    assert.strictEqual(candidate.word_key, 'fresh', 'only the word of the asked date may be chosen');
   }
 
-  {
-    insertLearnedWordDaysAgo('device-window-14d', 'exactly-14', 'exactly fourteen days', 14);
-    const candidate = getRecallCandidate('device-window-14d');
-    assert(candidate, 'a word learned exactly 14 days ago must be eligible');
-    assert.strictEqual(candidate.word_key, 'exactly-14');
-  }
+  // --- no morning word today: no candidate (the slot is dropped) ---
+  assert.strictEqual(getRecallCandidate('device-empty', TODAY), null, 'a device with no learning memory must have no recall candidate');
+  assert.strictEqual(getRecallCandidate('device-a', null), null, 'no date -> no candidate');
+  assert.strictEqual(getRecallCandidate('device-a', undefined), null, 'no date -> no candidate');
 
+  // --- recordLearnedWords stores the device-local date ---
   {
-    insertLearnedWordDaysAgo('device-window-15d', 'too-old', 'too old', 15);
-    assert.strictEqual(getRecallCandidate('device-window-15d'), null, 'a word learned more than 14 days ago must not be eligible');
-  }
-
-  // --- empty memory produces no recall ---
-  assert.strictEqual(getRecallCandidate('device-empty'), null, 'a device with no learning memory must have no recall candidate');
-
-  // --- deterministic oldest-eligible selection ---
-  {
-    insertLearnedWordDaysAgo('device-oldest', 'mid', 'mid age word', 6);
-    insertLearnedWordDaysAgo('device-oldest', 'oldest', 'oldest word', 10);
-    insertLearnedWordDaysAgo('device-oldest', 'youngest', 'youngest eligible word', 3);
-    const candidate = getRecallCandidate('device-oldest');
-    assert.strictEqual(candidate.word_key, 'oldest', 'the oldest eligible unrecalled word must be selected deterministically');
-    // Re-querying must be stable (no randomness).
-    assert.strictEqual(getRecallCandidate('device-oldest').word_key, 'oldest');
+    db.prepare('INSERT OR IGNORE INTO devices (device_id) VALUES (?)').run('device-dated');
+    recordLearnedWords('device-dated', [wordLearningSlot('w1', 'dated word')], ['w1'], [], TODAY);
+    assert.strictEqual(getRecallCandidate('device-dated', TODAY).word_text, 'dated word');
+    recordLearnedWords('device-dated', [wordLearningSlot('w2', 'undated word')], ['w2']);
+    assert.strictEqual(getRecallCandidate('device-dated', '2026-09-30'), null, 'a row without a date is never a candidate');
   }
 
   // --- successful recall becomes ineligible; failed/fallback recall does not mark recalled ---
   {
-    const memoryId = insertLearnedWordDaysAgo('device-recall-success', 'recall-me', 'recall me', 5);
-    assert(getRecallCandidate('device-recall-success'), 'word must be eligible before recall');
+    const memoryId = insertLearnedWord('device-recall-success', 'recall-me', 'recall me', TODAY);
+    assert(getRecallCandidate('device-recall-success', TODAY), 'word must be eligible before recall');
 
     // Planning/selecting alone must never mark it recalled.
     assert.strictEqual(
@@ -142,7 +144,7 @@ async function main() {
       0,
       'a candidate that was only planned (not generated) must not be marked recalled'
     );
-    assert(getRecallCandidate('device-recall-success'), 'word must still be eligible after a non-generated recall slot');
+    assert(getRecallCandidate('device-recall-success', TODAY), 'word must still be eligible after a non-generated recall slot');
 
     // Fallback (present but not in generatedSlotIds) must not mark it recalled either.
     assert.strictEqual(
@@ -150,12 +152,12 @@ async function main() {
       0,
       'a fallback-filled recall slot must not mark the word recalled'
     );
-    assert(getRecallCandidate('device-recall-success'), 'word must still be eligible after a fallback recall slot');
+    assert(getRecallCandidate('device-recall-success', TODAY), 'word must still be eligible after a fallback recall slot');
 
     // A genuinely generated+validated recall slot marks it recalled.
     const marked = recordRecalledWords('device-recall-success', [learningRecallSlot('s1', memoryId)], ['s1']);
     assert.strictEqual(marked, 1, 'a generated, validated recall slot must mark the word recalled');
-    assert.strictEqual(getRecallCandidate('device-recall-success'), null, 'a successfully recalled word must become ineligible for further recall');
+    assert.strictEqual(getRecallCandidate('device-recall-success', TODAY), null, 'a successfully recalled word must become ineligible for further recall');
 
     // At most once: recalling again must be a no-op.
     const markedAgain = recordRecalledWords('device-recall-success', [learningRecallSlot('s1', memoryId)], ['s1']);
@@ -224,11 +226,15 @@ async function main() {
   {
     const deviceId = 'learning-recall-e2e-device';
     const targetWord = 'EXACT_TARGET_RECALL_WORD';
-    const targetMemoryId = insertLearnedWordDaysAgo(deviceId, 'e2e-target', targetWord, 5);
-    insertLearnedWordDaysAgo(deviceId, 'e2e-too-old', 'UNRELATED_TOO_OLD_WORD', 20);
-    insertLearnedWordDaysAgo(deviceId, 'e2e-too-young', 'UNRELATED_TOO_YOUNG_WORD', 1);
+    const recallDate = expectedRecallDate('Asia/Almaty');
+    db.prepare('INSERT INTO devices (device_id, name, timezone, created_at) VALUES (?, ?, ?, ?)')
+      .run(deviceId, 'Test', 'Asia/Almaty', '2026-09-01 00:00:00');
+    const targetMemoryId = insertLearnedWord(deviceId, 'e2e-target', targetWord, recallDate);
+    // Older words (a legacy idiom with no date, and one from an earlier day) must stay out of the recall.
+    insertLearnedWord(deviceId, 'e2e-too-old', 'UNRELATED_TOO_OLD_WORD', '2026-09-10');
+    insertLearnedWord(deviceId, 'e2e-legacy', 'UNRELATED_LEGACY_IDIOM', null);
 
-    assert(getRecallCandidate(deviceId), 'target word must be eligible before generateBatch runs');
+    assert(getRecallCandidate(deviceId, recallDate), 'target word must be eligible before generateBatch runs');
 
     let openAiCallCount = 0;
     let capturedRequest = null;
@@ -269,11 +275,12 @@ async function main() {
     try {
       // learning_recall only competes at night now -- see isCandidateAllowedInWindow.
       const result = await generateBatch(
-        { device_id: deviceId },
+        { device_id: deviceId, timezone: 'Asia/Almaty', created_at: '2026-09-01 00:00:00' },
         'night',
         { system_language: 'en' },
         null,
-        {}
+        {},
+        { localDate: TODAY }
       );
 
       assert.strictEqual(openAiCallCount, 1, 'generating one batch must make exactly one OpenAI call');
@@ -297,18 +304,18 @@ async function main() {
       // (so the model does not repeat them), never as a recall slot's facts.
       const slotsText = JSON.stringify(payload.slots);
       assert(!slotsText.includes('UNRELATED_TOO_OLD_WORD'), 'ineligible learning history must not become a slot fact');
-      assert(!slotsText.includes('UNRELATED_TOO_YOUNG_WORD'), 'ineligible learning history must not become a slot fact');
+      assert(!slotsText.includes('UNRELATED_LEGACY_IDIOM'), 'ineligible learning history must not become a slot fact');
       assert(payload.already_seen.learned_words.includes('UNRELATED_TOO_OLD_WORD'), 'learned words go into already_seen');
 
       const updatedRow = db.prepare('SELECT recalled_at FROM device_learning_memory WHERE id = ?').get(targetMemoryId);
       assert(updatedRow.recalled_at, 'the exact recalled memory row must have recalled_at set after a real generateBatch call');
 
-      assert.strictEqual(getRecallCandidate(deviceId), null, 'the just-recalled word must no longer be returned by getRecallCandidate');
+      assert.strictEqual(getRecallCandidate(deviceId, recallDate), null, 'the just-recalled word must no longer be returned by getRecallCandidate');
 
       const untouchedOld = db.prepare('SELECT recalled_at FROM device_learning_memory WHERE device_id = ? AND word_key = ?').get(deviceId, 'e2e-too-old');
-      const untouchedYoung = db.prepare('SELECT recalled_at FROM device_learning_memory WHERE device_id = ? AND word_key = ?').get(deviceId, 'e2e-too-young');
+      const untouchedLegacy = db.prepare('SELECT recalled_at FROM device_learning_memory WHERE device_id = ? AND word_key = ?').get(deviceId, 'e2e-legacy');
       assert.strictEqual(untouchedOld.recalled_at, null, 'unrelated ineligible history must remain untouched');
-      assert.strictEqual(untouchedYoung.recalled_at, null, 'unrelated ineligible history must remain untouched');
+      assert.strictEqual(untouchedLegacy.recalled_at, null, 'unrelated ineligible history must remain untouched');
     } finally {
       Module._load = originalLoad;
       delete process.env.OPENAI_API_KEY;
@@ -323,8 +330,8 @@ async function main() {
     // Raw learning history already on file for this device -- must never be
     // dumped wholesale into the prompt. Only the single deterministically
     // selected recall candidate's word_text may appear.
-    insertLearnedWordDaysAgo('learning-e2e-device', 'unselected-1', 'UNSELECTED_HISTORY_WORD_ONE', 20); // ineligible (too old)
-    insertLearnedWordDaysAgo('learning-e2e-device', 'unselected-2', 'UNSELECTED_HISTORY_WORD_TWO', 1); // ineligible (too young)
+    insertLearnedWord('learning-e2e-device', 'unselected-1', 'UNSELECTED_HISTORY_WORD_ONE', '2026-09-10'); // an earlier day
+    insertLearnedWord('learning-e2e-device', 'unselected-2', 'UNSELECTED_HISTORY_WORD_TWO', null); // legacy row, no date
 
     let openAiCallCount = 0;
     let capturedRequest = null;
@@ -395,6 +402,100 @@ async function main() {
         .get('learning-e2e-device', 'unselected-1', 'unselected-2');
       assert(storedWord, 'a successfully generated word_learning slot must be recorded into Learning Memory');
       assert.strictEqual(storedWord.word_text, `Concrete learning payload line ${wordLine}`, 'the generated phrase is what gets remembered as the learned word');
+    } finally {
+      Module._load = originalLoad;
+      delete process.env.OPENAI_API_KEY;
+    }
+  }
+
+  // --- morning word -> night recall, through the real generateBatch ---
+  // The mock model answers every slot with a distinct line, so what the night
+  // recall slot carries can be compared with what the morning batch produced.
+  {
+    const timeZone = 'Asia/Almaty';
+    const dayDate = expectedRecallDate(timeZone);
+    const originalLoad = Module._load;
+    let lastPayload = null;
+    Module._load = function patchedLoad(request, parent, isMain) {
+      if (request === 'openai') {
+        return class MockOpenAI {
+          constructor() {
+            this.chat = {
+              completions: {
+                create: async (requestBody) => {
+                  const payload = JSON.parse(requestBody.messages[1].content);
+                  // Only the batch request itself; a later repair request must not overwrite it.
+                  if (!lastPayload) lastPayload = payload;
+                  return {
+                    choices: [{
+                      message: {
+                        content: JSON.stringify({
+                          phrases: payload.slots.map((slot, index) => ({
+                            slot_id: slot.slot_id,
+                            text: slot.type === 'word_learning' ? 'SINKRETIZM_WORD_OF_THE_DAY' : `${slot.type} line ${index + 1}`,
+                            style_id: STYLE_IDS[index],
+                          })),
+                        }),
+                      },
+                    }],
+                  };
+                },
+              },
+            };
+          }
+        };
+      }
+      return originalLoad.call(this, request, parent, isMain);
+    };
+    process.env.OPENAI_API_KEY = 'test-key-morning-night';
+
+    const newDevice = (id) => {
+      db.prepare('INSERT INTO devices (device_id, name, timezone, created_at) VALUES (?, ?, ?, ?)')
+        .run(id, 'Test', timeZone, '2026-09-01 00:00:00');
+      return { device_id: id, timezone: timeZone, created_at: '2026-09-01 00:00:00' };
+    };
+    // generateBatch's date comes from options.localDate when given; null lets it use the real clock,
+    // which is what expectedRecallDate() mirrors.
+    const run = (device, window) => { lastPayload = null; return generateBatch(device, window, { system_language: 'en' }, null, {}, { localDate: TODAY }); };
+
+    try {
+      // 1. Morning batch teaches a word; the night batch of the same day recalls exactly that word,
+      //    even though a much older idiom is sitting in the same device's memory.
+      {
+        const device = newDevice('morning-night-device');
+        insertLearnedWord(device.device_id, 'old-idiom', '"Break the ice" - to initiate conversation', '2026-09-01');
+        await run(device, 'morning');
+        const taught = db.prepare('SELECT word_text, learned_local_date FROM device_learning_memory WHERE device_id = ? AND word_key != ?')
+          .get(device.device_id, 'old-idiom');
+        assert.strictEqual(taught.word_text, 'SINKRETIZM_WORD_OF_THE_DAY', 'the morning word_learning phrase is what gets remembered');
+        assert.strictEqual(taught.learned_local_date, TODAY, "the row carries the device's local date");
+
+        // Between 00:00 and 05:00 local time the night counts as the previous day (see recallDate in
+        // generateBatch), so move the morning row to the date the night will ask for.
+        db.prepare('UPDATE device_learning_memory SET learned_local_date = ? WHERE device_id = ? AND word_key != ?')
+          .run(dayDate, device.device_id, 'old-idiom');
+        await run(device, 'night');
+        const recallSlot = lastPayload.slots.find((slot) => slot.type === 'learning_recall');
+        assert(recallSlot, 'night must carry a learning_recall slot after a morning word');
+        assert.strictEqual(recallSlot.facts.word, 'SINKRETIZM_WORD_OF_THE_DAY', "night recalls today's morning word");
+        assert(!JSON.stringify(lastPayload.slots).includes('Break the ice'), 'the old idiom is never a slot fact');
+
+        // already_seen holds the real word of the day and the old row, nothing made up.
+        const learned = lastPayload.already_seen.learned_words.split('; ');
+        assert(learned.includes('SINKRETIZM_WORD_OF_THE_DAY'), 'the word of the day is in already_seen');
+        assert(learned.every((w) => w === '"Break the ice" - to initiate conversation' || w === 'SINKRETIZM_WORD_OF_THE_DAY'),
+          'already_seen.learned_words holds only recorded words, no slot texts of other types');
+      }
+
+      // 2. Only an old word, no morning word today: the recall slot is dropped.
+      {
+        const device = newDevice('night-no-morning-device');
+        insertLearnedWord(device.device_id, 'old-idiom', '"Break the ice" - to initiate conversation', '2026-09-28');
+        insertLearnedWord(device.device_id, 'legacy', 'legacy row without a date', null);
+        await run(device, 'night');
+        assert(!lastPayload.slots.some((slot) => slot.type === 'learning_recall'), 'no morning word today -> no learning_recall slot');
+        assert(!JSON.stringify(lastPayload.slots).includes('Break the ice'), 'the old idiom is never taken instead');
+      }
     } finally {
       Module._load = originalLoad;
       delete process.env.OPENAI_API_KEY;
