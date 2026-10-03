@@ -17,6 +17,17 @@ function interestCategory(key) {
   return `${INTEREST_CATEGORY_PREFIX}${key}`;
 }
 
+// The interests a device really chose (valid keys only, circle order); [] when it chose none. Used where "all 12"
+// would be wrong (the events poster: children's shows only for a family_kids interest).
+function chosenInterestKeys(device) {
+  let raw = device && device.interests;
+  if (typeof raw === 'string') {
+    try { raw = JSON.parse(raw); } catch (err) { raw = null; }
+  }
+  const chosen = new Set((Array.isArray(raw) ? raw : []).filter((item) => typeof item === 'string').map((item) => item.trim().toLowerCase()));
+  return INTEREST_KEYS.filter((key) => chosen.has(key));
+}
+
 // The interests a device chose (devices.interests, a JSON array), only valid keys, in circle order, no
 // repeats. A device without any valid key (old survey keys, nothing chosen) gets all 12.
 function deviceInterestKeys(device) {
@@ -123,6 +134,7 @@ module.exports = {
   INTEREST_CATEGORY_PREFIX,
   interestCategory,
   deviceInterestKeys,
+  chosenInterestKeys,
   interestCircle,
   loadLastInterest,
   recordInterest,

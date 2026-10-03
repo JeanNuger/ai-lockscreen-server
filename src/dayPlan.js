@@ -167,6 +167,85 @@ function parseTagsLoose(raw) {
 
 // Categories the "number of the day" may take its fact from (a fact with a digit in it): never the date-bound,
 // poster, film, news or interest rows.
+
+// ---- the events poster (task 31) ----
+
+// Events of the poster carry their kind / audience / start time as tags (see src/afishaSearch.js).
+function tagValue(row, prefix) {
+  const tag = tagsOfRow(row).find((t) => typeof t === 'string' && t.startsWith(prefix));
+  return tag ? tag.slice(prefix.length) : '';
+}
+
+// Which events suit this person: nothing 18+ for a minor, children's shows only for an adult who chose the
+// family_kids interest, and (age unknown) neither 18+ nor children's.
+function afishaAllowed(row, age, interests) {
+  const audience = tagValue(row, 'age:') || 'all';
+  if (audience === '18+') return age === null ? false : age >= 18;
+  if (audience === 'kids') return (age !== null && age < 14) || interests.includes('family_kids');
+  return true;
+}
+
+// What each interest likes to go to: the events of these kinds come first in the list the model chooses from.
+const AFISHA_KINDS_FOR_INTEREST = {
+  family_kids: ['family'], sport_health: ['sport'], film_music: ['cinema', 'concert'],
+  books_art: ['theatre', 'exhibition'], history: ['exhibition', 'theatre'], travel: ['exhibition'],
+};
+
+function rankAfisha(rows, interests) {
+  const liked = new Set(interests.flatMap((key) => AFISHA_KINDS_FOR_INTEREST[key] || []));
+  const score = (row) => (liked.has(tagValue(row, 'kind:')) ? 1 : 0);
+  return rows.map((row, index) => ({ row, index })).sort((a, b) => score(b.row) - score(a.row) || a.index - b.index).map((x) => x.row);
+}
+
+// The events a user may be offered, allowed for their age and interests, liked kinds first.
+function afishaFor(rows, age, interests) {
+  return rankAfisha(rows.filter((row) => row.category === 'afisha' && afishaAllowed(row, age, interests)), interests);
+}
+
+const AFISHA_POOL_MAX = 10;
+
+// Two slots, two different events: the daytime events (before 17:00 or without a time) go to day 3, the evening
+// ones to day 12. When one side is empty the list is halved, so the two lists never share an event.
+function splitAfishaPools(rows) {
+  const late = (row) => {
+    const time = tagValue(row, 'time:');
+    return time !== '' && time >= '17:00';
+  };
+  let early = rows.filter((row) => !late(row));
+  let evening = rows.filter(late);
+  if (early.length === 0 || evening.length === 0) {
+    const half = Math.ceil(rows.length / 2);
+    early = rows.slice(0, half);
+    evening = rows.slice(half);
+  }
+  return { early: early.slice(0, AFISHA_POOL_MAX), evening: evening.slice(0, AFISHA_POOL_MAX) };
+}
+
+function afishaItemOf(row) {
+  return { ...bankItemOf(row), kind: tagValue(row, 'kind:'), audience: tagValue(row, 'age:') || 'all', time: tagValue(row, 'time:') };
+}
+
+// The poster slots get a list of events of the day and the city ("bank_candidates"); the model chooses one.
+function assignAfishaCandidates(slots, rows, { age, interests }) {
+  const events = afishaFor(rows, age, interests);
+  const posterSlots = slots.filter((slot) => slot.afisha);
+  const dropped = new Set();
+  const both = posterSlots.length > 1;
+  const pools = both ? splitAfishaPools(events) : { early: events.slice(0, AFISHA_POOL_MAX), evening: [] };
+  for (const slot of posterSlots) {
+    const pool = slot.type === 'afisha_evening' ? pools.evening : pools.early;
+    if (pool.length === 0) dropped.add(slot.slot_id);
+    else slot.bank_candidates = pool.map(afishaItemOf);
+  }
+  return dropped;
+}
+
+// The model's choice among the candidates of a poster slot (an id that is not one of them: the first candidate).
+function resolveCandidate(slot, modelBankId) {
+  if (!slot.bank_candidates || slot.bank_item) return;
+  slot.bank_item = slot.bank_candidates.find((item) => item.id === modelBankId) || slot.bank_candidates[0];
+}
+
 const NUMBER_CATEGORIES = new Set(['science', 'animals', 'space', 'nature', 'tech', 'unusual', 'money', 'brain',
   'tradition', 'how_it_works', 'word_origin', 'country_fact', 'city_fact']);
 
@@ -179,7 +258,7 @@ function bankItemOf(row) {
 // day from a fact with a digit - never an interest_* row, those only feed the interest slot), every fact in
 // at most one slot, and no two facts of one subject in a day. A quiz question and its answer share their fact.
 // A slot that finds nothing is dropped (nothing is invented); the answer goes with its question.
-function assignBankItems(slots, rows) {
+function assignBankItems(slots, rows, { age = null, interests = [] } = {}) {
   const used = new Set(slots.filter((slot) => slot.bank_item).map((slot) => slot.bank_item.id));
   const usedSubjects = new Set(slots.filter((slot) => slot.bank_item && slot.bank_item.subject)
     .map((slot) => String(slot.bank_item.subject).trim().toLowerCase()));
@@ -194,7 +273,7 @@ function assignBankItems(slots, rows) {
     if (row.subject) usedSubjects.add(String(row.subject).trim().toLowerCase());
     return bankItemOf(row);
   };
-  const dropped = new Set();
+  const dropped = assignAfishaCandidates(slots, rows, { age, interests });
   const pick = (slot, accept) => {
     const item = take(accept);
     if (item) slot.bank_item = item;
@@ -202,7 +281,7 @@ function assignBankItems(slots, rows) {
   };
   // 1. slots with a category of their own, in the order of the day
   for (const slot of slots) {
-    if (slot.bank && slot.bank !== 'any' && !slot.bank_item) {
+    if (slot.bank && slot.bank !== 'any' && !slot.bank_item && !slot.afisha) {
       pick(slot, (row) => row.category === slot.bank);
     }
   }
@@ -253,6 +332,7 @@ function assignBankItems(slots, rows) {
 function buildDaySlots({
   holiday, hasWeather, hasPhone, weekend = false, afishaCount = 0,
   hasCountryFacts = true, hasCityFacts = true, hasWatchRead = true, interest, learningLanguage, rows, gender,
+  age = null, interests = [],
 }) {
   const slots = [];
   let holidayReplaced = false;
@@ -263,7 +343,7 @@ function buildDaySlots({
       slots.push({
         ...def,
         type: 'afisha',
-        topic: 'Weekend poster: ONE real event from bank category afisha that suits the user\'s age (profile age) and happens today; say what, where and when. Never invent an event.',
+        topic: 'Weekend poster: choose ONE of the "candidates" (real events of today in the user\'s city) that suits the user\'s age (profile age) and interests (profile interests: family or children\'s events for family_kids, sport for sport_health, cinema and concerts for film_music, theatre and exhibitions for books_art); something on during the day. Say what, where and when; return its id in bank_id. Never invent an event.',
         bank: 'afisha',
         afisha: true,
       });
@@ -273,7 +353,7 @@ function buildDaySlots({
       slots.push({
         ...def,
         type: 'afisha_evening',
-        topic: 'Weekend poster for this evening: ONE real event from bank category afisha that suits the user\'s age (profile age), a different one from day slot 3; say what, where and when. Never invent an event.',
+        topic: 'Weekend poster for this evening: choose ONE of the "candidates" (real events of today in the user\'s city, an evening one, different from day slot 3) that suits the user\'s age (profile age) and interests (profile interests); say what, where and when; return its id in bank_id. Never invent an event.',
         bank: 'afisha',
         afisha: true,
       });
@@ -313,7 +393,7 @@ function buildDaySlots({
     }
     slots.push({ ...def });
   }
-  const assigned = Array.isArray(rows) ? assignBankItems(slots, rows) : slots;
+  const assigned = Array.isArray(rows) ? assignBankItems(slots, rows, { age, interests }) : slots;
   assigned.holidayReplaced = holidayReplaced;
   return assigned;
 }
@@ -371,7 +451,7 @@ FACTS
 - Word of the day: morning slot "word_of_day" teaches one modern, useful word of the user's language that widens an adult's vocabulary, with its meaning (a word people really use today; never archaic, obsolete, dialect or slang like "паче" or "ибо"); return the bare word in "word_of_day". Night slot "word_recall" asks "do you remember what «word» means?" and night slot "word_answer" answers "Right: word — meaning" (both in the user's language, naming the same word).
 - Foreign language: "learning_language" is the language the user learns. Morning slot "foreign_word" teaches one useful intermediate (B1-B2) word of it, for an adult, with the translation into the user's language: never a beginner word such as hello, thanks, cat, water or a number; return the bare foreign word in "foreign_word". Evening slot "foreign_recall" asks "do you remember how to say «translation» in <language>?" (the translation, not the foreign word, and no answer) and evening slot "foreign_answer" answers "Right: foreign word" - both in the user's language, both about the same word. Never a word from "learned_foreign_words".
 - Interest slot: the item in "bank_item" is the fact of the day for the user's interest ("interest"); retell it, return its id. Money and business: only facts and concepts, never advice to buy, sell, invest or save. Sport and health: only facts, never medical advice, treatment, diets or "see a doctor".
-- Poster slots (weekends only, types "afisha" and "afisha_evening"): choose ONE event of bank category afisha that fits the user's age (profile age: no children's shows for adults, nothing 18+ for minors); name what, where and when; never invent an event; return its id; the two poster slots use different events.
+- Poster slots (weekends only, types "afisha" and "afisha_evening"): the slot has "candidates", real events of today in the user's city (each with id, text, kind, audience). Choose ONE of them that fits the user's age (profile age) and interests (profile interests: family or children's events for family_kids, sport for sport_health, cinema and concerts for film_music, theatre and exhibitions for books_art), return its id in bank_id, and name what, where and when in your own words; never invent an event or add details that are not in the candidate. The first poster slot is about today and what is on during the day, the second one is something for this evening; the two slots have different candidates.
 - Country, city and "what to watch or read" slots use only the bank items given for this user's country and city; a film, series or book keeps its title as people of that country know it, translated or transliterated into the user's language when it has a well-known one.
 - "already_seen" (last 3 days) and "learned_words" are what the user already read and learned: do not repeat those facts, jokes, ideas or words, even in different words.
 - Slots with "ref" refer to an earlier slot of this day. The tip for men or women (type "gender_tip") is really about being a man or a woman (profile gender), never a general lifehack and never a repeat of the morning lifehack.
@@ -469,6 +549,8 @@ function buildDayPayload({
   const personalDay = dateContext ? planner.personalDayNumberForBirthDate(device.birth_date, dateContext.date) : null;
   if (personalDay) profile.numerology = { personal_day_number: personalDay };
   if (device.city_name) profile.city = device.city_name;
+  const chosen = rotation.chosenInterestKeys(device);
+  if (chosen.length > 0) profile.interests = chosen;
   if (countryCode) profile.country = countryCode;
 
   const payload = {
@@ -498,6 +580,7 @@ function buildDayPayload({
       if (slot.bank) out.bank = slot.bank;
       if (slot.ref) out.ref = slot.ref;
       if (slot.bank_item) out.bank_item = slot.bank_item;
+      if (slot.bank_candidates) out.candidates = slot.bank_candidates.map((c) => ({ id: c.id, text: c.text, kind: c.kind, audience: c.audience }));
       if (slot.interest) out.interest = slot.interest;
       return out;
     }),
@@ -712,10 +795,12 @@ function assignedRows(slots, rows) {
   const out = [];
   const seen = new Set();
   for (const slot of slots) {
-    const id = slot.bank_item && slot.bank_item.id;
-    if (id && !seen.has(id) && byId.has(id)) {
-      seen.add(id);
-      out.push(byId.get(id));
+    const ids = (slot.bank_candidates || [slot.bank_item]).map((item) => item && item.id);
+    for (const id of ids) {
+      if (id && !seen.has(id) && byId.has(id)) {
+        seen.add(id);
+        out.push(byId.get(id));
+      }
     }
   }
   return out;
@@ -801,6 +886,9 @@ async function generateDay(input) {
   const localDate = dateContext ? dateContext.date : null;
   const userRows = bankRowsForUser(usableRows, { countryCode, cityName: device.city_name, date: localDate });
   const countOf = (category) => userRows.filter((row) => row.category === category).length;
+  const age = computeAge(device.birth_date);
+  const interestsChosen = rotation.chosenInterestKeys(device);
+  const afishaCount = afishaFor(userRows, age, interestsChosen).length;
   // The interest of the day: the next one of the device's circle that still has a fact nobody showed it.
   const interest = rotation.pickInterestOfDay(device, (key) => usableRows
     .find((row) => row.category === rotation.interestCategory(key)) || null);
@@ -811,7 +899,7 @@ async function generateDay(input) {
     hasWeather: Boolean(weatherBands),
     hasPhone: Boolean(phoneYesterday),
     weekend: rotation.isWeekendDate(localDate),
-    afishaCount: countOf('afisha'),
+    afishaCount,
     hasCountryFacts: countOf('country_fact') > 0,
     hasCityFacts: countOf('city_fact') > 0,
     hasWatchRead: countOf('watch_read') > 0,
@@ -819,6 +907,8 @@ async function generateDay(input) {
     learningLanguage: learning,
     rows: userRows,
     gender: device.gender || '',
+    age,
+    interests: interestsChosen,
   });
   const slotsById = new Map(slots.map((slot) => [slot.slot_id, slot]));
 
@@ -876,6 +966,7 @@ async function generateDay(input) {
     let reason = rejectionReason(text, slot, languageCode, archive);
     // A foreign word this device has already learned is never taught again.
     if (!reason && item.slot_id === FOREIGN_SLOTS.teach) reason = foreignProblem(words[FOREIGN_SLOTS.teach]);
+    resolveCandidate(slot, typeof item.bank_id === 'string' ? item.bank_id : '');
     const entry = { text, bank_id: bankIdOfSlot(slot), echoes: typeof item.echoes === 'string' ? item.echoes : '' };
     if (reason) rejected[item.slot_id] = { ...entry, reason };
     else accepted[item.slot_id] = entry;
@@ -908,6 +999,7 @@ async function generateDay(input) {
         const text = item.text.trim();
         let reason = rejectionReason(text, slot, languageCode, archive);
         if (!reason && slotId === FOREIGN_SLOTS.teach) reason = foreignProblem(words[FOREIGN_SLOTS.teach]);
+        resolveCandidate(slot, typeof item.bank_id === 'string' ? item.bank_id : '');
         delete accepted[slotId];
         if (reason) {
           rejected[slotId] = { text, bank_id: bankIdOfSlot(slot), echoes: item.echoes || '', reason };

@@ -391,15 +391,9 @@ async function main() {
     const later = (await generate(device, '2026-10-24')).result; // Saturday, events were only built for the Saturday before
     assert.strictEqual(typeOf(later, 'd3'), 'country_fact', 'old events never reach another weekend');
 
-    // the bank asks for the poster on Fridays only, for the cities of the active devices
+    // the common bank never asks for the poster any more, not even on Fridays (src/afishaSearch.js does, see afisha.test.js)
     db.prepare('INSERT INTO day_plans (device_id, local_date, phrases, source) VALUES (?, ?, ?, ?)').run('dev-poster', '2026-10-15', '[]', 'openai');
-    const fridayPrompt = bank.buildBankPrompt('2026-10-16', ['KZ'], [], { countries: ['KZ'], cities: [{ name: 'Astana', country: 'KZ' }, { name: 'Berlin', country: 'DE' }] });
-    assert(fridayPrompt.includes('afisha (REQUIRED today'), 'Friday asks for the events');
-    assert(fridayPrompt.includes('2026-10-17') && fridayPrompt.includes('2026-10-18'), 'for Saturday and Sunday');
-    assert(fridayPrompt.includes('Astana (KZ), Berlin (DE)'), 'in the cities of the active devices');
-    assert(/theatre, cinema, concerts, sport, stand-up/.test(fridayPrompt));
-    assert(/never invent/.test(fridayPrompt));
-    for (const day of ['2026-10-12', '2026-10-13', '2026-10-14', '2026-10-15', '2026-10-17', '2026-10-18']) {
+    for (const day of ['2026-10-12', '2026-10-13', '2026-10-14', '2026-10-15', '2026-10-16', '2026-10-17', '2026-10-18']) {
       const prompt = bank.buildBankPrompt(day, ['KZ'], [], { countries: ['KZ'], cities: [{ name: 'Astana', country: 'KZ' }] });
       assert(!prompt.includes('afisha'), `${day} does not ask for events`);
     }
@@ -468,7 +462,8 @@ async function main() {
       { category: 'watch_read', country: 'global', text: 'A world film.' },
       { category: 'afisha', city: 'Astana', date: 'someday', text: 'An event with no country.' },
     ]), '2026-10-16');
-    assert.deepStrictEqual(rows.map((r) => r.tags), [['DE', 'city:berlin'], ['KZ', 'city:astana', 'date:2026-10-17'], [], ['global'], ['global', 'city:astana']]);
+    // (poster rows of the common bank are ignored: the poster has its own search)
+    assert.deepStrictEqual(rows.map((r) => r.tags), [['DE', 'city:berlin'], [], ['global']]);
     assert.strictEqual(bank._test.parseBankItems('[{"category":"interest_nonsense","text":"x"}]', '2026-10-16').rows.length, 0, 'an unknown interest is dropped');
 
     // the log: the number of records of every category (the price line is OPENAI_USAGE scope=daily_bank)
@@ -477,8 +472,8 @@ async function main() {
     console.log = (...a) => lines.push(a.join(' '));
     bank._test.logBankCategoryCounts(rows, '2026-10-16');
     console.log = log;
-    assert(lines[0].startsWith('BANK_CATEGORY_COUNTS total=5 '));
-    assert(/city_fact=1/.test(lines[0]) && /afisha=1|afisha=2/.test(lines[0]) && /interest_food=1/.test(lines[0]) && /interest_auto=0/.test(lines[0]) && /country_fact=0/.test(lines[0]));
+    assert(lines[0].startsWith('BANK_CATEGORY_COUNTS total=3 '));
+    assert(/city_fact=1/.test(lines[0]) && !/afisha=/.test(lines[0]) && /interest_food=1/.test(lines[0]) && /interest_auto=0/.test(lines[0]) && /country_fact=0/.test(lines[0]));
     lines.length = 0;
     console.log = (...a) => lines.push(a.join(' '));
     bank._test.logBankCategoryCounts(rows, '2026-10-15'); // a Thursday: events are not asked for
