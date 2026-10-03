@@ -38,6 +38,8 @@ const FOREIGN_SLOTS = { teach: 'm10', recall: 'e2', answer: 'e3' };
 const WORD_TRIOS = [WORD_SLOTS, FOREIGN_SLOTS];
 const REPAIR_EXEMPT = new Set(['greeting_name', 'goodnight_care']);
 // A quiz question holds the question and 2-3 options, the answer a full phrase with its explanation: up to MAX_LEN.
+// A phrase still too long after the first repair call gets one more (see generateDay).
+const MAX_REPAIR_ROUNDS = 2;
 const QUIZ_MAX_CHARS = 60; // the limit is 70 (MAX_LEN); the model aims lower, it miscounts the options
 // Beginner words that are no "useful intermediate word" (task 28): never taught as the foreign word, in any
 // of the ten languages. Compared lower-cased and trimmed.
@@ -646,7 +648,7 @@ async function repairRejected({ rejected, accepted, slotsById, languageName, pay
   const messages = [
     {
       role: 'system',
-      content: `Rewrite the listed lock-screen phrases in ${languageName}. For each slot with "rejection_reason": fix exactly that problem and keep the meaning (too_long: shorten to max_chars, drop details, never cut the end of a thought; repeat_of_sent: say it differently; wrong_language: write it in the right language). A slot with "keep_consistent_with_original_text" is the other half of a pair: rewrite it to fit its partner. Do not repeat original_text. Facts only from the given bank_item/bank, never invented. A "foreign_recall" asks "do you remember how to say «translation» in <language>?" and its "foreign_answer" says "Right: <foreign word>"; never a word from learned_foreign_words. Return JSON: phrases (one per slot, with slot_id, text, bank_id, echoes), word_of_day (the word of the day if its teaching slot is included, else "") and foreign_word (the bare foreign word if its teaching slot is included, else "").`,
+      content: `Rewrite the listed lock-screen phrases in ${languageName}. For each slot with "rejection_reason": fix exactly that problem and keep the meaning (too_long: shorten to 55-60 characters, never more than max_chars, drop details, never cut the end of a thought; repeat_of_sent: say it differently; wrong_language: write it in the right language). A slot with "keep_consistent_with_original_text" is the other half of a pair: rewrite it to fit its partner. Do not repeat original_text. Facts only from the given bank_item/bank, never invented. A "foreign_recall" asks "do you remember how to say «translation» in <language>?" and its "foreign_answer" says "Right: <foreign word>"; never a word from learned_foreign_words. Return JSON: phrases (one per slot, with slot_id, text, bank_id, echoes), word_of_day (the word of the day if its teaching slot is included, else "") and foreign_word (the bare foreign word if its teaching slot is included, else "").`,
     },
     {
       role: 'user',
@@ -881,14 +883,20 @@ async function generateDay(input) {
   // A slot the model skipped entirely is missing, not rejected: it is dropped (no repair for it).
   const missing = slots.filter((slot) => !answered.has(slot.slot_id)).map((slot) => slot.slot_id);
 
-  // ONE repair call for everything rejected (too long, repeat, wrong script) plus the other half of
-  // its pair, as the plan asks. Whatever is still bad afterwards is dropped.
+  // Repair: one call for everything rejected (too long, repeat, wrong script) plus the other half of its pair.
+  // A phrase that is still longer than the limit after it gets ONE more call (round 2), only for those phrases
+  // and their pair (quiz question + answer, word recall + answer). Whatever is still bad afterwards is dropped.
   let repair = null;
-  if (Object.keys(rejected).length > 0) {
-    const originalRejectedCount = Object.keys(rejected).length;
+  for (let round = 1; round <= MAX_REPAIR_ROUNDS; round += 1) {
+    const pending = round === 1 ? rejected : Object.fromEntries(
+      Object.entries(rejected).filter(([, entry]) => String(entry.reason).startsWith('too_long')));
+    if (Object.keys(pending).length === 0) break;
+    const originalRejectedCount = Object.keys(pending).length;
     try {
-      const outcome = await repairRejected({ rejected, accepted, slotsById, languageName, payloadBase, languageCode, archive });
-      repair = { rejected: originalRejectedCount, requested: outcome.requested, usage: outcome.usage, ms: outcome.ms };
+      const outcome = await repairRejected({ rejected: pending, accepted, slotsById, languageName, payloadBase, languageCode, archive });
+      repair = round === 1
+        ? { rejected: originalRejectedCount, requested: outcome.requested, usage: outcome.usage, ms: outcome.ms, rounds: 1 }
+        : { ...repair, rounds: 2, second: { rejected: originalRejectedCount, requested: outcome.requested, usage: outcome.usage, ms: outcome.ms } };
       if (outcome.word && slotsById.has(WORD_SLOTS.teach) && (rejected[WORD_SLOTS.teach] || outcome.fixed.has(WORD_SLOTS.teach))) {
         words[WORD_SLOTS.teach] = outcome.word;
       }
@@ -910,7 +918,8 @@ async function generateDay(input) {
       }
     } catch (err) {
       console.error(`OPENAI_ATTEMPT scope=day_repair result=error err_name=${err.name || 'Error'} err_status=${err.status || 'none'}`);
-      repair = { rejected: originalRejectedCount, error: true };
+      repair = round === 1 ? { rejected: originalRejectedCount, error: true } : { ...repair, second: { error: true } };
+      break;
     }
   }
 
