@@ -187,12 +187,17 @@ function testEvergreenSlotsCarryNoBankFacts() {
 
 function testBankCollectsTheV3Categories() {
   // Bank v3: date-bound items plus fresh facts for the whole-day call; jokes, thoughts and wishes stay out.
+  const interestCategories = ['auto', 'books_art', 'family_kids', 'film_music', 'food', 'history', 'money_business',
+    'nature_animals', 'science_space', 'sport_health', 'technology', 'travel'].map((key) => `interest_${key}`);
   assert.deepStrictEqual([...BANK_CATEGORIES].sort(), [
-    'animals', 'born_today', 'brain', 'city_astana', 'country_kz', 'good_news', 'holiday', 'how_it_works', 'money',
-    'nature', 'on_this_day', 'quote', 'science', 'space', 'tech', 'tradition', 'unusual', 'word_origin',
-  ]);
+    'afisha', 'animals', 'born_today', 'brain', 'city_astana', 'city_fact', 'country_fact', 'country_kz', 'good_news', 'holiday',
+    'how_it_works', ...interestCategories, 'money', 'nature', 'on_this_day', 'quote', 'science', 'space', 'tech', 'tradition',
+    'unusual', 'watch_read', 'word_origin',
+  ].sort());
+  // 2026-09-30 is a Wednesday: no weekend events asked for; the old Kazakhstan-only names are accepted but not asked for.
   const prompt = bankTest.buildBankPrompt('2026-09-30', ['KZ'], []);
-  assert(prompt.includes(`one of [${BANK_CATEGORIES.join(', ')}]`), 'the prompt lists every bank category');
+  const asked = BANK_CATEGORIES.filter((c) => !['afisha', 'country_kz', 'city_astana'].includes(c));
+  assert(prompt.includes(`one of [${asked.join(', ')}]`), 'the prompt lists every bank category it asks for');
   for (const notBank of ['humor', 'wish', 'horoscope']) {
     assert(!new RegExp(`\b${notBank}\b`).test(prompt.split('FRESH VERIFIED FACTS')[1] || ''), `${notBank} must not be requested in the bank prompt`);
   }

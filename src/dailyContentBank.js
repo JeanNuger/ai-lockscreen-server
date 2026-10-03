@@ -1,6 +1,7 @@
 const db = require('./db');
 const { countryForTimezone } = require('./timezoneCountry');
 const { loadShownFacts, isFactShown } = require('./sentPhrases');
+const { INTEREST_KEYS, interestCategory, isFridayDate, isWeekendDate } = require('./dayRotation');
 
 // Fixed category set for daily_content_bank rows (bank v3, whole-day scheme).
 // The bank is built once a day with web search and holds EVERY fact the whole-day
@@ -18,15 +19,23 @@ const BANK_CATEGORIES = [
   'nature',
   'tech',
   'unusual',
-  'country_kz',
-  'city_astana',
   'money',
   'brain',
   'word_origin',
   'tradition',
   'how_it_works',
   'quote',
+  // Day scheme v2 (task 27): facts per country and per city of the active devices, real films/series/books
+  // per country, the weekend events of the cities (built on Fridays only) and the facts of the 12 interests.
+  'country_fact',
+  'city_fact',
+  'watch_read',
+  'afisha',
+  ...INTEREST_KEYS.map(interestCategory),
 ];
+// country_kz / city_astana are the old Kazakhstan-only names: still accepted (rows of the last 45 days), no longer asked for.
+const LEGACY_PLACE_CATEGORIES = ['country_kz', 'city_astana'];
+BANK_CATEGORIES.push(...LEGACY_PLACE_CATEGORIES);
 // The four categories the old /batch planner (slotPlanner.js) knows how to use. The old /batch
 // endpoint stays alive for the installed app, so it keeps selecting only these.
 const LEGACY_BANK_CATEGORIES = ['holiday', 'on_this_day', 'born_today', 'good_news'];
@@ -35,15 +44,18 @@ const LEGACY_BANK_CATEGORIES = ['holiday', 'on_this_day', 'born_today', 'good_ne
 // Read at call time so a test can override them.
 const BANK_MODEL_DEFAULT = 'gpt-6.1-sol';
 const BANK_EFFORT_DEFAULT = 'low';
-const BANK_RETENTION_DAYS = 45;
+// 60 days: the subjects of the last 60 days go into the bank prompt as "do not take these objects".
+const BANK_RETENTION_DAYS = 65;
+const BANK_SUBJECTS_HISTORY_DAYS = 60;
+const BANK_SUBJECTS_HISTORY_MAX = 700;
 const BANK_FACTS_HISTORY_DAYS = 30;
 const BANK_FACTS_HISTORY_MAX = 400;
 const BANK_TIMEZONE = 'Asia/Almaty';
 const DATE_SENSITIVE_CATEGORIES = new Set(['holiday', 'on_this_day', 'born_today']);
 
 const insertBankItemStatement = db.prepare(`
-  INSERT INTO daily_content_bank (bank_date, category, content_text, tags)
-  VALUES (?, ?, ?, ?)
+  INSERT INTO daily_content_bank (bank_date, category, content_text, tags, subject)
+  VALUES (?, ?, ?, ?, ?)
 `);
 
 const deleteBankItemsForDateStatement = db.prepare(`
@@ -72,7 +84,7 @@ const selectDateSensitiveBankDatesStatement = db.prepare(`
 const replaceBankItemsForDate = db.transaction((bankDate, rows) => {
   deleteBankItemsForDateStatement.run(bankDate);
   for (const row of rows) {
-    insertBankItemStatement.run(bankDate, row.category, row.content_text, JSON.stringify(row.tags));
+    insertBankItemStatement.run(bankDate, row.category, row.content_text, JSON.stringify(row.tags), row.subject || null);
   }
 });
 
@@ -81,12 +93,17 @@ const replaceBankItemsForDates = db.transaction((bankDates, rows) => {
     deleteBankItemsForDateStatement.run(bankDate);
   }
   for (const row of rows) {
-    insertBankItemStatement.run(row.bank_date, row.category, row.content_text, JSON.stringify(row.tags));
+    insertBankItemStatement.run(row.bank_date, row.category, row.content_text, JSON.stringify(row.tags), row.subject || null);
   }
 });
 
 const selectBankRowsForDateStatement = db.prepare(`
-  SELECT id, category, content_text, tags FROM daily_content_bank WHERE bank_date = ?
+  SELECT id, bank_date, category, content_text, tags, subject FROM daily_content_bank WHERE bank_date = ?
+`);
+
+const selectAfishaRowsStatement = db.prepare(`
+  SELECT id, bank_date, category, content_text, tags, subject FROM daily_content_bank
+  WHERE category = 'afisha' AND bank_date >= ? AND bank_date <= ?
 `);
 
 const selectShownCategoriesStatement = db.prepare(`
@@ -203,12 +220,120 @@ function collectHolidayCountryCodes() {
   return result;
 }
 
+// Countries and cities of the devices that were active lately (a day plan or a batch in the last
+// ACTIVE_DEVICE_DAYS days): the bank asks for country facts, city facts, films/books and the weekend
+// events for exactly these, not only Kazakhstan and Astana (which stay in as the home market).
+const ACTIVE_DEVICE_DAYS = 14;
+const MAX_FACT_COUNTRIES = 12;
+const MAX_FACT_CITIES = 10;
+
+const selectActiveDevicesStatement = db.prepare(`
+  SELECT d.timezone, d.city_name, d.city_country_code FROM devices d
+  WHERE EXISTS (SELECT 1 FROM day_plans p WHERE p.device_id = d.device_id AND p.created_at >= datetime('now', ?))
+     OR EXISTS (SELECT 1 FROM content_batches b WHERE b.device_id = d.device_id AND b.delivered_at >= datetime('now', ?))
+`);
+
+function cityTag(name) {
+  return `city:${String(name || '').trim().toLowerCase()}`;
+}
+
+// -> { countries: ['KZ', ...], cities: [{ name, country }] }, most devices first, Kazakhstan / Astana always in.
+function collectActiveLocations({ maxCountries = MAX_FACT_COUNTRIES, maxCities = MAX_FACT_CITIES } = {}) {
+  const countryCounts = new Map([['KZ', Number.MAX_SAFE_INTEGER]]);
+  const cityCounts = new Map([[`${cityTag('Astana')}|KZ`, { name: 'Astana', country: 'KZ', count: Number.MAX_SAFE_INTEGER }]]);
+  const window = `-${ACTIVE_DEVICE_DAYS} days`;
+  for (const device of selectActiveDevicesStatement.all(window, window)) {
+    const country = resolveDeviceCountryCode(device);
+    if (country) {
+      countryCounts.set(country, (countryCounts.get(country) || 0) + 1);
+    }
+    const name = typeof device.city_name === 'string' ? device.city_name.trim() : '';
+    if (name && country) {
+      const key = `${cityTag(name)}|${country}`;
+      const entry = cityCounts.get(key) || { name, country, count: 0 };
+      entry.count += 1;
+      cityCounts.set(key, entry);
+    }
+  }
+  const countries = [...countryCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, maxCountries).map(([code]) => code);
+  const cities = [...cityCounts.values()].sort((a, b) => b.count - a.count).slice(0, maxCities)
+    .map(({ name, country }) => ({ name, country }));
+  return { countries, cities };
+}
+
 const selectRecentBankTextsStatement = db.prepare(`
   SELECT content_text FROM daily_content_bank
   WHERE bank_date >= ? AND bank_date < ?
   ORDER BY bank_date DESC, id DESC
   LIMIT ?
 `).pluck();
+
+const selectRecentSubjectsStatement = db.prepare(`
+  SELECT subject FROM daily_content_bank
+  WHERE bank_date >= ? AND bank_date < ? AND subject IS NOT NULL AND subject != ''
+  GROUP BY lower(subject)
+  ORDER BY max(bank_date) DESC
+  LIMIT ?
+`).pluck();
+
+// What each interest is about, in plain words (task 29): the bank prompt asks for facts clearly about this
+// theme, for an ordinary adult. The key is the interest key of the app.
+const INTEREST_BRIEFS = {
+  technology: 'what people use every day: phones, apps, the internet, Wi-Fi, cameras, payments, smart devices, everyday gadgets (not chips, protocols or data-centre details)',
+  science_space: 'discoveries about nature, the human world and the universe that an ordinary person finds wondrous: planets, stars, space missions, how life works',
+  history: 'real stories of people, cities, inventions and events of the past that are fun to retell',
+  nature_animals: 'wild animals, pets, plants, forests, oceans, weather and landscapes, in a way anyone can picture',
+  sport_health: 'sport, athletes, records, training and healthy everyday habits (walking, water, stretching, sleep habits in plain words); NOT brain anatomy, sleep phases or medicine',
+  food: 'dishes, ingredients, drinks, national cuisines, cooking at home, where a food comes from',
+  travel: 'places worth visiting, how people travel, cities, landmarks, trains, planes, hotels, journey customs',
+  money_business: 'how money, prices, shops, famous companies, jobs and everyday economics work, as explained concepts and facts (no financial terms of the trade)',
+  family_kids: 'children, parents, family life, games and learning with kids, funny and useful things about growing up',
+  film_music: 'films, series, actors, directors, songs, singers, composers and instruments that people know',
+  books_art: 'writers, books, poems, painters, museums, famous works of art and the stories behind them',
+  auto: 'cars and whatever people ride or drive: cars, motorbikes, bicycles, scooters, trains, buses, taxis; NOT forklifts, tractors or industrial machines',
+};
+
+// The worn-out "amazing facts" every pupil has read (task 28): never asked for, and dropped when the model
+// brings them anyway. `name` goes into the prompt, `pattern` matches the subject or the text of an item.
+const STOPLIST_TOPICS = [
+  { name: 'octopus (three hearts, blue blood)', pattern: /\bocto(pus|pi|puses)\b/i },
+  { name: 'gallium melting in a hand', pattern: /\bgallium\b/i },
+  { name: 'honey that never spoils', pattern: /\bhoney\b.*\b(spoil|expire|edible|3,?000)|\b(spoil|expire)\w*\b.*\bhoney\b/i },
+  { name: 'a day on Venus longer than its year', pattern: /\bvenus\b.*\b(day|year|rotat)/i },
+  { name: 'wombats and cube-shaped droppings', pattern: /\bwombat/i },
+  { name: 'butterflies tasting with their feet', pattern: /\bbutterfl\w+\b.*\b(taste|feet|legs)/i },
+  { name: 'bananas are berries', pattern: /\bbananas?\b.*\bberr/i },
+  { name: 'Great Wall visible from space', pattern: /\bgreat wall\b.*\bspace/i },
+  { name: 'goldfish three-second memory', pattern: /\bgoldfish\b/i },
+  { name: 'we use only 10% of the brain', pattern: /\b10 ?(%|percent)\b.*\bbrain|\bbrain\b.*\b10 ?(%|percent)/i },
+  { name: 'lightning never strikes twice', pattern: /\blightning\b.*\b(twice|same place)/i },
+  { name: 'sharks older than trees', pattern: /\bsharks?\b.*\b(older than|before) trees/i },
+  { name: 'Eiffel Tower growing in summer', pattern: /\beiffel\b.*\b(grow|taller|expand)/i },
+  { name: 'flamingos pink from their food', pattern: /\bflamingo/i },
+  { name: 'hot water freezing faster (Mpemba)', pattern: /\bmpemba\b|\bhot water\b.*\bfreez\w*\b.*\bfaster/i },
+  { name: 'ice floating on water', pattern: /\bice floats\b/i },
+  { name: 'Neptune found by mathematics', pattern: /\bneptune\b.*\b(math|predicted|calculat)/i },
+  { name: 'cows with best friends', pattern: /\bcows?\b.*\bbest friend/i },
+  { name: 'koalas and fingerprints', pattern: /\bkoalas?\b.*\bfingerprint/i },
+  { name: 'tardigrades surviving everything', pattern: /\btardigrade/i },
+];
+
+function normalizeSubject(subject) {
+  return String(subject || '').normalize('NFKC').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+// Subjects of the bank of the last BANK_SUBJECTS_HISTORY_DAYS days (not bankDate itself), newest first.
+function loadRecentSubjects(bankDate, days = BANK_SUBJECTS_HISTORY_DAYS, limit = BANK_SUBJECTS_HISTORY_MAX) {
+  const from = addDaysToDateString(bankDate, -days);
+  if (!from) {
+    return [];
+  }
+  return selectRecentSubjectsStatement.all(from, bankDate, limit);
+}
+
+function stoplistHit(subject, text) {
+  return STOPLIST_TOPICS.find((topic) => topic.pattern.test(String(subject || '')) || topic.pattern.test(String(text || ''))) || null;
+}
 
 const pruneOldBankStatement = db.prepare(`
   DELETE FROM daily_content_bank WHERE bank_date < ?
@@ -224,22 +349,40 @@ function loadRecentBankFacts(bankDate, days = BANK_FACTS_HISTORY_DAYS, limit = B
   return selectRecentBankTextsStatement.all(from, bankDate, limit);
 }
 
-function buildBankPrompt(bankDate, countryCodes = collectHolidayCountryCodes(), recentFacts = loadRecentBankFacts(bankDate)) {
+function buildBankPrompt(bankDate, countryCodes = collectHolidayCountryCodes(), recentFacts = loadRecentBankFacts(bankDate), locations = collectActiveLocations(), recentSubjects = loadRecentSubjects(bankDate)) {
   const otherCountries = countryCodes.filter((code) => code !== 'KZ');
+  // The weekend events are searched on Fridays only (for Saturday and Sunday); the other days do not ask for them.
+  const friday = isFridayDate(bankDate);
+  const askedCategories = BANK_CATEGORIES.filter((category) => !LEGACY_PLACE_CATEGORIES.includes(category) && (friday || category !== 'afisha'));
+  const cityList = locations.cities.map((city) => `${city.name} (${city.country})`).join(', ');
+  const saturday = addDaysToDateString(bankDate, 1);
+  const sunday = addDaysToDateString(bankDate, 2);
+  const afishaBlock = friday
+    ? `\n- afisha (REQUIRED today, and only today): for EACH of these cities: ${cityList}: 4 real events happening on ${saturday} (Saturday) or ${sunday} (Sunday): theatre, cinema, concerts, sport, stand-up. Only events you found in a search result with a venue and a date; never invent. Fields: country = the city's ISO code, city = the city name exactly as written in the list, date = the event day YYYY-MM-DD, text = title, venue, date and (if known) the age limit, at most 20 words. If a city has no verifiable events, skip it.`
+    : '';
   return `Search the web (today is ${bankDate}) and build a content bank for ${bankDate} for a phone lock-screen app.
-Return STRICTLY a JSON array (no wrapper, no markdown) of objects: {"category": one of [${BANK_CATEGORIES.join(', ')}], "country": ISO code or "global" or "", "text": "..."}.
-This is a one-shot automated job: never ask questions or propose stages, just do the work and return the final array. Use as many searches as needed to cover every category; never output placeholder or "no data" items. Every "text" is ONE short self-contained sentence in English, at most 12 words, with no invented numbers: every number, name and date must be confirmed by a search result. If you cannot verify it, leave it out. Do not put links or citations inside the text.
+Return STRICTLY a JSON array (no wrapper, no markdown) of objects: {"category": one of [${askedCategories.join(', ')}], "country": ISO code or "global" or "", "city": city name or "", "date": "YYYY-MM-DD" or "", "subject": "...", "text": "..."}.
+"subject" is the main object of the item in one to three English words (an animal, element, planet, person, place, word, event: "tree frog", "gallium", "Venus", "Abai"); every item has one, no two items of this run share a subject.
+This is a one-shot automated job: never ask questions or propose stages, just do the work and return the final array. Use as many searches as needed to cover every category; never output placeholder or "no data" items. Every "text" is ONE short self-contained sentence in English, at most 12 words${friday ? ' (afisha: see below)' : ''}, with no invented numbers: every number, name and date must be confirmed by a search result. If you cannot verify it, leave it out. Do not put links or citations inside the text.
 
 DATE-BOUND (all for ${bankDate} exactly):
 - holiday (REQUIRED): (a) a holiday of Kazakhstan on ${bankDate} — professional, national or commemorative (country "KZ"); (b) an international day of the UN or UNESCO on ${bankDate} (country "global"). Keep searching for both (Kazakh sources, UN/UNESCO calendars). If after thorough search one truly does not exist, output an item with category holiday, country "KZ" or "global", and text starting "NONE:" saying so — but search first. Also, for each of these other countries, its own official or widely observed holiday on ${bankDate}, if any (never invent): ${otherCountries.join(', ')}.
 - on_this_day: 6 real events that happened on ${bankDate} in past years, start the text with the year. Different countries; at least one from Kazakhstan or Central Asia and at least one from Europe or Asia; not only the USA.
 - born_today: 6 real people born on ${bankDate}, give the year of birth. Different countries; at least one from Kazakhstan or Central Asia and at least one from Europe or Asia; not only the USA.
-- good_news: 4 genuinely positive, verifiable developments from the last few days.
+- good_news: 4 genuinely positive, verifiable stories from the last few days, each a clear human story or result: who did what and what came of it (a person saved, built, won, cured, restored, invented something). Written as the story itself, never as a report about a report ("in messages from ...", "it is noted that ...") and never vague.${afishaBlock}
 FRESH VERIFIED FACTS: little-known and surprising, NOT school-level (no "octopuses have three hearts", no "ice floats", no "Neptune was found by maths" — the kind every pupil knows). Prefer facts a smart adult would say "I didn't know that" about.
+FOR AN ORDINARY ADULT: every fact is understandable without any speciality and is one you would retell to a friend over dinner; plain words, no narrow terminology or engineering detail (not "ECC memory", not "Reed-Solomon codes", not electric forklifts, not brain anatomy).
 - science 6, animals 6, space 5, nature 5, tech 5, unusual 5, money 4 (money explained simply), brain 4 (brain and psychology, well-established findings only), word_origin 4 (where a word came from, say which language), tradition 4 (unusual tradition of one country, name it), how_it_works 4 (how a familiar thing works), quote 4 (a real short quote with its author, at most 12 words besides the author).
-- country_kz 5: facts about Kazakhstan. city_astana 5: facts about Astana. Country "KZ".
+- Numbers: at least 12 of the science, animals, space, nature, tech, unusual, money and how_it_works facts carry one verified, striking number (a size, speed, count, age, temperature, price) in the text: they feed the "number of the day".
+- country_fact: for EACH of these countries: ${locations.countries.join(', ')}: 3 facts about the country itself, country = its ISO code.
+- city_fact: for EACH of these cities: ${cityList}: 3 facts about the city, country = its ISO code, city = the name exactly as written in the list.
+- watch_read: for EACH of these countries: ${locations.countries.join(', ')}: 3 real, well-known films, series or books that people of that country watch or read in their language (say which: film, series or book, and the title as it is known there), country = its ISO code; plus 2 world-famous ones with country "global". Never invent a title.
+- The facts of the 12 interests, 3 fresh facts for each, category "interest_<key>", each clearly and obviously ABOUT its own theme (not about a neighbouring one):
+${INTEREST_KEYS.map((key) => `  * ${interestCategory(key)}: ${INTEREST_BRIEFS[key]}`).join('\n')} interest_money_business: only facts and explanations of concepts, never advice to buy, sell or invest. interest_sport_health: only facts, never medical advice, treatment or diets.
 Avoid politics, commercial "days of X", self-help and generic wishes. Do not repeat anything from this list of the last ${BANK_FACTS_HISTORY_DAYS} days: ${JSON.stringify(recentFacts)}.
-Never return an empty array. Respond with the JSON array only.`;
+Do NOT take any of these objects as the subject of an item (they were used in the last ${BANK_SUBJECTS_HISTORY_DAYS} days): ${JSON.stringify(recentSubjects)}.
+Never use these worn-out school "amazing facts" at all: ${STOPLIST_TOPICS.map((topic) => topic.name).join('; ')}; and nothing of the same kind (every pupil has read it). Choose objects that are fresh.
+Every category listed above is required with the number of items given (good_news, tradition, every interest_* ...): before answering, count them and search again for any category that is short. Never return an empty array. Respond with the JSON array only.`;
 }
 
 // Markdown links the search tool sometimes leaves in the text: "([site](https://...))" or "[site](https://...)".
@@ -256,7 +399,10 @@ function stripCitations(text) {
 // country filter (isBankItemAllowedForCountry) already reads. "NONE:" items (the model reporting that a
 // required holiday does not exist) are not stored: they are returned in `noneNotes` for the log.
 // An unknown category drops the row with a warning, never silently re-labelled.
-function parseBankItems(rawText, bankDate) {
+// recentSubjects: subjects of the last 60 days (Set of normalized strings or an array): an item about one of
+// them is dropped, and so is an item of the permanent stop list (STOPLIST_TOPICS), whatever the model says.
+function parseBankItems(rawText, bankDate, recentSubjects = []) {
+  const recent = new Set([...recentSubjects].map(normalizeSubject));
   let parsed;
   try {
     parsed = JSON.parse(rawText);
@@ -297,13 +443,37 @@ function parseBankItems(rawText, bankDate) {
     if (seenTexts.has(key)) {
       continue;
     }
+    const subject = typeof item.subject === 'string' ? item.subject.trim().slice(0, 60) : '';
+    // Date-bound and place items are about the day / the city, not "amazing facts": only the facts are checked.
+    const isFact = !DATE_SENSITIVE_CATEGORIES.has(item.category) && !['afisha', 'watch_read', 'country_fact', 'city_fact', 'good_news'].includes(item.category);
+    if (isFact) {
+      const worn = stoplistHit(subject, text);
+      if (worn) {
+        console.warn(`generateDailyBank: dropping worn-out topic "${worn.name}": ${text}`);
+        continue;
+      }
+      if (subject && recent.has(normalizeSubject(subject))) {
+        console.warn(`generateDailyBank: dropping repeated subject "${subject}": ${text}`);
+        continue;
+      }
+    }
     seenTexts.add(key);
     const tag = /^[A-Za-z]{2}$/.test(country) ? country.toUpperCase() : country ? country.toLowerCase() : null;
+    // tags[0] stays the country ("KZ" / "global"); a city adds "city:<name>", an event day adds "date:YYYY-MM-DD".
+    const city = typeof item.city === 'string' ? item.city.trim() : '';
+    const eventDate = typeof item.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.date.trim()) ? item.date.trim() : '';
+    const tags = tag ? [tag] : [];
+    if (city || eventDate) {
+      if (tags.length === 0) tags.push('global');
+      if (city) tags.push(cityTag(city));
+      if (eventDate) tags.push(`date:${eventDate}`);
+    }
     rows.push({
       bank_date: bankDate,
       category: item.category,
       content_text: text,
-      tags: tag ? [tag] : [],
+      tags,
+      subject: subject || null,
     });
   }
   return { rows, noneNotes };
@@ -352,6 +522,17 @@ function logBankSummary(items) {
   }
 }
 
+// One line with the number of rows of every category the run asked for, zero where it got none
+// (grep BANK_CATEGORY_COUNTS; the price of the run is the OPENAI_USAGE scope=daily_bank line).
+function logBankCategoryCounts(rows, bankDate = null) {
+  const counts = new Map();
+  for (const row of rows) counts.set(row.category, (counts.get(row.category) || 0) + 1);
+  const asked = BANK_CATEGORIES.filter((category) => !LEGACY_PLACE_CATEGORIES.includes(category)
+    && (category !== 'afisha' || (bankDate ? isFridayDate(bankDate) : counts.has('afisha'))));
+  console.log(`BANK_CATEGORY_COUNTS total=${rows.length} ${asked.map((category) => `${category}=${counts.get(category) || 0}`).join(' ')}`);
+  return counts;
+}
+
 let bankClientFactory = null;
 
 function createBankClient() {
@@ -384,13 +565,14 @@ function logBankUsage(model, effort, response, seconds) {
  *
  * @returns {Promise<{ savedCount: number, error: string|null, dates?: string[] }>}
  */
-async function generateDailyBank() {
+async function generateDailyBank({ bankDate: forcedBankDate } = {}) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     return { savedCount: 0, error: 'OPENAI_API_KEY is not configured' };
   }
 
-  const bankDate = getBankDateString();
+  // forcedBankDate: for test runs only (a Friday run on another day); the cron never passes it.
+  const bankDate = forcedBankDate || getBankDateString();
   const countryCodes = collectHolidayCountryCodes();
   const model = process.env.BANK_MODEL || BANK_MODEL_DEFAULT;
   const effort = process.env.BANK_REASONING_EFFORT || BANK_EFFORT_DEFAULT;
@@ -401,7 +583,7 @@ async function generateDailyBank() {
     const params = {
       model,
       tools: [{ type: 'web_search' }],
-      input: buildBankPrompt(bankDate, countryCodes),
+      input: buildBankPrompt(bankDate, countryCodes, undefined, undefined, loadRecentSubjects(bankDate)),
     };
     if (/^(gpt-5|gpt-6|o\d)/i.test(model)) {
       params.reasoning = { effort };
@@ -410,7 +592,7 @@ async function generateDailyBank() {
     const response = await client.responses.create(params);
     logBankUsage(model, effort, response, (Date.now() - startedMs) / 1000);
 
-    const { rows, noneNotes } = parseBankItems(response.output_text, bankDate);
+    const { rows, noneNotes } = parseBankItems(response.output_text, bankDate, loadRecentSubjects(bankDate));
     if (rows.length === 0) {
       return { savedCount: 0, error: 'model returned zero usable bank items' };
     }
@@ -422,6 +604,7 @@ async function generateDailyBank() {
       pruneOldBankStatement.run(pruneBefore);
     }
     logBankSummary(rows);
+    logBankCategoryCounts(rows, bankDate);
 
     return { savedCount: rows.length, error: null, dates: [bankDate] };
   } catch (err) {
@@ -525,7 +708,21 @@ function selectBankRowsForDay(deviceLocalDate) {
   if (!bankDate) {
     return { bankDate: null, rows: [] };
   }
-  return { bankDate, rows: selectBankRowsForDateStatement.all(bankDate) };
+  // Holiday, "on this day" and "born today" belong to ONE local date: they are taken only from the bank of exactly
+  // this date (a bank of the nearest day would give a holiday of the wrong day). The facts of the other
+  // categories may come from the nearest bank.
+  const rows = selectBankRowsForDateStatement.all(bankDate)
+    .filter((row) => !DATE_SENSITIVE_CATEGORIES.has(row.category) || row.bank_date === deviceLocalDate);
+  // The weekend events are built on Friday only: on Saturday and Sunday they are read back from the bank of
+  // the last two days, only the ones for exactly this day (a row without a date tag counts for both days).
+  if (isWeekendDate(deviceLocalDate)) {
+    const known = new Set(rows.map((row) => row.id));
+    for (const row of selectAfishaRowsStatement.all(addDaysToDateString(deviceLocalDate, -2), deviceLocalDate)) {
+      const dateTag = parseTags(row.tags).find((tag) => typeof tag === 'string' && tag.startsWith('date:'));
+      if (!known.has(row.id) && (!dateTag || dateTag === `date:${deviceLocalDate}`)) rows.push(row);
+    }
+  }
+  return { bankDate, rows };
 }
 
 // Random-but-varied-by-category selection for one device's batch context.
@@ -682,6 +879,12 @@ module.exports = {
   LEGACY_BANK_CATEGORIES,
   buildBankPrompt,
   collectHolidayCountryCodes,
+  collectActiveLocations,
+  cityTag,
+  loadRecentSubjects,
+  STOPLIST_TOPICS,
+  INTEREST_BRIEFS,
+  DATE_SENSITIVE_CATEGORIES,
   loadRecentBankFacts,
   selectBankRowsForDay,
   resolveDateSensitiveBankDate,
@@ -705,6 +908,7 @@ module.exports = {
     DATE_SENSITIVE_CATEGORIES,
     logMissingRequiredCategories,
     logBankSummary,
+    logBankCategoryCounts,
     resolveDeviceCountryCode,
     preferLocalHolidayRows,
     ALWAYS_INCLUDED_HOLIDAY_COUNTRIES,

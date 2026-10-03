@@ -82,6 +82,7 @@ function wellBehaved({ payload, isRepair }, overrides = {}) {
         bank_id: bankIdFor(payload, slot), echoes: '',
       })),
       word_of_day: 'Fixedword',
+      foreign_word: overrides.repairForeignWord || 'Fixedpalabra',
     };
   }
   return {
@@ -90,6 +91,7 @@ function wellBehaved({ payload, isRepair }, overrides = {}) {
       return { slot_id: slot.slot_id, text, bank_id: bankIdFor(payload, slot), echoes: slot.slot_id === 'n1' ? 'e12' : '' };
     }),
     word_of_day: 'Serendipity',
+    foreign_word: overrides.foreignWord || `Palabra-${payload.date}`,
   };
 }
 
@@ -126,29 +128,42 @@ function get(server, pathName) {
 // ---- fixtures ----
 function addDevice(id, fields = {}) {
   db.prepare(`
-    INSERT OR REPLACE INTO devices (device_id, name, gender, birth_date, timezone, city_name, city_country_code)
-    VALUES (?, ?, ?, ?, 'Asia/Almaty', ?, ?)
-  `).run(id, fields.name || 'Baur', fields.gender || 'male', fields.birth || '1990-02-05', fields.city || null, fields.country || null);
+    INSERT OR REPLACE INTO devices (device_id, name, gender, birth_date, timezone, city_name, city_country_code, interests, learning_language)
+    VALUES (?, ?, ?, ?, 'Asia/Almaty', ?, ?, ?, ?)
+  `).run(id, fields.name || 'Baur', fields.gender || 'male', fields.birth || '1990-02-05', fields.city || null, fields.country || null,
+    fields.interests ? JSON.stringify(fields.interests) : null, fields.learning || null);
 }
 
+const INTEREST_KEYS = require('../src/dayRotation').INTEREST_KEYS;
+
+// rows: [category, text, tag] where tag is one tag or an array of tags (country first, then city:<name> / date:<day>).
 function addBank(rows, date = DATE) {
   const insert = db.prepare('INSERT INTO daily_content_bank (bank_date, category, content_text, tags) VALUES (?, ?, ?, ?)');
   for (const [category, text, tag] of rows) {
-    insert.run(date, category, text, JSON.stringify(tag ? [tag] : []));
+    insert.run(date, category, text, JSON.stringify(Array.isArray(tag) ? tag : tag ? [tag] : []));
   }
 }
 
-function seedFullBank(date = DATE, { kzHoliday = true, globalHoliday = true } = {}) {
+function seedFullBank(date = DATE, { kzHoliday = true, globalHoliday = true, interests = true } = {}) {
   const rows = [];
   if (kzHoliday) rows.push(['holiday', 'Kazakhstan marks a local day.', 'KZ']);
   if (globalHoliday) rows.push(['holiday', 'The UN marks an international day.', 'global']);
   rows.push(['holiday', 'Russia marks its own day.', 'RU']);
   const per = {
     on_this_day: 2, born_today: 2, good_news: 2, science: 3, animals: 3, space: 2, nature: 2, tech: 3, unusual: 3,
-    country_kz: 2, city_astana: 2, money: 2, brain: 2, word_origin: 2, tradition: 2, how_it_works: 2, quote: 2,
+    money: 2, brain: 2, word_origin: 2, tradition: 2, how_it_works: 2, quote: 2,
   };
   for (const [category, n] of Object.entries(per)) {
     for (let i = 1; i <= n; i += 1) rows.push([category, `Bank ${category} fact number ${i}.`, null]);
+  }
+  // places: Kazakhstan / Astana (the main test city) and Germany / Berlin
+  rows.push(['country_fact', 'Kazakhstan country fact one.', 'KZ'], ['country_fact', 'Germany country fact one.', 'DE']);
+  rows.push(['city_fact', 'Astana city fact one.', ['KZ', 'city:astana']], ['city_fact', 'Berlin city fact one.', ['DE', 'city:berlin']]);
+  rows.push(['watch_read', 'Kazakh film Kazakh Film One.', 'KZ'], ['watch_read', 'Famous series World Series One.', 'global']);
+  if (interests) {
+    for (const key of INTEREST_KEYS) {
+      for (let i = 1; i <= 2; i += 1) rows.push([`interest_${key}`, `Interest ${key} fact number ${i}.`, null]);
+    }
   }
   addBank(rows, date);
 }
@@ -183,18 +198,20 @@ async function main() {
     assert.strictEqual(typeAt('m7'), 'word_of_day');
     assert.strictEqual(typeAt('n8'), 'word_recall');
     assert.strictEqual(typeAt('n9'), 'word_answer');
-    // the retired slots are gone, their places hold other existing topics
-    assert(!defs.some((d) => d.type === 'word_languages'), 'no "word in other languages" slot');
-    assert.notStrictEqual(typeAt('m10'), 'word_recall', 'no morning "remember the word" slot');
-    assert.strictEqual(typeAt('m10'), 'unusual_fact');
-    assert.strictEqual(typeAt('n10'), 'nature_fact', 'the nature fact moved from night 9 to night 10');
+    // the foreign language: morning 10 teaches, evening 2 asks, evening 3 answers
+    assert.strictEqual(typeAt('m10'), 'foreign_word');
+    assert.strictEqual(typeAt('e2'), 'foreign_recall');
+    assert.strictEqual(typeAt('e3'), 'foreign_answer');
+    assert.deepStrictEqual(dayPlan.FOREIGN_SLOTS, { teach: 'm10', recall: 'e2', answer: 'e3' });
+    assert.strictEqual(typeAt('n2'), 'interest_fact', 'the interest of the day is night 2');
+    assert.strictEqual(typeAt('n10'), 'nature_fact');
     assert.strictEqual(defs.filter((d) => d.type === 'nature_fact').length, 1);
     // phone data only once, in the morning
     assert.deepStrictEqual(defs.filter((d) => d.type === 'phone_yesterday').map((d) => d.slot_id), ['m8']);
-    // every slot has max_chars 60 except the one-word answers
-    for (const d of defs) assert.strictEqual(d.max_chars, d.type === 'quiz_answer' ? 30 : 60, d.slot_id);
+    // every slot has max_chars 60 except the quiz questions and answers too (the limit is 70, the model aims at 60)
+    for (const d of defs) assert.strictEqual(d.max_chars, 60, d.slot_id);
     // quiz pairs and the word pair are declared
-    assert.deepStrictEqual(dayPlan.QUIZ_PAIRS, [['d4', 'd6'], ['e9', 'e11'], ['n4', 'n6']]);
+    assert.deepStrictEqual(dayPlan.QUIZ_PAIRS, [['d4', 'd5'], ['e9', 'e10'], ['n4', 'n5']]);
     assert.deepStrictEqual(dayPlan.WORD_SLOTS, { teach: 'm7', recall: 'n8', answer: 'n9' });
   }
 
@@ -214,12 +231,30 @@ async function main() {
     const withLocal = dayPlan.buildDaySlots({ holiday: dayPlan.pickHoliday(bank, 'KZ'), hasWeather: true, hasPhone: true });
     const m4 = withLocal.find((s) => s.slot_id === 'm4');
     assert.strictEqual(m4.type, 'holiday');
-    assert.deepStrictEqual(m4.bank_item, { id: 'b3', text: 'kz' });
+    assert.deepStrictEqual(m4.bank_item, { id: 'b3', text: 'kz', category: 'holiday', subject: '' });
     assert.strictEqual(m4.holiday_kind, 'local');
 
     const none = dayPlan.buildDaySlots({ holiday: null, hasWeather: true, hasPhone: true });
     const replaced = none.find((s) => s.slot_id === 'm4');
     assert.strictEqual(none.length, 48, 'the slot stays, with another content');
+    // the fixed type of every one of the 48 positions on a weekday
+    assert.deepStrictEqual(withLocal.map((s) => s.type), [
+      'greeting_name', 'weather_advice', 'horoscope', 'holiday', 'on_this_day', 'numerology', 'word_of_day', 'phone_yesterday',
+      'quote', 'foreign_word', 'lifehack', 'warm_wish',
+      'humor', 'science_fact', 'country_fact', 'quiz_question', 'quiz_answer', 'number_of_day', 'word_origin', 'animal_fact',
+      'tech_fact', 'money_simple', 'brain_psychology', 'thought',
+      'good_news', 'foreign_recall', 'foreign_answer', 'gender_tip', 'space_fact', 'born_today', 'city_fact', 'dinner_idea',
+      'quiz_question', 'quiz_answer', 'how_it_works', 'evening_idea',
+      'humor', 'interest_fact', 'watch_or_read', 'quiz_question', 'quiz_answer', 'tradition', 'poetic_thought', 'word_recall',
+      'word_answer', 'nature_fact', 'tomorrow_task', 'goodnight_care',
+    ], 'weekday order of the 48 topics');
+    assert.deepStrictEqual(withLocal.map((s) => s.slot_id), dayPlan.slotDefinitions().map((d) => d.slot_id));
+    // the same 48 on a weekend that has events: only day 3 and day 12 change, into the poster
+    const weekend = dayPlan.buildDaySlots({ holiday: dayPlan.pickHoliday(bank, 'KZ'), hasWeather: true, hasPhone: true, weekend: true, afishaCount: 3 });
+    assert.deepStrictEqual(
+      weekend.map((s, i) => (s.type === withLocal[i].type ? null : `${s.slot_id}:${s.type}`)).filter(Boolean),
+      ['d3:afisha', 'd12:afisha_evening'], 'weekend order differs from the weekday one in the two poster slots only');
+    assert(weekend.filter((s) => s.afisha).every((s) => s.bank === 'afisha'));
     assert.strictEqual(replaced.type, 'unusual_fact', 'no holiday at all: an interesting fact from the bank instead');
     assert.strictEqual(replaced.bank, 'unusual');
     assert(!replaced.bank_item && replaced.holiday_replaced === true);
@@ -282,7 +317,7 @@ async function main() {
     assert.deepStrictEqual(payload.phone_yesterday, { walking: 'high', phone_unlocks: 'normal', screen_time: 'high' });
     assert.strictEqual(payload.slots.length, 48);
     assert.strictEqual(payload.slots.filter((s) => s.type === 'phone_yesterday').length, 1);
-    assert(payload.slots.every((s) => s.max_chars === 60 || s.max_chars === 30));
+    assert(payload.slots.every((s) => s.max_chars === 60));
     assert(Array.isArray(payload.already_seen) && Array.isArray(payload.learned_words));
     assert(Object.keys(payload).pop() === 'already_seen', 'the per-device already_seen block is last');
     const m4 = payload.slots.find((s) => s.slot_id === 'm4');
@@ -292,9 +327,9 @@ async function main() {
     // the instruction carries the agreed rules
     const system = modelCalls[0].params.messages[0].content;
     for (const needle of [
-      '3–4 callbacks', 'echoes', 'Aim for 40–55 characters', 'has "max_chars" (60; 30 for one-word quiz answers)', 'TODAY', 'tomorrow_task',
+      '3–4 callbacks', 'echoes', 'Aim for 40–55 characters', 'has "max_chars" (60)', 'TODAY', 'tomorrow_task',
       'Never mention the words "list", "bank", "data"', 'Never write that there is no holiday',
-      'on this day was born', 'different topics and different answers', 'at most ONE', 'ONLY from "bank"',
+      'on this day was born', 'different topics and different answers', 'at most ONE', 'ONLY from the "bank_item"',
       'word_recall', 'word_answer',
     ]) {
       assert(system.includes(needle), `instruction must contain: ${needle}`);
@@ -334,7 +369,7 @@ async function main() {
   });
 
   // ================= a failed model call: nothing is made up, nothing is cached =================
-  addDevice('dev-fail');
+  addDevice('dev-fail', { city: 'Astana', country: 'KZ' });
   installModel(() => { const err = new Error('boom'); err.status = 400; throw err; });
   await withServer(async (server) => {
     const { value: res } = await quiet(() => get(server, `/api/v1/day?device_id=dev-fail&timezone=Asia/Almaty&local_date=${DATE}&system_language=en`));
@@ -349,7 +384,7 @@ async function main() {
   });
 
   // ================= no phone data -> no phone slot, no weather -> no weather slot =================
-  addDevice('dev-nophone');
+  addDevice('dev-nophone', { city: 'Astana', country: 'KZ' });
   installModel((ctx) => wellBehaved(ctx));
   await withServer(async (server) => {
     const { value: res } = await quiet(() => get(server, `/api/v1/day?device_id=dev-nophone&timezone=Asia/Almaty&local_date=${DATE}&system_language=en`));
@@ -457,11 +492,11 @@ async function main() {
     assert.strictEqual(modelCalls.length, 2, 'one day call + exactly one repair call');
     assert.strictEqual(modelCalls[1].isRepair, true);
     const repaired = modelCalls[1].payload.slots.map((s) => s.slot_id).sort();
-    assert.deepStrictEqual(repaired, ['d2', 'd4', 'd6', 'e1'], 'the three long phrases, plus the answer paired with d4');
+    assert.deepStrictEqual(repaired, ['d2', 'd4', 'd5', 'e1'], 'the three long phrases, plus the answer paired with d4');
     const ids = day.phrases.map((p) => p.slot_id);
     assert(ids.includes('d2') && ids.includes('e1'), 'shortened phrases are kept');
-    assert(!ids.includes('d4') && !ids.includes('d6'), 'a quiz pair that could not be fixed is dropped together');
-    assert(ids.includes('e9') && ids.includes('e11'), 'other pairs are untouched');
+    assert(!ids.includes('d4') && !ids.includes('d5'), 'a quiz pair that could not be fixed is dropped together');
+    assert(ids.includes('e9') && ids.includes('e10'), 'other pairs are untouched');
     assert(day.phrases.every((p) => p.text.length <= 70));
     assert(logs.some((l) => l.startsWith('OPENAI_USAGE scope=day_repair ')), 'the repair call is logged too');
     assert.strictEqual(day.phrases.find((p) => p.slot_id === 'd2').text, 'Fixed d2');
@@ -469,7 +504,7 @@ async function main() {
 
   // ================= memory kept from /batch: exact repeats, bank facts, shown reports =================
   {
-    addDevice('dev-memory');
+    addDevice('dev-memory', { city: 'Astana', country: 'KZ' });
     // an exact repeat of something already sent to this device is rejected (and repaired); greeting is exempt
     const { recordSentPhrases } = require('../src/sentPhrases');
     recordSentPhrases('dev-memory', [{ text: 'Old joke already sent', slot_type: 'smart_humor_observation' }, { text: 'Hello Baur', slot_type: 'greeting_name' }]);
@@ -534,7 +569,7 @@ async function main() {
     }));
     const slot = modelCalls[0].payload.slots.find((s) => s.slot_id === 'm4');
     assert.strictEqual(slot.type, 'unusual_fact', 'an interesting fact instead of the holiday');
-    assert.strictEqual(slot.bank_item, undefined);
+    assert.strictEqual(slot.bank_item.category, 'unusual', 'the stand-in fact is a fact of the bank, not a holiday');
     assert.strictEqual(day.holiday_kind, 'replaced_by_fact');
     assert(day.phrases.find((p) => p.slot_id === 'm4'), 'the position is still filled');
 
@@ -578,7 +613,7 @@ async function main() {
   // ================= a "NONE:" note is never a holiday =================
   {
     db.prepare('DELETE FROM daily_content_bank').run();
-    addBank([['holiday', 'NONE: No official Kazakhstan holiday falls on that date.', 'KZ'], ['holiday', 'NONE: No UN day.', 'global'], ['science', 'A science fact.', null]], '2026-12-01');
+    addBank([['holiday', 'NONE: No official Kazakhstan holiday falls on that date.', 'KZ'], ['holiday', 'NONE: No UN day.', 'global'], ['science', 'A science fact.', null], ['unusual', 'An unusual fact.', null]], '2026-12-01');
     addDevice('dev-none');
     installModel((ctx) => wellBehaved(ctx));
     await quiet(() => dayPlan.generateDay({
