@@ -5,6 +5,7 @@ const { parseDeviceSignals } = require('../deviceSignals');
 const { resolveWeather, resolveGeolocation, resolveWeatherByCoords } = require('../weather');
 const { selectBankRowsForDay } = require('../dailyContentBank');
 const { generateDay, applyWordPairRule } = require('../dayPlan');
+const { cleanLanguageCode } = require('../dayRotation');
 const { parseYesterdayPhoneData, recordPhoneDay, buildPhoneYesterday } = require('../phoneDay');
 const { _test: batchHelpers } = require('./batch');
 
@@ -15,6 +16,9 @@ const getDeviceStatement = db.prepare('SELECT * FROM devices WHERE device_id = ?
 const insertStubDeviceStatement = db.prepare('INSERT OR IGNORE INTO devices (device_id) VALUES (?)');
 const updateDeviceTimezoneStatement = db.prepare(
   'UPDATE devices SET timezone = ?, updated_at = datetime(\'now\') WHERE device_id = ?'
+);
+const updateDeviceLearningLanguageStatement = db.prepare(
+  'UPDATE devices SET learning_language = ?, updated_at = datetime(\'now\') WHERE device_id = ?'
 );
 const selectDayPlanStatement = db.prepare(`
   SELECT id, phrases, source, trace_json FROM day_plans WHERE device_id = ? AND local_date = ?
@@ -81,11 +85,14 @@ async function resolveDayWeather(device, ip, localDate) {
 }
 
 // GET /api/v1/day?device_id=...&timezone=...&local_date=YYYY-MM-DD&system_language=ru
-//     [&yesterday_steps=N&yesterday_unlocks=N&yesterday_screen_seconds=N]
+//     [&learning_language=en][&yesterday_steps=N&yesterday_unlocks=N&yesterday_screen_seconds=N]
 // Returns the whole day, one model call per device and local date:
-//   { date, source, phrases: [{ slot_id, window, position, type, text, style_id, requires_shown_text? }] }
+//   { date, source, phrases: [{ slot_id, window, position, type, text, style_id, requires_shown_text?,
+//     interest? (interest_fact), learning_language? (foreign_word / foreign_recall / foreign_answer) }] }
+// The phone writes the rubric of a phrase from type (+ interest / learning_language).
 // The same device and date again is answered from day_plans without a model call. The night word recall
-// (night 8 + 9) is left out when the device reports shown phrases and the morning word was not shown.
+// (night 8 + 9) and the foreign-word recall (evening 2 + 3) are left out when the device reports shown
+// phrases and the morning phrase they ask about was not shown.
 router.get('/day', async (req, res, next) => {
   const requestStartMs = Date.now();
   try {
@@ -102,6 +109,14 @@ router.get('/day', async (req, res, next) => {
     if (requestTimezone) {
       updateDeviceTimezoneStatement.run(requestTimezone, deviceId);
       device.timezone = requestTimezone;
+    }
+
+    // The foreign language the user learns: a valid code on the request is stored on the device (like the
+    // timezone); without one the profile's value is used, else the default of the user's language (generateDay).
+    const requestLearningLanguage = cleanLanguageCode(req.query.learning_language, generatorTest.SUPPORTED_LANGUAGES);
+    if (requestLearningLanguage) {
+      updateDeviceLearningLanguageStatement.run(requestLearningLanguage, deviceId);
+      device.learning_language = requestLearningLanguage;
     }
 
     const { dateContext } = resolveLocalDateContext(device.timezone, requestLocalDate);
@@ -156,6 +171,7 @@ router.get('/day', async (req, res, next) => {
       const result = await generateDay({
         device,
         languageCode: generatorTest.resolveTargetLanguageCode(signals),
+        learningLanguage: requestLearningLanguage,
         dateContext: planContext,
         weather,
         countryCode: countryCode ? countryCode.toUpperCase() : null,
@@ -173,6 +189,9 @@ router.get('/day', async (req, res, next) => {
         echoes: result.echoes,
         holiday_kind: result.holiday_kind,
         word: result.word,
+        foreign_word: result.foreign_word,
+        learning_language: result.learning_language,
+        interest: result.interest,
         generation_ms: result.generation_ms,
         weather_country: countryCode || null,
       });

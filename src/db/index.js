@@ -251,6 +251,30 @@ db.exec(`
     PRIMARY KEY (device_id, local_date),
     FOREIGN KEY (device_id) REFERENCES devices(device_id)
   );
+
+  -- device_foreign_words: foreign-language words already taught to a device (morning 10 of the day plan), per
+  -- learning language, so a word is never taught twice.
+  CREATE TABLE IF NOT EXISTS device_foreign_words (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    language TEXT NOT NULL,
+    word_text TEXT NOT NULL,
+    learned_local_date TEXT,
+    learned_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (device_id) REFERENCES devices(device_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_device_foreign_words_device
+    ON device_foreign_words(device_id, language);
+
+  -- device_interest_pointer: the interest of the day (night 2) shown last to a device; the next day takes the
+  -- next interest of the device's circle (src/dayRotation.js).
+  CREATE TABLE IF NOT EXISTS device_interest_pointer (
+    device_id TEXT PRIMARY KEY,
+    last_interest TEXT NOT NULL,
+    last_date TEXT,
+    FOREIGN KEY (device_id) REFERENCES devices(device_id)
+  );
 `);
 
 // One-off migration: devices.name is new as of 2026-09-12. This project has no
@@ -265,6 +289,11 @@ db.exec(`
 const deviceColumnNames = db.prepare('PRAGMA table_info(devices)').all().map((col) => col.name);
 if (!deviceColumnNames.includes('name')) {
   db.exec('ALTER TABLE devices ADD COLUMN name TEXT');
+}
+// devices.learning_language: the foreign language the user learns (ISO 639-1), set by the profile or by
+// GET /day?learning_language=. NULL = the default of the user's language (src/dayRotation.js).
+if (!deviceColumnNames.includes('learning_language')) {
+  db.exec('ALTER TABLE devices ADD COLUMN learning_language TEXT');
 }
 
 const contentBatchColumnNames = db.prepare('PRAGMA table_info(content_batches)').all().map((col) => col.name);
