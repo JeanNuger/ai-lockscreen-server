@@ -62,7 +62,7 @@ async function main() {
     console.log(`ESTIMATED_TOKEN_COST_USD=${cost.toFixed(3)} (tokens only; ${num('searches')} web searches are billed on top)`);
   }
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  const rows = db.prepare('SELECT category, content_text, tags FROM daily_content_bank WHERE bank_date = ? ORDER BY category, id').all(bankDate);
+  const rows = db.prepare('SELECT category, content_text, tags, subject FROM daily_content_bank WHERE bank_date = ? ORDER BY category, id').all(bankDate);
   fs.writeFileSync(path.join(OUT_DIR, `bank_${bankDate}.json`), JSON.stringify(rows.map((r) => ({ ...r, tags: JSON.parse(r.tags) })), null, 2));
   console.log(`rows written to ${path.join(OUT_DIR, `bank_${bankDate}.json`)}`);
 }

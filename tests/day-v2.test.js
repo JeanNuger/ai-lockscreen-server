@@ -156,11 +156,11 @@ async function main() {
     const expectedOrder = {
       morning: ['greeting_name', 'weather_advice', 'horoscope', 'unusual_fact', 'on_this_day', 'numerology', 'word_of_day', 'phone_yesterday',
         'quote', 'foreign_word', 'lifehack', 'warm_wish'],
-      day: ['humor', 'science_fact', 'country_fact', 'quiz_question', 'number_of_day', 'quiz_answer', 'word_origin', 'animal_fact',
+      day: ['humor', 'science_fact', 'country_fact', 'quiz_question', 'quiz_answer', 'number_of_day', 'word_origin', 'animal_fact',
         'tech_fact', 'money_simple', 'brain_psychology', 'thought'],
       evening: ['good_news', 'foreign_recall', 'foreign_answer', 'gender_tip', 'space_fact', 'born_today', 'city_fact', 'dinner_idea',
-        'quiz_question', 'how_it_works', 'quiz_answer', 'evening_idea'],
-      night: ['humor', 'interest_fact', 'watch_or_read', 'quiz_question', 'tradition', 'quiz_answer', 'poetic_thought', 'word_recall',
+        'quiz_question', 'quiz_answer', 'how_it_works', 'evening_idea'],
+      night: ['humor', 'interest_fact', 'watch_or_read', 'quiz_question', 'quiz_answer', 'tradition', 'poetic_thought', 'word_recall',
         'word_answer', 'nature_fact', 'tomorrow_task', 'goodnight_care'],
     };
     for (const window of ['morning', 'day', 'evening', 'night']) {

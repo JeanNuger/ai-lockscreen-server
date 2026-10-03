@@ -296,6 +296,13 @@ if (!deviceColumnNames.includes('learning_language')) {
   db.exec('ALTER TABLE devices ADD COLUMN learning_language TEXT');
 }
 
+// daily_content_bank.subject: the main object of a bank fact ("octopus", "gallium", "Venus"), so the bank
+// prompt can ask the model not to come back to the same objects (task 28).
+const bankColumnNames = db.prepare('PRAGMA table_info(daily_content_bank)').all().map((col) => col.name);
+if (!bankColumnNames.includes('subject')) {
+  db.exec('ALTER TABLE daily_content_bank ADD COLUMN subject TEXT');
+}
+
 const contentBatchColumnNames = db.prepare('PRAGMA table_info(content_batches)').all().map((col) => col.name);
 if (!contentBatchColumnNames.includes('local_date')) {
   db.exec('ALTER TABLE content_batches ADD COLUMN local_date TEXT');

@@ -30,13 +30,32 @@ const REPAIR_TIMEOUT_MS = 30000;
 const DAY_MAX_COMPLETION_TOKENS = 20000;
 // Pairs that always go together: if one half is missing the other is dropped (quiz question +
 // answer; word of the day, see WORD_SLOTS).
-const QUIZ_PAIRS = [['d4', 'd6'], ['e9', 'e11'], ['n4', 'n6']];
+const QUIZ_PAIRS = [['d4', 'd5'], ['e9', 'e10'], ['n4', 'n5']];
 const WORD_SLOTS = { teach: 'm7', recall: 'n8', answer: 'n9' };
 // Teach -> recall -> answer trios: the word of the day (morning 7, night 8 + 9) and the foreign word
 // (morning 10, evening 2 + 3). A recall and its answer stand or fall together and need the taught phrase.
 const FOREIGN_SLOTS = { teach: 'm10', recall: 'e2', answer: 'e3' };
 const WORD_TRIOS = [WORD_SLOTS, FOREIGN_SLOTS];
 const REPAIR_EXEMPT = new Set(['greeting_name', 'goodnight_care']);
+// A quiz question holds the question and 2-3 options, the answer a full phrase with its explanation: up to MAX_LEN.
+const QUIZ_MAX_CHARS = 66; // the limit is 70 (MAX_LEN); the model aims lower, it miscounts options
+// Beginner words that are no "useful intermediate word" (task 28): never taught as the foreign word, in any
+// of the ten languages. Compared lower-cased and trimmed.
+const BASIC_FOREIGN_WORDS = new Set([
+  'hello', 'hi', 'hey', 'bye', 'goodbye', 'yes', 'no', 'please', 'thanks', 'thank you', 'sorry', 'cat', 'dog', 'apple', 'water',
+  'house', 'book', 'friend', 'good', 'bad', 'red', 'blue', 'green', 'one', 'two', 'three', 'mother', 'father', 'love',
+  'bonjour', 'salut', 'merci', 'chat', 'chien', 'pomme', 'eau', 'maison', 'livre', 'ami', 'au revoir', 's\'il vous plait',
+  'hola', 'gracias', 'adios', 'adiós', 'gato', 'perro', 'manzana', 'agua', 'casa', 'libro', 'amigo', 'por favor',
+  'olá', 'ola', 'obrigado', 'obrigada', 'tchau', 'gato', 'cachorro', 'maçã', 'água', 'casa', 'livro', 'amigo',
+  'hallo', 'danke', 'tschüss', 'tschuss', 'katze', 'hund', 'apfel', 'wasser', 'haus', 'buch', 'freund', 'bitte',
+  'ciao', 'grazie', 'arrivederci', 'gatto', 'cane', 'mela', 'acqua', 'casa', 'libro', 'amico', 'prego', 'per favore',
+  'привет', 'пока', 'спасибо', 'да', 'нет', 'кот', 'собака', 'яблоко', 'вода', 'дом', 'книга', 'друг', 'пожалуйста',
+  'こんにちは', 'ありがとう', 'さようなら', '猫', '犬', '水', '本', '안녕하세요', '안녕', '감사합니다', '고양이', '개', '물', '책',
+  '你好', '谢谢', '再见', '猫', '狗', '水', '书', '朋友',
+]);
+
+const QUIZ_Q = 'A quiz question in the user\'s language with 2-3 answer options inside the phrase, at most 66 characters: "Which frog survives winter frozen: tree frog, pond frog or toad?". Built on the fact in "bank_item" (only that fact); the answer comes in the next slot.';
+const QUIZ_A = 'The answer to the previous slot as a full phrase with a short explanation, at most 66 characters: "Answer: tree frog - in spring it thaws and hops on" (in the user\'s language).';
 
 const S = (window, position, type, topic, extra = {}) => ({
   window, position, type, topic, max_chars: DEFAULT_MAX_CHARS, ...extra,
@@ -59,19 +78,19 @@ function slotDefinitions() {
     S('morning', 4, 'holiday', 'Holiday today, from the item given in "bank_item" (use exactly that item).'),
     S('morning', 5, 'on_this_day', '"On this day in <year> ..." from bank category on_this_day.', { bank: 'on_this_day' }),
     S('morning', 6, 'numerology', 'Name the personal day number and its light meaning today.'),
-    S('morning', 7, 'word_of_day', 'Teach a rare but real word of the user\'s language and its meaning, in one phrase (your own choice, not in already_seen / learned_words). Also return it in "word_of_day".'),
+    S('morning', 7, 'word_of_day', 'Teach a modern, useful word of the user\'s language that widens an adult\'s vocabulary, with its meaning, in one phrase: a word people really use today in speech, press and books, not archaic, obsolete, dialect or slang (your own choice, not in already_seen / learned_words). Also return it in "word_of_day".'),
     S('morning', 8, 'phone_yesterday', 'ONE recap of yesterday from the phone block, e.g. "yesterday you walked a lot - repeat it?". No numbers, friendly, not judging; do not say "data".'),
     S('morning', 9, 'quote', 'A short quote with its author, from bank category quote.', { bank: 'quote' }),
-    S('morning', 10, 'foreign_word', 'Teach one common, useful word of the learning language (see "learning_language") with its translation into the user\'s language, e.g. "<word> - <translation>" (your own choice, not in learned_foreign_words). Also return the bare foreign word in "foreign_word".'),
+    S('morning', 10, 'foreign_word', 'Teach one useful word of the learning language (see "learning_language") with its translation into the user\'s language, e.g. "<word> - <translation>": an intermediate (B1-B2) word an adult needs in real life, never a beginner word (no hello, thanks, cat, water, numbers, colours) (your own choice, not in learned_foreign_words). Also return the bare foreign word in "foreign_word".'),
     S('morning', 11, 'lifehack', 'One concrete, slightly surprising, doable trick.'),
     S('morning', 12, 'warm_wish', 'One sincere, specific wish for the day ahead.'),
 
     S('day', 1, 'humor', 'Your own light, clever everyday joke.'),
     S('day', 2, 'science_fact', 'Bank category science.', { bank: 'science' }),
     S('day', 3, 'country_fact', 'A fact about the user\'s country (profile country), bank category country_fact.', { bank: 'country_fact' }),
-    S('day', 4, 'quiz_question', 'A quiz question on a bank fact of category animals or nature. The answer comes in day slot 6.'),
-    S('day', 5, 'number_of_day', 'One surprising number with what it means; from a bank fact that contains a number.', { bank: 'any' }),
-    S('day', 6, 'quiz_answer', 'The answer to day slot 4: one or two words, nothing else.', { max_chars: 30, ref: 'd4' }),
+    S('day', 4, 'quiz_question', QUIZ_Q, { max_chars: QUIZ_MAX_CHARS, quiz: ['animals', 'nature'] }),
+    S('day', 5, 'quiz_answer', QUIZ_A, { max_chars: QUIZ_MAX_CHARS, ref: 'd4' }),
+    S('day', 6, 'number_of_day', 'One surprising number with what it means; from the fact in "bank_item" (it contains a number).', { number: true }),
     S('day', 7, 'word_origin', 'Where a word came from, bank category word_origin.', { bank: 'word_origin' }),
     S('day', 8, 'animal_fact', 'Bank category animals.', { bank: 'animals' }),
     S('day', 9, 'tech_fact', 'Bank category tech.', { bank: 'tech' }),
@@ -82,22 +101,22 @@ function slotDefinitions() {
     S('evening', 1, 'good_news', 'Bank category good_news.', { bank: 'good_news' }),
     S('evening', 2, 'foreign_recall', 'Ask, do not answer: "Do you remember how to say «<the translation of morning slot 10>» in <the learning language>?" in the user\'s language.', { ref: 'm10' }),
     S('evening', 3, 'foreign_answer', 'The answer to evening slot 2: "Right: <the foreign word of morning slot 10>" in the user\'s language.', { ref: 'm10' }),
-    S('evening', 4, 'gender_tip', 'A tip for the user\'s gender (profile gender). No stereotypes, no lecturing.'),
+    S('evening', 4, 'gender_tip', 'A tip that is really about being a man (profile gender male) or a woman (female): a concrete thing about men\'s or women\'s health, body, style, relationships or typical situations. Not a general lifehack, not a repeat of the morning lifehack (morning slot 11). No stereotypes, no lecturing.', { ref: 'm11' }),
     S('evening', 5, 'space_fact', 'Bank category space.', { bank: 'space' }),
     S('evening', 6, 'born_today', 'Start "On this day was born ..." (in the user\'s language) - one person from bank category born_today. Never "today was born".', { bank: 'born_today' }),
     S('evening', 7, 'city_fact', 'A fact about the user\'s city (profile city), bank category city_fact.', { bank: 'city_fact' }),
     S('evening', 8, 'dinner_idea', 'A dinner idea that takes 15 minutes. Concrete dish.'),
-    S('evening', 9, 'quiz_question', 'A quiz question on a bank fact of category tech, space or how_it_works (a different topic and answer from day 4). The answer comes in evening slot 11.'),
-    S('evening', 10, 'how_it_works', 'How something familiar works, bank category how_it_works.', { bank: 'how_it_works' }),
-    S('evening', 11, 'quiz_answer', 'The answer to evening slot 9: one or two words, nothing else.', { max_chars: 30, ref: 'e9' }),
+    S('evening', 9, 'quiz_question', QUIZ_Q, { max_chars: QUIZ_MAX_CHARS, quiz: ['tech', 'space', 'how_it_works'] }),
+    S('evening', 10, 'quiz_answer', QUIZ_A, { max_chars: QUIZ_MAX_CHARS, ref: 'e9' }),
+    S('evening', 11, 'how_it_works', 'How something familiar works, bank category how_it_works.', { bank: 'how_it_works' }),
     S('evening', 12, 'evening_idea', 'An idea of how to spend the evening.'),
 
     S('night', 1, 'humor', 'A calm joke of your own that plays on the evening idea (evening slot 12).', { ref: 'e12' }),
     S('night', 2, 'interest_fact', 'The fact of the day for the user\'s interest, from the item given in "bank_item" (use exactly that item).'),
     S('night', 3, 'watch_or_read', 'What to watch or read: the film, series or book of bank category watch_read, with a few words on why.', { bank: 'watch_read' }),
-    S('night', 4, 'quiz_question', 'A quiz question on a bank fact of category unusual, tradition or word_origin (a different topic and answer from the other quizzes). The answer comes in night slot 6.'),
-    S('night', 5, 'tradition', 'An unusual tradition of another country, bank category tradition.', { bank: 'tradition' }),
-    S('night', 6, 'quiz_answer', 'The answer to night slot 4: one or two words, nothing else.', { max_chars: 30, ref: 'n4' }),
+    S('night', 4, 'quiz_question', QUIZ_Q, { max_chars: QUIZ_MAX_CHARS, quiz: ['unusual', 'tradition', 'word_origin'] }),
+    S('night', 5, 'quiz_answer', QUIZ_A, { max_chars: QUIZ_MAX_CHARS, ref: 'n4' }),
+    S('night', 6, 'tradition', 'An unusual tradition of another country, bank category tradition.', { bank: 'tradition' }),
     S('night', 7, 'poetic_thought', 'A quiet poetic image, gentle, not pompous.'),
     S('night', 8, 'word_recall', 'Ask, do not answer: "Do you remember what “<the word of morning slot 7>” means?" in the user\'s language.', { ref: 'm7' }),
     S('night', 9, 'word_answer', 'The answer to night slot 8: "Right: <word> is <meaning>" in the user\'s language.', { ref: 'm7' }),
@@ -142,6 +161,78 @@ function parseTagsLoose(raw) {
   }
 }
 
+// ---- one fact, one phrase (task 28) ----
+
+// Categories the "number of the day" may take its fact from (a fact with a digit in it): never the date-bound,
+// poster, film, news or interest rows.
+const NUMBER_CATEGORIES = new Set(['science', 'animals', 'space', 'nature', 'tech', 'unusual', 'money', 'brain',
+  'tradition', 'how_it_works', 'word_origin', 'country_fact', 'city_fact']);
+
+function bankItemOf(row) {
+  return { id: `b${row.id}`, text: row.content_text, category: row.category, subject: row.subject || '' };
+}
+
+// The server, not the model, chooses the bank fact of every slot that needs one: strictly from the category of
+// the slot (good news only good_news, poster only afisha, a quiz from its own categories, the number of the
+// day from a fact with a digit - never an interest_* row, those only feed the interest slot), every fact in
+// at most one slot, and no two facts of one subject in a day. A quiz question and its answer share their fact.
+// A slot that finds nothing is dropped (nothing is invented); the answer goes with its question.
+function assignBankItems(slots, rows) {
+  const used = new Set(slots.filter((slot) => slot.bank_item).map((slot) => slot.bank_item.id));
+  const usedSubjects = new Set(slots.filter((slot) => slot.bank_item && slot.bank_item.subject)
+    .map((slot) => String(slot.bank_item.subject).trim().toLowerCase()));
+  const take = (accept) => {
+    const row = rows.find((candidate) => {
+      const id = `b${candidate.id}`;
+      const subject = String(candidate.subject || '').trim().toLowerCase();
+      return !used.has(id) && accept(candidate) && !(subject && usedSubjects.has(subject));
+    });
+    if (!row) return null;
+    used.add(`b${row.id}`);
+    if (row.subject) usedSubjects.add(String(row.subject).trim().toLowerCase());
+    return bankItemOf(row);
+  };
+  const dropped = new Set();
+  const pick = (slot, accept) => {
+    const item = take(accept);
+    if (item) slot.bank_item = item;
+    else dropped.add(slot.slot_id);
+  };
+  // 1. slots with a category of their own, in the order of the day
+  for (const slot of slots) {
+    if (slot.bank && slot.bank !== 'any' && !slot.bank_item) {
+      pick(slot, (row) => row.category === slot.bank);
+    }
+  }
+  // 2. quiz questions take what is left of their categories
+  for (const slot of slots) {
+    if (slot.quiz) {
+      let item = null;
+      for (const category of slot.quiz) {
+        item = take((row) => row.category === category);
+        if (item) break;
+      }
+      if (item) slot.bank_item = item;
+      else dropped.add(slot.slot_id);
+    }
+  }
+  // 3. the number of the day: a fact with a digit that nobody else uses
+  for (const slot of slots) {
+    if (slot.number) {
+      pick(slot, (row) => NUMBER_CATEGORIES.has(row.category) && /\d/.test(row.content_text));
+    }
+  }
+  // 4. an answer shares the fact of its question (and goes when the question goes)
+  for (const slot of slots) {
+    if (slot.type === 'quiz_answer') {
+      const question = slots.find((other) => other.slot_id === slot.ref);
+      if (question && question.bank_item && !dropped.has(question.slot_id)) slot.bank_item = question.bank_item;
+      else dropped.add(slot.slot_id);
+    }
+  }
+  return slots.filter((slot) => !dropped.has(slot.slot_id));
+}
+
 // The slots of one device's day. Drops slots that have nothing to stand on: the weather advice
 // without a forecast, the phone recap without phone data. The holiday slot takes the local holiday,
 // else the international day, else becomes an interesting fact from the bank (type unusual_fact,
@@ -153,9 +244,13 @@ function parseTagsLoose(raw) {
 //  - hasCountryFacts / hasCityFacts / hasWatchRead: false drops the slot that has no bank fact for this user.
 //  - interest: { key, row } fills night 2 with that interest's fact, null drops it.
 //  - learningLanguage: { code, name } names the language of morning 10 and evening 2-3.
+// Task 28 additions:
+//  - rows: the bank rows this user may be offered (see bankRowsForUser); when given, every slot that needs a fact
+//    gets its own "bank_item" (assignBankItems) and is dropped when there is none. Without rows nothing is assigned.
+//  - gender: the profile gender; the tip for men or women (evening 4) needs "male" or "female", else it is dropped.
 function buildDaySlots({
   holiday, hasWeather, hasPhone, weekend = false, afishaCount = 0,
-  hasCountryFacts = true, hasCityFacts = true, hasWatchRead = true, interest, learningLanguage,
+  hasCountryFacts = true, hasCityFacts = true, hasWatchRead = true, interest, learningLanguage, rows, gender,
 }) {
   const slots = [];
   let holidayReplaced = false;
@@ -182,6 +277,7 @@ function buildDaySlots({
       });
       continue;
     }
+    if (def.type === 'gender_tip' && gender !== undefined && gender !== 'male' && gender !== 'female') continue;
     if (def.type === 'country_fact' && !hasCountryFacts) continue;
     if (def.type === 'city_fact' && !hasCityFacts) continue;
     if (def.type === 'watch_or_read' && !hasWatchRead) continue;
@@ -190,7 +286,7 @@ function buildDaySlots({
       slots.push({
         ...def,
         interest: interest.key,
-        bank_item: { id: `b${interest.row.id}`, text: interest.row.content_text },
+        bank_item: bankItemOf(interest.row),
       });
       continue;
     }
@@ -200,7 +296,7 @@ function buildDaySlots({
     }
     if (def.type === 'holiday') {
       if (holiday) {
-        slots.push({ ...def, bank_item: { id: `b${holiday.row.id}`, text: holiday.row.content_text }, holiday_kind: holiday.kind });
+        slots.push({ ...def, bank_item: bankItemOf(holiday.row), holiday_kind: holiday.kind });
       } else {
         holidayReplaced = true;
         slots.push({
@@ -215,8 +311,9 @@ function buildDaySlots({
     }
     slots.push({ ...def });
   }
-  slots.holidayReplaced = holidayReplaced;
-  return slots;
+  const assigned = Array.isArray(rows) ? assignBankItems(slots, rows) : slots;
+  assigned.holidayReplaced = holidayReplaced;
+  return assigned;
 }
 
 // ---- model input ----
@@ -264,21 +361,21 @@ LANGUAGE AND VOICE
 - Jokes, thoughts, wishes, horoscope, tips, ideas are your own; do not translate jokes or quotes literally.
 
 FACTS
-- Facts (science, history, animals, space, holidays, people, traditions, quotes, etc.) come ONLY from "bank" (use the item's meaning; the bank_id field of your answer is the id of the item you used, or "" if the slot is your own). Never invent facts, names, dates or numbers.
-- A bank text is raw material, not text to translate: retell it briefly in your own words, keep the one striking detail. Do not use the same bank item twice in this day.
+- Facts (science, history, animals, space, holidays, people, traditions, quotes, etc.) come ONLY from the "bank_item" of their slot: use exactly that item and return its id in bank_id. A slot without a "bank_item" is your own ("" in bank_id). Never invent facts, names, dates or numbers.
+- A bank text is raw material, not text to translate: retell it briefly in your own words, keep the one striking detail. One item is used by one slot only (a quiz question and its answer share theirs); never repeat a fact, an object or an example in two phrases of this day.
 - The holiday slot comes with its own "bank_item": use exactly that item and return its id. Never write that there is no holiday.
 - Born-today slot: start with "on this day was born ..." in the user's language, never "today was born".
-- Quizzes: the three quizzes of the day have different topics and different answers. The question must be answerable from the bank fact; the answer slot gives just the answer.
-- Word of the day: morning slot "word_of_day" teaches one rare real word of the user's language with its meaning; return the bare word in "word_of_day". Night slot "word_recall" asks "do you remember what «word» means?" and night slot "word_answer" answers "Right: word — meaning" (both in the user's language, naming the same word).
-- Foreign language: "learning_language" is the language the user learns. Morning slot "foreign_word" teaches one common, useful word of it with the translation into the user's language; return the bare foreign word in "foreign_word". Evening slot "foreign_recall" asks "do you remember how to say «translation» in <language>?" (the translation, not the foreign word, and no answer) and evening slot "foreign_answer" answers "Right: foreign word" - both in the user's language, both about the same word. Never a word from "learned_foreign_words".
+- Quizzes: the three quizzes of the day have different topics and different answers, each on the fact of its own "bank_item". The question slot asks with 2-3 answer options inside the phrase (up to 66 characters): "Which frog survives winter frozen: tree frog, pond frog or toad?". The very next slot answers with a full phrase and a short explanation (up to 66 characters): "Answer: tree frog - in spring it thaws and hops on". Write both in the user's language.
+- Word of the day: morning slot "word_of_day" teaches one modern, useful word of the user's language that widens an adult's vocabulary, with its meaning (a word people really use today; never archaic, obsolete, dialect or slang like "паче" or "ибо"); return the bare word in "word_of_day". Night slot "word_recall" asks "do you remember what «word» means?" and night slot "word_answer" answers "Right: word — meaning" (both in the user's language, naming the same word).
+- Foreign language: "learning_language" is the language the user learns. Morning slot "foreign_word" teaches one useful intermediate (B1-B2) word of it, for an adult, with the translation into the user's language: never a beginner word such as hello, thanks, cat, water or a number; return the bare foreign word in "foreign_word". Evening slot "foreign_recall" asks "do you remember how to say «translation» in <language>?" (the translation, not the foreign word, and no answer) and evening slot "foreign_answer" answers "Right: foreign word" - both in the user's language, both about the same word. Never a word from "learned_foreign_words".
 - Interest slot: the item in "bank_item" is the fact of the day for the user's interest ("interest"); retell it, return its id. Money and business: only facts and concepts, never advice to buy, sell, invest or save. Sport and health: only facts, never medical advice, treatment, diets or "see a doctor".
 - Poster slots (weekends only, types "afisha" and "afisha_evening"): choose ONE event of bank category afisha that fits the user's age (profile age: no children's shows for adults, nothing 18+ for minors); name what, where and when; never invent an event; return its id; the two poster slots use different events.
 - Country, city and "what to watch or read" slots use only the bank items given for this user's country and city; a film, series or book keeps its title as people of that country know it, translated or transliterated into the user's language when it has a well-known one.
 - "already_seen" (last 3 days) and "learned_words" are what the user already read and learned: do not repeat those facts, jokes, ideas or words, even in different words.
-- Slots with "ref" refer to an earlier slot of this day; slots with "bank": a category name — pick an item of that category (for "any": any category except holiday and born_today).
+- Slots with "ref" refer to an earlier slot of this day. The tip for men or women (type "gender_tip") is really about being a man or a woman (profile gender), never a general lifehack and never a repeat of the morning lifehack.
 
 LENGTH
-- Every slot has "max_chars" (60; 30 for one-word quiz answers): never exceed it, counting spaces. Aim for 40–55 characters. The absolute limit is ${MAX_LEN}, longer phrases are discarded. Count before answering; if over, drop details, never cut the end of a thought.
+- Every slot has "max_chars" (60; 66 for quiz questions and answers): never exceed it, counting spaces. Aim for 40–55 characters. The absolute limit is ${MAX_LEN}, longer phrases are discarded. Count before answering; if over, drop details, never cut the end of a thought.
 
 OUTPUT
 Only JSON matching the schema: one phrase per slot, in slot order, with slot_id, text, bank_id and echoes; plus "word_of_day" and "foreign_word" ("" when that slot is not in the list).`;
@@ -605,6 +702,23 @@ function assignStyleIds(phrases, rng = Math.random) {
 
 // ---- generation ----
 
+const DATE_BOUND_CATEGORIES = new Set(['holiday', 'on_this_day', 'born_today']);
+
+// The rows behind the "bank_item" of the slots (each once): what the model is shown as its bank.
+function assignedRows(slots, rows) {
+  const byId = new Map(rows.map((row) => [`b${row.id}`, row]));
+  const out = [];
+  const seen = new Set();
+  for (const slot of slots) {
+    const id = slot.bank_item && slot.bank_item.id;
+    if (id && !seen.has(id) && byId.has(id)) {
+      seen.add(id);
+      out.push(byId.get(id));
+    }
+  }
+  return out;
+}
+
 // The old Kazakhstan-only bank categories (rows of the last 45 days) are read as the new ones.
 function normalizeBankRow(row) {
   if (row.category === 'country_kz') return { ...row, category: 'country_fact', tags: ['KZ'] };
@@ -671,7 +785,12 @@ async function generateDay(input) {
   const shownFacts = loadShownFacts(device.device_id);
   // "NONE:" rows are the model's notes that a required day does not exist (parseBankItems never stores them);
   // ignored here too, so that a note can never be shown as a holiday.
-  const allRows = ((input.bank && input.bank.rows) || []).filter((row) => !/^none:/i.test(String(row.content_text || '')));
+  // Holiday, "on this day" and "born today" are only ever for the local date of this day: a row of another
+  // bank date (a holiday of yesterday's or Friday's bank) is dropped here too, whatever the caller passed.
+  const dayDate = dateContext ? dateContext.date : null;
+  const allRows = ((input.bank && input.bank.rows) || [])
+    .filter((row) => !/^none:/i.test(String(row.content_text || '')))
+    .filter((row) => !DATE_BOUND_CATEGORIES.has(row.category) || !row.bank_date || !dayDate || row.bank_date === dayDate);
   const holiday = pickHoliday(allRows, countryCode);
   const notShown = allRows.filter((row) => !isFactShown(shownFacts, row.category, row.content_text));
   const usableRows = notShown.filter((row) => row.category !== 'holiday');
@@ -696,6 +815,8 @@ async function generateDay(input) {
     hasWatchRead: countOf('watch_read') > 0,
     interest,
     learningLanguage: learning,
+    rows: userRows,
+    gender: device.gender || '',
   });
   const slotsById = new Map(slots.map((slot) => [slot.slot_id, slot]));
 
@@ -707,7 +828,7 @@ async function generateDay(input) {
     dateContext,
     weatherBands,
     phoneYesterday,
-    bankRows: userRows.concat(holidayUsable ? [holidayUsable.row] : [], interest ? [interest.row] : []),
+    bankRows: assignedRows(slots, userRows.concat(holidayUsable ? [holidayUsable.row] : [], interest ? [interest.row] : [])),
     slots,
     seenPhrases: loadSeenPhrases(device.device_id),
     learnedWords: loadLearnedWords(device.device_id),
@@ -736,7 +857,15 @@ async function generateDay(input) {
     [WORD_SLOTS.teach]: typeof first.parsed.word_of_day === 'string' ? first.parsed.word_of_day.trim() : '',
     [FOREIGN_SLOTS.teach]: typeof first.parsed.foreign_word === 'string' ? first.parsed.foreign_word.trim() : '',
   };
-  const foreignRepeat = (word) => Boolean(word) && learnedForeignSet.has(rotation.normalizeWord(word));
+  // Why the foreign word cannot be taught: already learned by this device, or a beginner word (task 28).
+  const foreignProblem = (word) => {
+    if (!word) return null;
+    const normalized = rotation.normalizeWord(word);
+    if (BASIC_FOREIGN_WORDS.has(normalized)) return 'foreign_word_basic';
+    return learnedForeignSet.has(normalized) ? 'foreign_word_repeat' : null;
+  };
+  // The fact of a slot is the one the server gave it, whatever id the model wrote.
+  const bankIdOfSlot = (slot) => (slot.bank_item ? slot.bank_item.id : '');
   for (const item of first.parsed.phrases) {
     const slot = item && slotsById.get(item.slot_id);
     if (!slot || answered.has(item.slot_id) || typeof item.text !== 'string') continue;
@@ -744,8 +873,8 @@ async function generateDay(input) {
     const text = item.text.trim();
     let reason = rejectionReason(text, slot, languageCode, archive);
     // A foreign word this device has already learned is never taught again.
-    if (!reason && item.slot_id === FOREIGN_SLOTS.teach && foreignRepeat(words[FOREIGN_SLOTS.teach])) reason = 'foreign_word_repeat';
-    const entry = { text, bank_id: typeof item.bank_id === 'string' ? item.bank_id : '', echoes: typeof item.echoes === 'string' ? item.echoes : '' };
+    if (!reason && item.slot_id === FOREIGN_SLOTS.teach) reason = foreignProblem(words[FOREIGN_SLOTS.teach]);
+    const entry = { text, bank_id: bankIdOfSlot(slot), echoes: typeof item.echoes === 'string' ? item.echoes : '' };
     if (reason) rejected[item.slot_id] = { ...entry, reason };
     else accepted[item.slot_id] = entry;
   }
@@ -770,13 +899,13 @@ async function generateDay(input) {
         const slot = slotsById.get(slotId);
         const text = item.text.trim();
         let reason = rejectionReason(text, slot, languageCode, archive);
-        if (!reason && slotId === FOREIGN_SLOTS.teach && foreignRepeat(words[FOREIGN_SLOTS.teach])) reason = 'foreign_word_repeat';
+        if (!reason && slotId === FOREIGN_SLOTS.teach) reason = foreignProblem(words[FOREIGN_SLOTS.teach]);
         delete accepted[slotId];
         if (reason) {
-          rejected[slotId] = { text, bank_id: item.bank_id || '', echoes: item.echoes || '', reason };
+          rejected[slotId] = { text, bank_id: bankIdOfSlot(slot), echoes: item.echoes || '', reason };
         } else {
           delete rejected[slotId];
-          accepted[slotId] = { text, bank_id: typeof item.bank_id === 'string' ? item.bank_id : '', echoes: typeof item.echoes === 'string' ? item.echoes : '' };
+          accepted[slotId] = { text, bank_id: bankIdOfSlot(slot), echoes: typeof item.echoes === 'string' ? item.echoes : '' };
         }
       }
     } catch (err) {
@@ -916,6 +1045,8 @@ module.exports = {
   WORD_SLOTS,
   FOREIGN_SLOTS,
   slotDefinitions,
+  assignBankItems,
+  BASIC_FOREIGN_WORDS,
   bankRowsForUser,
   buildDaySlots,
   pickHoliday,
