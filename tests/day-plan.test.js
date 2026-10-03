@@ -208,8 +208,8 @@ async function main() {
     assert.strictEqual(defs.filter((d) => d.type === 'nature_fact').length, 1);
     // phone data only once, in the morning
     assert.deepStrictEqual(defs.filter((d) => d.type === 'phone_yesterday').map((d) => d.slot_id), ['m8']);
-    // every slot has max_chars 60 except the quiz questions and answers (a question with its options, a full answer): 66
-    for (const d of defs) assert.strictEqual(d.max_chars, d.type.startsWith('quiz_') ? 66 : 60, d.slot_id);
+    // every slot has max_chars 60 except the quiz questions and answers too (the limit is 70, the model aims at 60)
+    for (const d of defs) assert.strictEqual(d.max_chars, 60, d.slot_id);
     // quiz pairs and the word pair are declared
     assert.deepStrictEqual(dayPlan.QUIZ_PAIRS, [['d4', 'd5'], ['e9', 'e10'], ['n4', 'n5']]);
     assert.deepStrictEqual(dayPlan.WORD_SLOTS, { teach: 'm7', recall: 'n8', answer: 'n9' });
@@ -317,7 +317,7 @@ async function main() {
     assert.deepStrictEqual(payload.phone_yesterday, { walking: 'high', phone_unlocks: 'normal', screen_time: 'high' });
     assert.strictEqual(payload.slots.length, 48);
     assert.strictEqual(payload.slots.filter((s) => s.type === 'phone_yesterday').length, 1);
-    assert(payload.slots.every((s) => s.max_chars === 60 || s.max_chars === 66));
+    assert(payload.slots.every((s) => s.max_chars === 60));
     assert(Array.isArray(payload.already_seen) && Array.isArray(payload.learned_words));
     assert(Object.keys(payload).pop() === 'already_seen', 'the per-device already_seen block is last');
     const m4 = payload.slots.find((s) => s.slot_id === 'm4');
@@ -327,7 +327,7 @@ async function main() {
     // the instruction carries the agreed rules
     const system = modelCalls[0].params.messages[0].content;
     for (const needle of [
-      '3–4 callbacks', 'echoes', 'Aim for 40–55 characters', 'has "max_chars" (60; 66 for quiz questions and answers)', 'TODAY', 'tomorrow_task',
+      '3–4 callbacks', 'echoes', 'Aim for 40–55 characters', 'has "max_chars" (60)', 'TODAY', 'tomorrow_task',
       'Never mention the words "list", "bank", "data"', 'Never write that there is no holiday',
       'on this day was born', 'different topics and different answers', 'at most ONE', 'ONLY from the "bank_item"',
       'word_recall', 'word_answer',

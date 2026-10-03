@@ -276,6 +276,23 @@ const selectRecentSubjectsStatement = db.prepare(`
   LIMIT ?
 `).pluck();
 
+// What each interest is about, in plain words (task 29): the bank prompt asks for facts clearly about this
+// theme, for an ordinary adult. The key is the interest key of the app.
+const INTEREST_BRIEFS = {
+  technology: 'what people use every day: phones, apps, the internet, Wi-Fi, cameras, payments, smart devices, everyday gadgets (not chips, protocols or data-centre details)',
+  science_space: 'discoveries about nature, the human world and the universe that an ordinary person finds wondrous: planets, stars, space missions, how life works',
+  history: 'real stories of people, cities, inventions and events of the past that are fun to retell',
+  nature_animals: 'wild animals, pets, plants, forests, oceans, weather and landscapes, in a way anyone can picture',
+  sport_health: 'sport, athletes, records, training and healthy everyday habits (walking, water, stretching, sleep habits in plain words); NOT brain anatomy, sleep phases or medicine',
+  food: 'dishes, ingredients, drinks, national cuisines, cooking at home, where a food comes from',
+  travel: 'places worth visiting, how people travel, cities, landmarks, trains, planes, hotels, journey customs',
+  money_business: 'how money, prices, shops, famous companies, jobs and everyday economics work, as explained concepts and facts (no financial terms of the trade)',
+  family_kids: 'children, parents, family life, games and learning with kids, funny and useful things about growing up',
+  film_music: 'films, series, actors, directors, songs, singers, composers and instruments that people know',
+  books_art: 'writers, books, poems, painters, museums, famous works of art and the stories behind them',
+  auto: 'cars and whatever people ride or drive: cars, motorbikes, bicycles, scooters, trains, buses, taxis; NOT forklifts, tractors or industrial machines',
+};
+
 // The worn-out "amazing facts" every pupil has read (task 28): never asked for, and dropped when the model
 // brings them anyway. `name` goes into the prompt, `pattern` matches the subject or the text of an item.
 const STOPLIST_TOPICS = [
@@ -352,14 +369,16 @@ DATE-BOUND (all for ${bankDate} exactly):
 - holiday (REQUIRED): (a) a holiday of Kazakhstan on ${bankDate} — professional, national or commemorative (country "KZ"); (b) an international day of the UN or UNESCO on ${bankDate} (country "global"). Keep searching for both (Kazakh sources, UN/UNESCO calendars). If after thorough search one truly does not exist, output an item with category holiday, country "KZ" or "global", and text starting "NONE:" saying so — but search first. Also, for each of these other countries, its own official or widely observed holiday on ${bankDate}, if any (never invent): ${otherCountries.join(', ')}.
 - on_this_day: 6 real events that happened on ${bankDate} in past years, start the text with the year. Different countries; at least one from Kazakhstan or Central Asia and at least one from Europe or Asia; not only the USA.
 - born_today: 6 real people born on ${bankDate}, give the year of birth. Different countries; at least one from Kazakhstan or Central Asia and at least one from Europe or Asia; not only the USA.
-- good_news: 4 genuinely positive, verifiable developments from the last few days.${afishaBlock}
+- good_news: 4 genuinely positive, verifiable stories from the last few days, each a clear human story or result: who did what and what came of it (a person saved, built, won, cured, restored, invented something). Written as the story itself, never as a report about a report ("in messages from ...", "it is noted that ...") and never vague.${afishaBlock}
 FRESH VERIFIED FACTS: little-known and surprising, NOT school-level (no "octopuses have three hearts", no "ice floats", no "Neptune was found by maths" — the kind every pupil knows). Prefer facts a smart adult would say "I didn't know that" about.
+FOR AN ORDINARY ADULT: every fact is understandable without any speciality and is one you would retell to a friend over dinner; plain words, no narrow terminology or engineering detail (not "ECC memory", not "Reed-Solomon codes", not electric forklifts, not brain anatomy).
 - science 6, animals 6, space 5, nature 5, tech 5, unusual 5, money 4 (money explained simply), brain 4 (brain and psychology, well-established findings only), word_origin 4 (where a word came from, say which language), tradition 4 (unusual tradition of one country, name it), how_it_works 4 (how a familiar thing works), quote 4 (a real short quote with its author, at most 12 words besides the author).
 - Numbers: at least 12 of the science, animals, space, nature, tech, unusual, money and how_it_works facts carry one verified, striking number (a size, speed, count, age, temperature, price) in the text: they feed the "number of the day".
 - country_fact: for EACH of these countries: ${locations.countries.join(', ')}: 3 facts about the country itself, country = its ISO code.
 - city_fact: for EACH of these cities: ${cityList}: 3 facts about the city, country = its ISO code, city = the name exactly as written in the list.
 - watch_read: for EACH of these countries: ${locations.countries.join(', ')}: 3 real, well-known films, series or books that people of that country watch or read in their language (say which: film, series or book, and the title as it is known there), country = its ISO code; plus 2 world-famous ones with country "global". Never invent a title.
-- The facts of the 12 interests, 3 fresh facts for each, category "interest_<key>": ${INTEREST_KEYS.map((key) => interestCategory(key)).join(', ')}. interest_money_business: only facts and explanations of concepts, never advice to buy, sell or invest. interest_sport_health: only facts, never medical advice, treatment or diets.
+- The facts of the 12 interests, 3 fresh facts for each, category "interest_<key>", each clearly and obviously ABOUT its own theme (not about a neighbouring one):
+${INTEREST_KEYS.map((key) => `  * ${interestCategory(key)}: ${INTEREST_BRIEFS[key]}`).join('\n')} interest_money_business: only facts and explanations of concepts, never advice to buy, sell or invest. interest_sport_health: only facts, never medical advice, treatment or diets.
 Avoid politics, commercial "days of X", self-help and generic wishes. Do not repeat anything from this list of the last ${BANK_FACTS_HISTORY_DAYS} days: ${JSON.stringify(recentFacts)}.
 Do NOT take any of these objects as the subject of an item (they were used in the last ${BANK_SUBJECTS_HISTORY_DAYS} days): ${JSON.stringify(recentSubjects)}.
 Never use these worn-out school "amazing facts" at all: ${STOPLIST_TOPICS.map((topic) => topic.name).join('; ')}; and nothing of the same kind (every pupil has read it). Choose objects that are fresh.
@@ -864,6 +883,7 @@ module.exports = {
   cityTag,
   loadRecentSubjects,
   STOPLIST_TOPICS,
+  INTEREST_BRIEFS,
   DATE_SENSITIVE_CATEGORIES,
   loadRecentBankFacts,
   selectBankRowsForDay,

@@ -295,6 +295,18 @@ async function main() {
     assert(/gallium melting in a hand/.test(prompt) && /honey that never spoils/.test(prompt) && /day on Venus longer than its year/.test(prompt));
     assert(/wombats/.test(prompt) && /butterflies tasting with their feet/.test(prompt) && /octopus/.test(prompt));
 
+    // task 29: facts for an ordinary adult, interest facts clearly about their theme, good news as a human story
+    assert(/FOR AN ORDINARY ADULT/.test(prompt) && /retell to a friend over dinner/.test(prompt));
+    assert(/not "ECC memory", not "Reed-Solomon codes", not electric forklifts/.test(prompt));
+    assert(/clearly and obviously ABOUT its own theme/.test(prompt));
+    for (const key of rotation.INTEREST_KEYS) assert(prompt.includes(`interest_${key}: ${bank.INTEREST_BRIEFS[key]}`), `a brief for ${key}`);
+    assert(/interest_sport_health: sport, athletes, records, training and healthy everyday habits/.test(prompt) && /NOT brain anatomy, sleep phases or medicine/.test(prompt));
+    assert(/interest_auto: cars and whatever people ride or drive/.test(prompt) && /NOT forklifts, tractors or industrial machines/.test(prompt));
+    assert(/interest_technology: what people use every day/.test(prompt));
+    assert(/each a clear human story or result: who did what and what came of it/.test(prompt));
+    assert(/never as a report about a report \("in messages from/.test(prompt));
+    assert.deepStrictEqual(Object.keys(bank.INTEREST_BRIEFS).sort(), rotation.INTEREST_KEYS.slice().sort(), 'every interest has a brief');
+
     // the whole run: the prompt carries the saved subjects, the new rows are saved with theirs
     const prompts = [];
     process.env.OPENAI_API_KEY = 'test-key';
@@ -324,10 +336,10 @@ async function main() {
       assert.strictEqual(at(q).type, 'quiz_question');
       assert.strictEqual(at(a).type, 'quiz_answer', `${a} answers ${q} at once`);
       assert.strictEqual(at(a).ref, q);
-      assert.strictEqual(at(q).max_chars, 66);
-      assert.strictEqual(at(a).max_chars, 66);
-      assert(/2-3 answer options inside the phrase, at most 66 characters/.test(at(q).topic));
-      assert(/full phrase with a short explanation, at most 66 characters/.test(at(a).topic));
+      assert.strictEqual(at(q).max_chars, 60);
+      assert.strictEqual(at(a).max_chars, 60);
+      assert(/2-3 answer options inside the phrase, at most 60 characters/.test(at(q).topic));
+      assert(/full phrase with a short explanation, at most 60 characters/.test(at(a).topic));
       assert(!/quiz/.test(at(next).type), 'the slot after the pair is a normal topic');
     }
     assert.deepStrictEqual(['d6', 'e11', 'n6'].map((id) => at(id).type), ['number_of_day', 'how_it_works', 'tradition']);
@@ -336,7 +348,7 @@ async function main() {
     installModel();
     await generate(addDevice('q-quiz'), '2026-11-03');
     const system = modelCalls[0].params.messages[0].content;
-    assert(/2-3 answer options inside the phrase \(up to 66 characters\)/.test(system));
+    assert(/2-3 answer options inside the phrase \(up to 60 characters\)/.test(system));
     assert(system.includes('Which frog survives winter frozen: tree frog, pond frog or toad?'));
     assert(system.includes('Answer: tree frog - in spring it thaws and hops on'));
     assert(/very next slot answers with a full phrase and a short explanation/.test(system));

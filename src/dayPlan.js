@@ -38,7 +38,7 @@ const FOREIGN_SLOTS = { teach: 'm10', recall: 'e2', answer: 'e3' };
 const WORD_TRIOS = [WORD_SLOTS, FOREIGN_SLOTS];
 const REPAIR_EXEMPT = new Set(['greeting_name', 'goodnight_care']);
 // A quiz question holds the question and 2-3 options, the answer a full phrase with its explanation: up to MAX_LEN.
-const QUIZ_MAX_CHARS = 66; // the limit is 70 (MAX_LEN); the model aims lower, it miscounts options
+const QUIZ_MAX_CHARS = 60; // the limit is 70 (MAX_LEN); the model aims lower, it miscounts the options
 // Beginner words that are no "useful intermediate word" (task 28): never taught as the foreign word, in any
 // of the ten languages. Compared lower-cased and trimmed.
 const BASIC_FOREIGN_WORDS = new Set([
@@ -54,8 +54,8 @@ const BASIC_FOREIGN_WORDS = new Set([
   '你好', '谢谢', '再见', '猫', '狗', '水', '书', '朋友',
 ]);
 
-const QUIZ_Q = 'A quiz question in the user\'s language with 2-3 answer options inside the phrase, at most 66 characters: "Which frog survives winter frozen: tree frog, pond frog or toad?". Built on the fact in "bank_item" (only that fact); the answer comes in the next slot.';
-const QUIZ_A = 'The answer to the previous slot as a full phrase with a short explanation, at most 66 characters: "Answer: tree frog - in spring it thaws and hops on" (in the user\'s language).';
+const QUIZ_Q = 'A quiz question in the user\'s language with 2-3 answer options inside the phrase, at most 60 characters: "Which frog survives winter frozen: tree frog, pond frog or toad?". Built on the fact in "bank_item" (only that fact); the answer comes in the next slot.';
+const QUIZ_A = 'The answer to the previous slot as a full phrase with a short explanation, at most 60 characters: "Answer: tree frog - in spring it thaws and hops on" (in the user\'s language).';
 
 const S = (window, position, type, topic, extra = {}) => ({
   window, position, type, topic, max_chars: DEFAULT_MAX_CHARS, ...extra,
@@ -365,7 +365,7 @@ FACTS
 - A bank text is raw material, not text to translate: retell it briefly in your own words, keep the one striking detail. One item is used by one slot only (a quiz question and its answer share theirs); never repeat a fact, an object or an example in two phrases of this day.
 - The holiday slot comes with its own "bank_item": use exactly that item and return its id. Never write that there is no holiday.
 - Born-today slot: start with "on this day was born ..." in the user's language, never "today was born".
-- Quizzes: the three quizzes of the day have different topics and different answers, each on the fact of its own "bank_item". The question slot asks with 2-3 answer options inside the phrase (up to 66 characters): "Which frog survives winter frozen: tree frog, pond frog or toad?". The very next slot answers with a full phrase and a short explanation (up to 66 characters): "Answer: tree frog - in spring it thaws and hops on". Write both in the user's language.
+- Quizzes: the three quizzes of the day have different topics and different answers, each on the fact of its own "bank_item". The question slot asks with 2-3 answer options inside the phrase (up to 60 characters): "Which frog survives winter frozen: tree frog, pond frog or toad?". The very next slot answers with a full phrase and a short explanation (up to 60 characters): "Answer: tree frog - in spring it thaws and hops on". Write both in the user's language.
 - Word of the day: morning slot "word_of_day" teaches one modern, useful word of the user's language that widens an adult's vocabulary, with its meaning (a word people really use today; never archaic, obsolete, dialect or slang like "паче" or "ибо"); return the bare word in "word_of_day". Night slot "word_recall" asks "do you remember what «word» means?" and night slot "word_answer" answers "Right: word — meaning" (both in the user's language, naming the same word).
 - Foreign language: "learning_language" is the language the user learns. Morning slot "foreign_word" teaches one useful intermediate (B1-B2) word of it, for an adult, with the translation into the user's language: never a beginner word such as hello, thanks, cat, water or a number; return the bare foreign word in "foreign_word". Evening slot "foreign_recall" asks "do you remember how to say «translation» in <language>?" (the translation, not the foreign word, and no answer) and evening slot "foreign_answer" answers "Right: foreign word" - both in the user's language, both about the same word. Never a word from "learned_foreign_words".
 - Interest slot: the item in "bank_item" is the fact of the day for the user's interest ("interest"); retell it, return its id. Money and business: only facts and concepts, never advice to buy, sell, invest or save. Sport and health: only facts, never medical advice, treatment, diets or "see a doctor".
@@ -375,7 +375,7 @@ FACTS
 - Slots with "ref" refer to an earlier slot of this day. The tip for men or women (type "gender_tip") is really about being a man or a woman (profile gender), never a general lifehack and never a repeat of the morning lifehack.
 
 LENGTH
-- Every slot has "max_chars" (60; 66 for quiz questions and answers): never exceed it, counting spaces. Aim for 40–55 characters. The absolute limit is ${MAX_LEN}, longer phrases are discarded. Count before answering; if over, drop details, never cut the end of a thought.
+- Every slot has "max_chars" (60): never exceed it, counting spaces. Aim for 40–55 characters. The absolute limit is ${MAX_LEN}, longer phrases are discarded. Count before answering; if over, drop details, never cut the end of a thought.
 
 OUTPUT
 Only JSON matching the schema: one phrase per slot, in slot order, with slot_id, text, bank_id and echoes; plus "word_of_day" and "foreign_word" ("" when that slot is not in the list).`;
