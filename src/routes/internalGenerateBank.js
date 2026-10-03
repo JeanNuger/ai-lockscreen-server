@@ -1,5 +1,6 @@
 const express = require('express');
 const { generateDailyBank } = require('../dailyContentBank');
+const { generateAfishaIfFriday } = require('../afishaSearch');
 
 // Cron-triggered endpoint: generates today's shared daily_content_bank rows
 // (see src/dailyContentBank.js). Hit once per day at 19:45 UTC (00:45
@@ -22,8 +23,10 @@ router.post('/internal/generate-daily-bank', async (req, res) => {
   }
 
   const { savedCount, error } = await generateDailyBank();
+  // Fridays only (Asia/Almaty): the weekend events poster, a call of its own.
+  const afisha = await generateAfishaIfFriday();
 
-  res.status(200).json({ savedCount, error });
+  res.status(200).json({ savedCount, error, afisha: afisha.ran ? { savedCount: afisha.savedCount, cities: afisha.cities } : null });
 });
 
 module.exports = router;

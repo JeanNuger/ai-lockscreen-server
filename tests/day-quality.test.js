@@ -165,9 +165,10 @@ async function main() {
     await generate(addDevice('q-poster'), '2026-10-17');
     const poster = modelCalls[modelCalls.length - 1];
     assert.strictEqual(slotOf(poster, 'd3').type, 'afisha');
-    assert.strictEqual(slotOf(poster, 'd3').bank_item.category, 'afisha');
-    assert.strictEqual(slotOf(poster, 'd12').bank_item.category, 'afisha');
-    assert.notStrictEqual(slotOf(poster, 'd3').bank_item.id, slotOf(poster, 'd12').bank_item.id, 'two different events');
+    const early = slotOf(poster, 'd3').candidates.map((c) => c.id);
+    const evening = slotOf(poster, 'd12').candidates.map((c) => c.id);
+    assert(early.length >= 1 && evening.length >= 1 && !early.some((id) => evening.includes(id)), 'two slots, two different events');
+    for (const id of early.concat(evening)) assert(poster.payload.bank.find((r) => r.id === id).category === 'afisha', 'the candidates are poster events');
     assert.notStrictEqual(slotOf(poster, 'e1').bank_item.category, 'afisha', 'an event is never the good news');
   }
 

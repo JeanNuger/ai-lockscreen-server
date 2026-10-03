@@ -351,25 +351,19 @@ function loadRecentBankFacts(bankDate, days = BANK_FACTS_HISTORY_DAYS, limit = B
 
 function buildBankPrompt(bankDate, countryCodes = collectHolidayCountryCodes(), recentFacts = loadRecentBankFacts(bankDate), locations = collectActiveLocations(), recentSubjects = loadRecentSubjects(bankDate)) {
   const otherCountries = countryCodes.filter((code) => code !== 'KZ');
-  // The weekend events are searched on Fridays only (for Saturday and Sunday); the other days do not ask for them.
-  const friday = isFridayDate(bankDate);
-  const askedCategories = BANK_CATEGORIES.filter((category) => !LEGACY_PLACE_CATEGORIES.includes(category) && (friday || category !== 'afisha'));
+  // The weekend events poster is not searched here: on Fridays its own call does it (src/afishaSearch.js).
+  const askedCategories = BANK_CATEGORIES.filter((category) => !LEGACY_PLACE_CATEGORIES.includes(category) && category !== 'afisha');
   const cityList = locations.cities.map((city) => `${city.name} (${city.country})`).join(', ');
-  const saturday = addDaysToDateString(bankDate, 1);
-  const sunday = addDaysToDateString(bankDate, 2);
-  const afishaBlock = friday
-    ? `\n- afisha (REQUIRED today, and only today): for EACH of these cities: ${cityList}: 4 real events happening on ${saturday} (Saturday) or ${sunday} (Sunday): theatre, cinema, concerts, sport, stand-up. Only events you found in a search result with a venue and a date; never invent. Fields: country = the city's ISO code, city = the city name exactly as written in the list, date = the event day YYYY-MM-DD, text = title, venue, date and (if known) the age limit, at most 20 words. If a city has no verifiable events, skip it.`
-    : '';
   return `Search the web (today is ${bankDate}) and build a content bank for ${bankDate} for a phone lock-screen app.
 Return STRICTLY a JSON array (no wrapper, no markdown) of objects: {"category": one of [${askedCategories.join(', ')}], "country": ISO code or "global" or "", "city": city name or "", "date": "YYYY-MM-DD" or "", "subject": "...", "text": "..."}.
 "subject" is the main object of the item in one to three English words (an animal, element, planet, person, place, word, event: "tree frog", "gallium", "Venus", "Abai"); every item has one, no two items of this run share a subject.
-This is a one-shot automated job: never ask questions or propose stages, just do the work and return the final array. Use as many searches as needed to cover every category; never output placeholder or "no data" items. Every "text" is ONE short self-contained sentence in English, at most 12 words${friday ? ' (afisha: see below)' : ''}, with no invented numbers: every number, name and date must be confirmed by a search result. If you cannot verify it, leave it out. Do not put links or citations inside the text.
+This is a one-shot automated job: never ask questions or propose stages, just do the work and return the final array. Use as many searches as needed to cover every category; never output placeholder or "no data" items. Every "text" is ONE short self-contained sentence in English, at most 12 words, with no invented numbers: every number, name and date must be confirmed by a search result. If you cannot verify it, leave it out. Do not put links or citations inside the text.
 
 DATE-BOUND (all for ${bankDate} exactly):
 - holiday (REQUIRED): (a) a holiday of Kazakhstan on ${bankDate} — professional, national or commemorative (country "KZ"); (b) an international day of the UN or UNESCO on ${bankDate} (country "global"). Keep searching for both (Kazakh sources, UN/UNESCO calendars). If after thorough search one truly does not exist, output an item with category holiday, country "KZ" or "global", and text starting "NONE:" saying so — but search first. Also, for each of these other countries, its own official or widely observed holiday on ${bankDate}, if any (never invent): ${otherCountries.join(', ')}.
 - on_this_day: 6 real events that happened on ${bankDate} in past years, start the text with the year. Different countries; at least one from Kazakhstan or Central Asia and at least one from Europe or Asia; not only the USA.
 - born_today: 6 real people born on ${bankDate}, give the year of birth. Different countries; at least one from Kazakhstan or Central Asia and at least one from Europe or Asia; not only the USA.
-- good_news: 4 genuinely positive, verifiable stories from the last few days, each a clear human story or result: who did what and what came of it (a person saved, built, won, cured, restored, invented something). Written as the story itself, never as a report about a report ("in messages from ...", "it is noted that ...") and never vague.${afishaBlock}
+- good_news: 4 genuinely positive, verifiable stories from the last few days, each a clear human story or result: who did what and what came of it (a person saved, built, won, cured, restored, invented something). Written as the story itself, never as a report about a report ("in messages from ...", "it is noted that ...") and never vague.
 FRESH VERIFIED FACTS: little-known and surprising, NOT school-level (no "octopuses have three hearts", no "ice floats", no "Neptune was found by maths" — the kind every pupil knows). Prefer facts a smart adult would say "I didn't know that" about.
 FOR AN ORDINARY ADULT: every fact is understandable without any speciality and is one you would retell to a friend over dinner; plain words, no narrow terminology or engineering detail (not "ECC memory", not "Reed-Solomon codes", not electric forklifts, not brain anatomy).
 - science 6, animals 6, space 5, nature 5, tech 5, unusual 5, money 4 (money explained simply), brain 4 (brain and psychology, well-established findings only), word_origin 4 (where a word came from, say which language), tradition 4 (unusual tradition of one country, name it), how_it_works 4 (how a familiar thing works), quote 4 (a real short quote with its author, at most 12 words besides the author).
@@ -433,6 +427,9 @@ function parseBankItems(rawText, bankDate, recentSubjects = []) {
     if (!BANK_CATEGORIES.includes(item.category)) {
       console.warn(`generateDailyBank: dropping bank item with unknown category "${item.category}"`);
       continue;
+    }
+    if (item.category === 'afisha') {
+      continue; // the poster is made by its own search on Fridays (src/afishaSearch.js)
     }
     const country = typeof item.country === 'string' ? item.country.trim() : '';
     if (/^none:/i.test(text)) {
@@ -528,7 +525,7 @@ function logBankCategoryCounts(rows, bankDate = null) {
   const counts = new Map();
   for (const row of rows) counts.set(row.category, (counts.get(row.category) || 0) + 1);
   const asked = BANK_CATEGORIES.filter((category) => !LEGACY_PLACE_CATEGORIES.includes(category)
-    && (category !== 'afisha' || (bankDate ? isFridayDate(bankDate) : counts.has('afisha'))));
+    && category !== 'afisha');
   console.log(`BANK_CATEGORY_COUNTS total=${rows.length} ${asked.map((category) => `${category}=${counts.get(category) || 0}`).join(' ')}`);
   return counts;
 }
@@ -882,6 +879,8 @@ module.exports = {
   collectActiveLocations,
   cityTag,
   loadRecentSubjects,
+  createBankClient,
+  addDaysToDateString,
   STOPLIST_TOPICS,
   INTEREST_BRIEFS,
   DATE_SENSITIVE_CATEGORIES,
