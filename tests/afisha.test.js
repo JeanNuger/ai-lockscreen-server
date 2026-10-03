@@ -43,7 +43,8 @@ function bankClient(answers, seen = []) {
       create: async (params) => {
         seen.push(params);
         const city = (params.input.match(/events in (\S+) \(country/) || [])[1];
-        const answer = answers[city];
+        const isSport = /REAL sport events/.test(params.input);
+        const answer = isSport ? (answers[`${city}:sport`] || []) : answers[city];
         if (answer instanceof Error) throw answer;
         return {
           output_text: typeof answer === 'string' ? answer : JSON.stringify(answer),
@@ -119,13 +120,14 @@ async function main() {
       Almaty: [ev('Opera night', 'theatre', 'Abai Theatre', SAT, '18:00', 'all'), ev('Stand-up', 'standup', 'Dostyk Hall', SUN, '18:00', 'all')],
     });
     const { value: outcome, lines } = await quiet(() => afisha.generateAfisha({ bankDate: FRI, cities: [astana, almaty] }));
-    assert.strictEqual(seen.length, 2, 'one call per city');
+    assert.strictEqual(seen.length, 4, 'per city: one general call and one short sport call');
     for (const params of seen) {
       assert.strictEqual(params.model, 'gpt-6.1-sol', 'the model of the bank');
       assert.deepStrictEqual(params.tools, [{ type: 'web_search' }], 'with web search');
       assert.deepStrictEqual(params.reasoning, { effort: 'low' });
     }
     assert(seen[0].input.includes('Astana') && !seen[0].input.includes('Almaty'));
+    assert(/REAL sport events/.test(seen[1].input) && seen[1].input.includes('Astana'), 'the sport pass follows the general one, same city');
     assert.strictEqual(outcome.savedCount, 5);
     assert(lines.some((l) => l.startsWith('OPENAI_USAGE scope=afisha city=Astana ') && /prompt_tokens=60000/.test(l) && /searches=3/.test(l)), 'the price line per city');
     assert(lines.some((l) => l.startsWith('OPENAI_USAGE scope=afisha city=Almaty ')));
@@ -148,6 +150,69 @@ async function main() {
     delete process.env.OPENAI_API_KEY;
     assert.strictEqual((await afisha.generateAfisha({ bankDate: FRI, cities: [astana] })).error, 'OPENAI_API_KEY is not configured');
     process.env.OPENAI_API_KEY = 'test-key';
+  }
+
+  // ================= 3b. the second, short pass: sport only =================
+  {
+    const astana = { name: 'Astana', country: 'KZ' };
+    const almaty = { name: 'Almaty', country: 'KZ' };
+    db.prepare("DELETE FROM daily_content_bank WHERE category = 'afisha'").run();
+    process.env.OPENAI_API_KEY = 'test-key';
+    // the prompt: what and where
+    const kzSport = afisha.buildSportPrompt(astana, [SAT, SUN], FRI);
+    for (const needle of ['Ticketon', 'clubs, leagues and stadiums', 'football', 'hockey', 'basketball', 'boxing and martial-arts', 'tournaments and championships', 'runs', SAT, SUN]) {
+      assert(kzSport.includes(needle), `sport prompt: ${needle}`);
+    }
+    assert(/ONLY events people come to WATCH: matches of professional teams \(football, hockey, basketball, volleyball\)/.test(kzSport) && /mass runs/.test(kzSport));
+    assert(/NOT: children's or youth competitions, rank \(razryad\) or qualification tournaments/.test(kzSport));
+    assert(/never invent a match, a team, a venue, a date or a time/i.test(kzSport) && /"kind": "sport"/.test(kzSport));
+    assert(/Find the sites of the clubs, leagues, stadiums and arenas of Berlin yourself/.test(afisha.buildSportPrompt({ name: 'Berlin', country: 'DE' }, [SAT, SUN], FRI)));
+
+    const seen = bankClient({
+      Astana: [ev('Hamlet', 'theatre', 'Opera House', SAT, '19:00', 'all'), ev('Astana - Kairat', 'sport', 'Astana Arena', SUN, '17:00', 'all')],
+      'Astana:sport': [
+        ev('Astana - Kairat', 'sport', 'Astana Arena', SUN, '17:00', 'all'), // already found by the general pass
+        ev('Barys - Avangard', 'hockey', 'Barys Arena', SAT, '18:00', 'all'), // whatever the kind says, it is sport
+        ev('City half marathon', 'concert', 'Esil embankment', SUN, '09:00', 'family'),
+        ev('Wrong day match', 'sport', 'Arena', '2026-10-10', '18:00', 'all'),
+        ev('Qualifying tournament for rank 2', 'sport', 'Hall', SAT, '13:00', 'all'), // not for spectators
+        ev('Спартакиада школьников', 'sport', 'School', SAT, '12:00', 'all'),
+        ev('Open cup', 'sport', 'University', SAT, '', 'kids'), // children's
+        ev('Alliance chess club semifinal', 'sport', 'Chess club', SAT, '15:00', 'all'),
+      ],
+      Almaty: [ev('Opera night', 'theatre', 'Abai Theatre', SAT, '18:00', 'all')],
+      'Almaty:sport': [ev('Kairat - Tobol', 'sport', 'Central Stadium', SAT, '19:00', 'all'), ev('Boxing night', 'sport', 'Sports Palace', SUN, '19:00', '18+')],
+    });
+    const { value: outcome, lines } = await quiet(() => afisha.generateAfisha({ bankDate: FRI, cities: [astana, almaty] }));
+    assert.strictEqual(seen.length, 4);
+    assert.deepStrictEqual(rowsOf().filter((r) => r.tags.includes('city:astana')).map((r) => r.subject).sort(),
+      ['Astana - Kairat', 'Barys - Avangard', 'City half marathon', 'Hamlet'], 'the sport pass adds to the city, the duplicate is stored once, the wrong day is not');
+    const sportRows = rowsOf().filter((r) => r.tags.includes('kind:sport'));
+    assert.deepStrictEqual(sportRows.map((r) => r.subject).sort(), ['Astana - Kairat', 'Barys - Avangard', 'Boxing night', 'City half marathon', 'Kairat - Tobol']);
+    assert(sportRows.every((r) => r.tags[1].startsWith('city:') && r.tags.some((t) => t.startsWith('date:')) && r.tags.some((t) => t.startsWith('age:'))), 'the same fields as every event');
+    assert.deepStrictEqual(sportRows.find((r) => r.subject === 'City half marathon').tags.slice(2), [`date:${SUN}`, 'kind:sport', 'age:family', 'time:09:00', 'pass:sport']);
+    assert.strictEqual(outcome.results[0].sport.savedCount, 2);
+    assert.strictEqual(outcome.savedCount, 2 + 2 + 1 + 2 - 0, 'general + sport events, the duplicate counted once');
+    // the log: its own scope per city
+    assert(lines.some((l) => l.startsWith('OPENAI_USAGE scope=afisha_sport city=Astana ') && /prompt_tokens=60000/.test(l) && /searches=3/.test(l)));
+    assert(lines.some((l) => l.startsWith('OPENAI_USAGE scope=afisha_sport city=Almaty ')));
+    assert(lines.some((l) => l.startsWith('OPENAI_USAGE scope=afisha city=Astana ')), 'the general pass keeps its own scope');
+    assert(lines.some((l) => /^AFISHA_SPORT_COUNTS city=Astana found=3 stored=2 rejected=5/.test(l)));
+
+    // a second run replaces the sport rows of the city only; the other events stay
+    bankClient({ Astana: [ev('Hamlet', 'theatre', 'Opera House', SAT, '19:00', 'all')], 'Astana:sport': [ev('New match', 'sport', 'Arena', SAT, '16:00', 'all')], Almaty: [ev('Opera night', 'theatre', 'Abai Theatre', SAT, '18:00', 'all')], 'Almaty:sport': new Error('boom') });
+    const again = (await quiet(() => afisha.generateAfisha({ bankDate: FRI, cities: [astana, almaty] }))).value;
+    assert.strictEqual(again.results[1].sport.error, 'boom');
+    assert.deepStrictEqual(rowsOf().filter((r) => r.tags.includes('city:astana')).map((r) => r.subject).sort(), ['Hamlet', 'New match']);
+    assert.deepStrictEqual(rowsOf().filter((r) => r.tags.includes('city:almaty')).map((r) => r.subject).sort(), ['Boxing night', 'Kairat - Tobol', 'Opera night'], 'a failed sport pass keeps the sport rows it had');
+    // a city with no sport events is no error
+    bankClient({ Astana: [ev('Hamlet', 'theatre', 'Opera House', SAT, '19:00', 'all')], 'Astana:sport': [] });
+    const none = (await quiet(() => afisha.generateAfisha({ bankDate: FRI, cities: [astana] }))).value;
+    assert.strictEqual(none.results[0].sport.error, null);
+    assert.strictEqual(none.results[0].sport.savedCount, 0);
+    // it is the same Friday run: the cron entry points call generateAfisha (both passes)
+    const cronSource = fs.readFileSync(path.join(__dirname, '../src/afishaSearch.js'), 'utf8');
+    assert(/generateSportForCity\(city, \{ bankDate: date, dates: weekend \}\)/.test(cronSource));
   }
 
   // ================= 4. Fridays only =================

@@ -1,6 +1,7 @@
 // TEST ONLY (task 31): one real run of the weekend poster search against a THROWAWAY database.
 //
-//   node scripts/afisha-test.js [bankDate YYYY-MM-DD] [city:CC ...]
+//   node scripts/afisha-test.js [--sport] [bankDate YYYY-MM-DD] [Name:CC ...]
+//   --sport: only the second, short pass (sport events) instead of both passes
 //
 // Default: the Friday before this weekend, the two days after it, cities Astana:KZ and Almaty:KZ. Prints the
 // OPENAI_USAGE scope=afisha lines, the AFISHA_COUNTS lines, a token price estimate and every event found
@@ -16,15 +17,17 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-lockscreen-afishatest-
 process.env.DATABASE_PATH = path.join(tempDir, 'app.db');
 
 const db = require('../src/db');
-const { generateAfisha, weekendDatesFor } = require('../src/afishaSearch');
+const { generateAfisha, generateSportForCity, weekendDatesFor } = require('../src/afishaSearch');
 
 // gpt-6.1-sol, per 1M tokens (see scripts/daily-test-v3.js); the web-search tool calls are billed separately.
 const PRICE_IN = 2;
 const PRICE_OUT = 10;
 
 async function main() {
-  const bankDate = process.argv[2] || '2026-10-02';
-  const cities = (process.argv.length > 3 ? process.argv.slice(3) : ['Astana:KZ', 'Almaty:KZ'])
+  const args = process.argv.slice(2).filter((a) => a !== '--sport');
+  const sportOnly = process.argv.includes('--sport');
+  const bankDate = args[0] || '2026-10-02';
+  const cities = (args.length > 1 ? args.slice(1) : ['Astana:KZ', 'Almaty:KZ'])
     .map((entry) => ({ name: entry.split(':')[0], country: entry.split(':')[1] }));
   const dates = weekendDatesFor(bankDate);
   console.log(`bank_date=${bankDate} weekend=${dates.join(',')} cities=${cities.map((c) => c.name).join(',')}`);
@@ -32,13 +35,15 @@ async function main() {
   const lines = [];
   const original = console.log;
   console.log = (...args) => { lines.push(args.join(' ')); original(...args); };
-  const outcome = await generateAfisha({ bankDate, dates, cities });
+  const outcome = sportOnly
+    ? { results: await Promise.all(cities.map((city) => generateSportForCity(city, { bankDate, dates }))) }
+    : await generateAfisha({ bankDate, dates, cities });
   console.log = original;
 
   let promptTokens = 0;
   let completionTokens = 0;
   let searches = 0;
-  for (const line of lines.filter((l) => l.startsWith('OPENAI_USAGE scope=afisha '))) {
+  for (const line of lines.filter((l) => l.startsWith('OPENAI_USAGE scope=afisha'))) {
     const num = (name) => Number((line.match(new RegExp(`${name}=(\\d+)`)) || [])[1] || 0);
     promptTokens += num('prompt_tokens');
     completionTokens += num('completion_tokens');
