@@ -428,8 +428,9 @@ async function main() {
     const ids2 = day2.phrases.map((p) => p.slot_id);
     assert(!ids2.includes('n9') && !ids2.includes('n8'), 'the word pair is never half-sent');
     assert(ids2.includes('m7'), 'the taught word stays');
-    assert.strictEqual(modelCalls.filter((c) => c.isRepair).length, 1, 'exactly one repair call');
+    assert.strictEqual(modelCalls.filter((c) => c.isRepair).length, 2, 'still too long after the first repair: exactly one more call, then it goes');
     assert(modelCalls[1].payload.slots.some((s) => s.slot_id === 'n8'), 'the partner of a rejected word phrase is rewritten with it');
+    assert(modelCalls[2].payload.slots.some((s) => s.slot_id === 'n8') && modelCalls[2].payload.slots.some((s) => s.slot_id === 'n9'), 'the second call is for the long phrase and its pair');
 
     // the morning phrase itself is rejected and cannot be fixed: nothing is taught, so no recall and no answer
     addDevice('dev-word3');
